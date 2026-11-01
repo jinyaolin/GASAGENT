@@ -886,6 +886,8 @@
     $domains.value = data.web_allowed_domains;
     const $persona = el('textarea', { rows: 5, placeholder: data.default_persona, style: 'font-family: inherit' });
     $persona.value = data.persona;
+    const $slidesTpl = el('input', { type: 'text', placeholder: '範本簡報的 Drive id 或網址（選填）' });
+    $slidesTpl.value = data.slides_template_id || '';
 
     const $msg = el('div');
     const btnSave = el('button', { class: 'primary', onclick: save }, '儲存');
@@ -893,11 +895,12 @@
 
     $body.append(
       el('div', { class: 'panel' }, [el('h3', {}, 'RBAC：toolset 開關'), $rbac,
-        el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。M2 沒有 D 類工具（刻意不開放任何刪除）。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
+        el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。唯一的 D 類工具是 slides_delete_slide（刪簡報的某一頁），要用請開 slides 的 delete；Gmail / Drive 沒有任何刪除工具。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
       el('div', { class: 'panel' }, [el('h3', {}, 'Agent 設定'), el('div', { class: 'form-grid' }, [
         field('審批策略（X 類工具）', $policy, 'autonomous_only = 只有排程（無人模式）才送審，聊天台直接執行'),
         field('spill_threshold（字元）', $spill, '工具結果超過此長度就溢寫到 Drive「GAS Agent/spill」，context 只留前 1000 字'),
         field('max_tool_steps', $steps, '單輪工具步數上限；另有 4.5 分鐘時間預算與同參數失敗 3 次熔斷'),
+        field('簡報範本（slides_template_id）', $slidesTpl, '在 Drive 準備一份設好主題 / 配色 / 字型的 Google Slides，slides_create_deck 會複製它再填內容；空 = Google 預設白底主題'),
       ])]),
       el('div', { class: 'panel' }, [el('h3', {}, 'web_fetch 域名白名單'), field('一行一個；example.com 只允許該主機，*.example.com 含所有子網域。空白 = 全部拒絕。', $domains)]),
       el('div', { class: 'panel' }, [el('h3', {}, '人格（persona）'), field('system prompt 開頭；留空用預設（灰字）', $persona)]),
@@ -912,7 +915,7 @@
       try {
         await call('adminSaveToolSettings', {
           rbac, approval_policy: $policy.value, spill_threshold: $spill.value, max_tool_steps: $steps.value,
-          web_allowed_domains: $domains.value, persona: $persona.value,
+          web_allowed_domains: $domains.value, persona: $persona.value, slides_template_id: $slidesTpl.value,
         });
         $msg.append(el('span', { class: 'summary ok' }, '已儲存'));
         setTimeout(() => { root.innerHTML = ''; renderTools(root); }, 600);

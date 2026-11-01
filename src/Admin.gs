@@ -397,7 +397,7 @@ function adminSaveAgentSettings(input) {
 /**
  * 工具分頁：registry（每個 toolset 的工具與風險）+ 目前 Config 設定。
  * @return {{toolsets: !Array<!Object>, approval_policy: string, spill_threshold: number, max_tool_steps: number,
- *   web_allowed_domains: string, persona: string, default_persona: string, policies: !Array<string>}}
+ *   web_allowed_domains: string, persona: string, default_persona: string, slides_template_id: string, policies: !Array<string>}}
  */
 function adminGetToolSettings() {
   assertOwner();
@@ -416,6 +416,7 @@ function adminGetToolSettings() {
     web_allowed_domains: config.webAllowedDomains.join('\n'),
     persona: config.persona,
     default_persona: DEFAULT_PERSONA,
+    slides_template_id: config.slidesTemplateId,
     default_perms: DEFAULT_TOOLSET_PERMS,
     policies: APPROVAL_POLICIES.slice(),
   };

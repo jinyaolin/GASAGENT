@@ -62,7 +62,7 @@ function smokeTestTable_() {
     ['agent: 步數上限與時間預算到就停並回報；重複的待審批不再寫第二筆', testRunTurnLimits_, 'pure'],
     ['config: parseToolConfig_ 預設值與 rbac.<toolset> 解析', testToolConfigParse_, 'pure'],
     ['web: 域名白名單（exact / *.wildcard / 空 = 全拒）與 HTML 轉文字', testWebHelpers_, 'pure'],
-    ['docs/slides: 輕量 markdown 解析、deck spec 驗證（>40 頁、未知 type）', testDocsSlidesSpecs_, 'pure'],
+    ['docs/slides: 輕量 markdown 解析、deck spec 驗證（九種版面、table / image 必填、>40 頁）、兩層項目、簡報規則進 prompt、刪頁預設被 RBAC 擋', testDocsSlidesSpecs_, 'pure'],
     // M3
     ['config: parseAgentConfig_ 預設值與夾限', testAgentConfigParse_, 'pure'],
     ['memory: add / replace / remove、容量上限、pinned、唯一命中（memory_manage 經 executor）', testMemoryManage_, 'pure'],
@@ -593,7 +593,7 @@ function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
   assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
   assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob'], 'toolset 順序');
-  assertEqual_(registry.list.filter((t) => t.risk === 'D').length, 0, '不應有 D 類工具（刻意不開放刪除）');
+  assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name), ['slides_delete_slide'], 'D 類只有刪簡報頁（RBAC delete 預設關）');
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_forward', 'gmail_send'], 'X 類只有 share / send / forward');
   registry.list.forEach((t) => {
     validateToolDeclaration_(t);
@@ -967,15 +967,32 @@ function testDocsSlidesSpecs_() {
     { kind: 'paragraph', level: 0, text: '尾段' },
   ], '輕量 markdown 區塊');
   assertEqual_(parseLiteMarkdown_(''), [], '空字串');
-  const specs = validateDeckSpec_([{ type: 'title', title: 'T', subtitle: 'S' }, { type: 'content', title: 'C', body: ['a', 'b'] }, { type: 'two_column', left: 'L', right: ['r'] }, { type: 'quote', quote: 'Q', attribution: 'A' }, { type: 'closing' }]);
-  assertEqual_(specs.length, 5, '5 頁合法');
+  const specs = validateDeckSpec_([{ type: 'title', title: 'T', subtitle: 'S' }, { type: 'content', title: 'C', body: ['a', 'b'] }, { type: 'two_column', left: 'L', right: ['r'] }, { type: 'quote', quote: 'Q', attribution: 'A' }, { type: 'closing' },
+    { type: 'image', title: 'I', image: 'https://example.com/a.png', caption: 'c' }, { type: 'image_full', image: '1abcdefghijklmnop', title: 'Full' }, { type: 'table', title: 'T2', rows: [['a', 'b'], ['1']] }]);
+  assertEqual_(specs.length, 8, '8 頁合法');
   assertEqual_(specs[2].right, ['r'], '陣列保留');
+  assertEqual_(specs[7].rows, [['a', 'b'], ['1', '']], 'table 補齊短列');
   assertThrows_(() => validateDeckSpec_([]), '空 deck');
   assertThrows_(() => validateDeckSpec_(new Array(41).fill({ type: 'content' })), '> 40 頁');
   assertThrows_(() => validateDeckSpec_([{ type: 'poster' }]), '未知 type');
   assertThrows_(() => validateDeckSpec_([{ type: 'quote' }]), 'quote 缺文字');
+  assertThrows_(() => validateDeckSpec_([{ type: 'image', title: 'x' }]), 'image 缺 image');
+  assertThrows_(() => validateDeckSpec_([{ type: 'table', rows: [] }]), 'table 缺 rows');
+  assertThrows_(() => validateDeckSpec_([{ type: 'table', rows: [new Array(121).fill('x')] }]), 'table 超過 120 格');
   assertThrows_(() => validateDeckSpec_(['content']), '非 object');
-  assertEqual_(SLIDE_TYPES.slice(), ['title', 'section', 'content', 'two_column', 'quote', 'closing'], '六種類型');
+  assertEqual_(SLIDE_TYPES.slice(), ['title', 'section', 'content', 'two_column', 'quote', 'image', 'image_full', 'table', 'closing'], '九種類型');
+  // 兩層項目、Drive id 解析、system prompt 簡報規則、刪頁工具預設被 RBAC 擋
+  assertEqual_(splitBulletLevels_(['重點一', '> 子項 a', '>> 第三層', '  > 子項 b', '', '重點二']), { lines: ['重點一', '子項 a', '第三層', '子項 b', '重點二'], levels: [0, 1, 2, 1, 0] }, '> 前綴 = 第二層，最多兩層');
+  assertEqual_(parseDriveId_('https://docs.google.com/presentation/d/1AbC_dEf-GhIjK/edit#slide=id.p'), '1AbC_dEf-GhIjK', '網址取 id');
+  assertEqual_([parseDriveId_('1AbC_dEf-GhIjK'), parseDriveId_(''), parseDriveId_('https://drive.google.com/open?id=1XyZ_abcdefghij')], ['1AbC_dEf-GhIjK', '', '1XyZ_abcdefghij'], '純 id / 空 / open?id=');
+  const slidesReg = buildToolRegistry_(slidesTools_());
+  const prompt = buildSystemPrompt_(fakeToolConfig_({ rbac: { slides: { read: true, write: true, delete: false, external: false } } }), slidesReg, '');
+  assert_(/## 簡報/.test(prompt) && /先用文字回大綱/.test(prompt) && /slides_update_slide/.test(prompt), 'system prompt 含簡報規劃規則');
+  assert_(/slides 的 delete：slides_delete_slide/.test(prompt), '刪頁預設列在未開放');
+  const sink = memorySink_();
+  const del = executeTool_('slides_delete_slide', { presentation_id: 'p', slide_index: 2 }, {}, { registry: slidesReg, config: fakeToolConfig_({ rbac: { slides: { read: true, write: true, delete: false, external: false } } }), sink: sink.sink, spill: memorySpill_().store });
+  assertEqual_(del.status, 'denied', 'delete 關 → 刪頁被拒');
+  assertEqual_(parseToolConfig_({ slides_template_id: 'https://docs.google.com/presentation/d/1TemplateIdXYZ/edit' }).slidesTemplateId, 'https://docs.google.com/presentation/d/1TemplateIdXYZ/edit', 'Config 原樣保存（handler 再 parseDriveId_）');
 }
 
 // ---- M3：memory / session / curation / embed ----------------------------------------------------

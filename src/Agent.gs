@@ -79,6 +79,13 @@ function buildSystemPrompt_(config, registry, extra, contextBlocks) {
       '- 容量滿了先 replace 合併相近條目或 remove 過時條目，再 add。owner 鎖定的條目不要動。',
       '- 被問「之前聊過什麼」時用 session_search 查過去的 session。');
   }
+  if (registry.byName.slides_create_deck) {
+    parts.push('', '## 簡報（slides_create_deck）',
+      '- 先規劃再建檔：想清楚受眾與目的、一句核心訊息、章節結構；互動模式下**先用文字回大綱**（每頁一行：類型 + 標題 + 重點）請使用者確認，確認後才呼叫工具；無人模式直接建。',
+      '- 每頁一個重點，條列 ≤ 5 點、每點 ≤ 15 字；標題寫結論句不寫主題詞。開頭 title、每個章節前放 section、重要數字用 table、有圖用 image / image_full、觀點用 quote、比較用 two_column，避免整份都是 content 條列。',
+      '- 每頁寫 notes（這頁要講什麼、怎麼銜接）；結尾 closing 放下一步或行動呼籲。',
+      '- 修改既有簡報：先 slides_read 看頁碼與內容，改一頁用 slides_update_slide 整頁重寫，調順序用 slides_move_slide，只改字用 slides_replace_text 帶 slide_index。');
+  }
   if (disabled.length) {
     parts.push('', '## 目前未開放（owner 可在管理頁「工具」分頁開啟）', ...disabled.map((d) => `- ${d}`));
   }

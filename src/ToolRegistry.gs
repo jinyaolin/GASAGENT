@@ -234,6 +234,18 @@ function toStringList_(v) {
 }
 
 /**
+ * 從 Drive / Docs / Slides 網址或純 id 取出檔案 id；空值回空字串。
+ * @param {*} v
+ * @return {string}
+ */
+function parseDriveId_(v) {
+  const s = String(v === null || v === undefined ? '' : v).trim();
+  if (!s) return '';
+  const m = /\/d\/([a-zA-Z0-9_-]{10,})/.exec(s) || /[?&]id=([a-zA-Z0-9_-]{10,})/.exec(s);
+  return m ? m[1] : s;
+}
+
+/**
  * regex 特殊字元跳脫。
  * @param {string} s
  * @return {string}

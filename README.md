@@ -189,7 +189,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF OCR) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_export_pdf`(W) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
 | sheets | `sheets_create`(W) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) |
-| slides | `slides_create_deck`(W，一次收整份 deck；類型 title / section / content / two_column / quote / closing，上限 40 頁) `slides_read`(R) `slides_add_slide`(W) `slides_replace_text`(W) |
+| slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) |
@@ -197,7 +197,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 
-M2 沒有任何 D 類工具（刻意不開放刪除）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
+唯一的 D 類工具是 `slides_delete_slide`（刪簡報某一頁；RBAC delete 預設關，要用自己開），Gmail / Drive 沒有任何刪除工具。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
 
 ### 執行流程（`ToolExecutor.gs executeTool_`）
 
@@ -233,6 +233,7 @@ M2 沒有任何 D 類工具（刻意不開放刪除）。`docs_create` / `docs_a
 | max_tool_steps | 單輪工具步數上限 | 25 |
 | web_fetch 域名白名單 | 一行一個。`example.com` 只允許該主機；`*.example.com` 含所有子網域與本身。**空 = 全部拒絕** | 空 |
 | 人格（persona） | system prompt 開頭；留空用程式預設的一段繁中 | 空 |
+| 簡報範本 | `slides_template_id`：一份設好主題 / 配色 / 字型的 Google Slides（id 或網址），`slides_create_deck` 會複製它再填內容 | 空（Google 預設白底） |
 
 `installAgent()`（Doctor「重新安裝」）與開「工具」分頁都會幂等補上缺的預設值。Doctor 多三項：registry 無重名、每個 toolset 都有 RBAC 設定、至少一個 toolset 開 read。
 
@@ -430,6 +431,7 @@ node scripts/local-tests.js
 | 排程到點沒執行 | 排程未啟用、`schedule` 無法解析（Doctor 紅燈）、或 `CRON_NEXT_RUN` 旗標不對（開一次「排程」分頁或「重新安裝」會對齊） |
 | Queue job 標 `failed`、error 寫「running 超過 10 分鐘」 | 該次執行被 GAS 6 分鐘上限中止（通常是某個工具或模型回應太慢）。按「重試」；長任務請靠續跑而非一步到底，或調低 `turn_budget_seconds` |
 | cron 任務的信沒寄出 / 文件沒分享 | 無人模式下 X 類工具依審批策略送審：到「紀錄」批准，agent 會續跑收尾。投遞到 owner 自己的 `email` 不受此限 |
+| agent 做的簡報很素 / 沒有規劃 | 到「工具」分頁填「簡報範本」（先在 Drive 用 Slides 主題庫做一份喜歡的範本）；system prompt 已要求先回大綱確認、每頁一重點、交錯版面並寫講者備忘。要圖就在指令裡給 Drive 圖片或公開網址 |
 | agent 在排程任務裡說「不可建立排程」 | 刻意限制：排程任務執行中 `cronjob_manage` 只能 list，避免遞迴排程 |
 
 ## 里程碑

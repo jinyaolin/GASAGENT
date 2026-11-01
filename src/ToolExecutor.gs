@@ -10,6 +10,7 @@
  * - `max_tool_steps`：單輪工具步數上限（Agent.gs 用）。
  * - `web_allowed_domains`：web_fetch 的域名白名單（一行一個；空 = 全拒）。
  * - `persona`：system prompt 開頭的人格描述。
+ * - `slides_template_id`：slides_create_deck 預設複製的範本簡報（Drive file id 或網址）；空 = Google 預設主題。
  *
  * 全部外部依賴（registry、config、記錄寫入、溢寫儲存）都可由 deps 注入，測試不碰 Drive / Sheet。
  */
@@ -21,6 +22,7 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   MAX_TOOL_STEPS: 'max_tool_steps',
   WEB_ALLOWED_DOMAINS: 'web_allowed_domains',
   PERSONA: 'persona',
+  SLIDES_TEMPLATE_ID: 'slides_template_id',
 });
 
 /** RBAC 設定 key 前綴：rbac.<toolset>。 */
@@ -49,7 +51,7 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  * @typedef {{
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
- *   webAllowedDomains: !Array<string>, persona: string
+ *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string
  * }} ToolConfig
  */
 
@@ -88,6 +90,7 @@ function parseToolConfig_(map) {
     maxToolSteps: clampInt_(map[TOOL_CONFIG_KEYS.MAX_TOOL_STEPS], DEFAULT_MAX_TOOL_STEPS, 1, 200),
     webAllowedDomains: parseAllowedDomains_(map[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS]),
     persona: String(map[TOOL_CONFIG_KEYS.PERSONA] || '').trim(),
+    slidesTemplateId: String(map[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] || '').trim(),
   };
 }
 
@@ -111,6 +114,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.MAX_TOOL_STEPS in map)) missing[TOOL_CONFIG_KEYS.MAX_TOOL_STEPS] = DEFAULT_MAX_TOOL_STEPS;
   if (!(TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS in map)) missing[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = '';
   if (!(TOOL_CONFIG_KEYS.PERSONA in map)) missing[TOOL_CONFIG_KEYS.PERSONA] = '';
+  if (!(TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID in map)) missing[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = '';
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
   if (keys.length) setConfigValues_(missing);
@@ -146,6 +150,7 @@ function saveToolConfig_(input) {
   values[TOOL_CONFIG_KEYS.MAX_TOOL_STEPS] = Math.floor(steps);
   values[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = parseAllowedDomains_(input.web_allowed_domains).join('\n');
   values[TOOL_CONFIG_KEYS.PERSONA] = String(input.persona || '').trim();
+  values[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = parseDriveId_(input.slides_template_id);
   setConfigValues_(values);
   return getToolConfig_();
 }
