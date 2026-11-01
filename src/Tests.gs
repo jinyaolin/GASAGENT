@@ -1798,5 +1798,8 @@ function testDeliverContent_() {
   assertEqual_([unknown.ok, /未知/.test(unknown.error)], [false, true], '未知目標');
   const broken = deliverResult_({ name: 'n', deliver_to: 'email' }, result, Object.assign({}, deps, { sendEmail: () => { throw new Error('quota'); } }));
   assertEqual_([broken.ok, broken.error, broken.summary], [false, 'quota', '投遞失敗：quota'], 'handler 丟錯不 throw');
-  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'email' }, result, { ownerEmail: '', sendEmail: () => {} }).ok, false, '沒有 owner email');
+  // 沒注入 ownerEmail 就退回 OWNER_EMAIL：GAS 上有值會成功、本機 node 沒設定會失敗。
+  const fallback = deliverResult_({ name: 'n', deliver_to: 'email' }, result, { ownerEmail: '', sendEmail: () => {} });
+  assertEqual_([fallback.ok, fallback.ref], [!!getOwnerEmail_(), getOwnerEmail_()], '沒注入 ownerEmail 時退回 OWNER_EMAIL');
+  if (!fallback.ok) assert_(/OWNER_EMAIL 未設定/.test(fallback.error), '未安裝時的錯誤訊息');
 }
