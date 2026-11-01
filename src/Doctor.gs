@@ -1,5 +1,5 @@
 /**
- * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區。
+ * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）。
  *
  * 回傳純 JSON，管理頁 Doctor 分頁以綠 / 紅 / 黃清單顯示。
  * status：'ok' 通過、'fail' 失敗（整體 ok=false）、'warn' 提醒（不影響整體）。
@@ -90,6 +90,28 @@ function runDoctor() {
   try { webAppUrl = ScriptApp.getService().getUrl() || ''; } catch (err) { webAppUrl = ''; }
   push('webapp', 'Web App 已部署', webAppUrl ? 'ok' : 'warn',
     webAppUrl ? `${webAppUrl}\n請確認部署為「以我執行 / 只限我」。` : '尚未部署，或此次不是從 Web App 執行。');
+
+  // 7. Provider（M1）：至少一個啟用的 main provider，且它們的 key 存在
+  if (ss) {
+    try {
+      const mains = providerChain_('main', listProviders_());
+      if (!mains.length) {
+        push('provider_main', '至少一個啟用的 main provider', 'fail', '請到管理頁「模型」新增 provider（role=main）並啟用。');
+        push('provider_main_key', 'main provider 的 API key 已設定', 'fail', '尚無 main provider。');
+      } else {
+        push('provider_main', '至少一個啟用的 main provider', 'ok',
+          `備援鏈：${mains.map((p) => `${p.id}（${p.protocol} / ${p.model}）`).join(' → ')}`);
+        const missing = mains.filter((p) => !getProviderKey_(p.id)).map((p) => p.id);
+        push('provider_main_key', 'main provider 的 API key 已設定',
+          missing.length === mains.length ? 'fail' : missing.length ? 'warn' : 'ok',
+          missing.length ? `缺 key：${missing.join(', ')}（Script Property PROVIDER_KEY_<id>），請到管理頁「模型」填入。` : `${mains.length} 個皆已設定`);
+      }
+    } catch (err) {
+      push('provider_main', '至少一個啟用的 main provider', 'fail', String(err && err.message || err));
+    }
+  } else {
+    push('provider_main', '至少一個啟用的 main provider', 'fail', 'DB 無法開啟。');
+  }
 
   const ok = checks.every((c) => c.status !== 'fail');
   return { ok, version: APP_VERSION, ts: new Date().toISOString(), checks };

@@ -2,7 +2,8 @@
  * @fileoverview 私有 DB spreadsheet：開/建、tab schema、幂等補齊。
  *
  * 資料真相在 Sheet（規格「儲存」段）。CacheService 之後只當熱快取。
- * 本檔只做 schema；各 tab 的 CRUD 在對應里程碑加入。
+ * 本檔做 schema 與以表頭為鍵的通用列讀寫（readTable_ / appendTableRow_ / writeTableRow_）；
+ * 各 tab 的業務邏輯在對應檔案（Providers.gs 等）。
  */
 
 /** DB spreadsheet 檔名。 */
@@ -15,7 +16,8 @@ const DB_NAME = 'GAS Agent DB';
  */
 const DB_SCHEMA = Object.freeze({
   Config: ['key', 'value', 'updated'],
-  Providers: ['id', 'label', 'protocol', 'base_url', 'model', 'role', 'priority', 'enabled', 'extra_headers', 'max_tokens'],
+  Providers: ['id', 'label', 'protocol', 'base_url', 'model', 'role', 'priority', 'enabled', 'extra_headers', 'max_tokens',
+    'extra_body', 'cost_in_per_m', 'cost_out_per_m'],
   Sessions: ['id', 'channel', 'external_id', 'title', 'summary', 'model_override', 'token_est', 'created', 'last_active', 'status'],
   Messages: ['session_id', 'seq', 'role', 'content', 'tokens', 'ts'],
   Memory: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],
@@ -24,7 +26,7 @@ const DB_SCHEMA = Object.freeze({
   Queue: ['id', 'type', 'session_id', 'payload', 'state', 'attempts', 'started', 'finished', 'error'],
   Approvals: ['id', 'job_id', 'tool', 'args', 'reason', 'state', 'decided_at'],
   AuditLog: ['ts', 'session_id', 'tool', 'args_preview', 'result_preview', 'ok', 'ms'],
-  Usage: ['ts', 'provider', 'model', 'prompt_tokens', 'completion_tokens', 'cost_est', 'session_id'],
+  Usage: ['ts', 'provider', 'model', 'prompt_tokens', 'completion_tokens', 'cost_est', 'session_id', 'ms', 'ok'],
 });
 
 /** tab 名稱清單（依 schema 順序）。 */
@@ -176,5 +178,81 @@ function inspectDbSchema_(ss) {
       missingColumns: want.filter((h) => have.indexOf(h) === -1),
       extraColumns: have.filter((h) => want.indexOf(h) === -1),
     };
+  });
+}
+
+// ---- 以表頭為鍵的通用列讀寫 ------------------------------------------------------
+//
+// 每列對應一個 object，key 是第一列表頭；多出的欄位忽略、缺的欄位寫空字串。
+// 回傳的列帶 `_row`（1-based 列號）供 writeTableRow_ / deleteTableRow_ 使用。
+
+/**
+ * 讀整張 tab（不含表頭）。全空白的列會被略過。
+ * @param {string} tab
+ * @return {{headers: !Array<string>, rows: !Array<!Object>}}
+ */
+function readTable_(tab) {
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  const lastRow = sheet.getLastRow();
+  if (!headers.length || lastRow < 2) return { headers, rows: [] };
+  const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const rows = [];
+  values.forEach((vals, i) => {
+    if (!vals.some((v) => v !== '' && v !== null)) return;
+    const row = { _row: i + 2 };
+    headers.forEach((h, c) => { row[h] = vals[c]; });
+    rows.push(row);
+  });
+  return { headers, rows };
+}
+
+/**
+ * 在 tab 末端追加一列。
+ * @param {string} tab
+ * @param {!Object} obj 以表頭為 key
+ * @return {number} 新列的列號
+ */
+function appendTableRow_(tab, obj) {
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  sheet.appendRow(rowValues_(headers, obj));
+  return sheet.getLastRow();
+}
+
+/**
+ * 覆寫指定列（整列依表頭重寫）。
+ * @param {string} tab
+ * @param {number} rowIndex 1-based 列號（≥ 2）
+ * @param {!Object} obj
+ */
+function writeTableRow_(tab, rowIndex, obj) {
+  if (rowIndex < 2) throw new Error('writeTableRow_ 不可覆寫表頭列');
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues_(headers, obj)]);
+}
+
+/**
+ * 刪除指定列。
+ * @param {string} tab
+ * @param {number} rowIndex 1-based 列號（≥ 2）
+ */
+function deleteTableRow_(tab, rowIndex) {
+  if (rowIndex < 2) throw new Error('deleteTableRow_ 不可刪表頭列');
+  getDbSheet_(tab).deleteRow(rowIndex);
+}
+
+/**
+ * @param {!Array<string>} headers
+ * @param {!Object} obj
+ * @return {!Array<*>} 依表頭順序的值；object / array 會 JSON 化，null/undefined 為空字串
+ */
+function rowValues_(headers, obj) {
+  return headers.map((h) => {
+    const v = obj[h];
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object' && !(v instanceof Date)) return JSON.stringify(v);
+    return v;
   });
 }

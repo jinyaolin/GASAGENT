@@ -8,7 +8,7 @@
  */
 
 /** 應用版本，顯示於管理頁與 Doctor。 */
-const APP_VERSION = '0.0.1-m0';
+const APP_VERSION = '0.1.0-m1';
 
 /** Script Properties 鍵名。 */
 const PROP = Object.freeze({
@@ -21,6 +21,7 @@ const PROP = Object.freeze({
    * 讓每分鐘 trigger 在閒置時幾乎不耗 trigger 配額。
    */
   QUEUE_DIRTY: 'QUEUE_DIRTY',
+  /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 
 /**

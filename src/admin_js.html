@@ -2,17 +2,17 @@
 (function () {
   'use strict';
 
-  /** 左側分頁。只有儀表板與 Doctor 在 M0 有內容，其餘標註預計實作的里程碑。 */
+  /** 左側分頁。尚未實作的標註預計里程碑。 */
   const NAV = [
     { id: 'dashboard', label: '儀表板' },
-    { id: 'chat', label: '聊天台', milestone: 'M1' },
-    { id: 'models', label: '模型', milestone: 'M1' },
+    { id: 'chat', label: '聊天台' },
+    { id: 'models', label: '模型' },
     { id: 'tools', label: '工具', milestone: 'M2' },
     { id: 'memory', label: '記憶', milestone: 'M3' },
     { id: 'skills', label: '技能', milestone: 'M5' },
     { id: 'cron', label: '排程', milestone: 'M4' },
     { id: 'logs', label: '紀錄', milestone: 'M4' },
-    { id: 'settings', label: '設定', milestone: 'M1' },
+    { id: 'settings', label: '設定', milestone: 'M3' },
     { id: 'doctor', label: 'Doctor' },
   ];
 
@@ -205,19 +205,332 @@
     runDoctor();
   }
 
+
+  // ---- 模型（Providers）--------------------------------------------------------
+
+  /** 新增表單的預設值範本；選了只是填欄位，仍可改。 */
+  const PROVIDER_PRESETS = [
+    { id: 'zai-glm', label: 'Z.ai GLM（coding plan）', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4', model: 'glm-4.6', max_tokens: 4096, extra_body: '{"thinking": {"type": "disabled"}}' },
+    { id: 'openrouter', label: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', extra_headers: '{"HTTP-Referer": "https://script.google.com", "X-Title": "GAS Agent"}' },
+    { id: 'deepseek', label: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com', model: 'deepseek-chat', max_tokens: 4096 },
+    { id: 'openai', label: 'OpenAI', protocol: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+    { id: 'anthropic', label: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', max_tokens: 4096 },
+    { id: 'gemini', label: 'Google Gemini', protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', max_tokens: 4096 },
+  ];
+
+  const PROVIDER_FIELDS = [
+    { key: 'id', label: 'id', hint: '小寫字母 / 數字 / _ / -；存檔後不可改（key 綁 PROVIDER_KEY_<id>）', required: true },
+    { key: 'label', label: '顯示名稱' },
+    { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini'], required: true },
+    { key: 'base_url', label: 'base_url', hint: 'openai：到 /v1 為止（不含 /chat/completions）；anthropic / gemini：只到網域', required: true },
+    { key: 'model', label: 'model', required: true },
+    { key: 'role', label: '角色', type: 'select', options: ['main', 'fast', 'embed'], required: true },
+    { key: 'priority', label: '優先序', type: 'number', hint: '同角色由小到大組備援鏈', value: 10 },
+    { key: 'max_tokens', label: 'max_tokens', type: 'number', hint: '回覆上限；GAS 單次執行 6 分鐘，建議設' },
+    { key: 'extra_headers', label: 'extra_headers（JSON）', type: 'textarea', hint: '例：{"X-Title": "GAS Agent"}' },
+    { key: 'extra_body', label: 'extra_body（JSON）', type: 'textarea', hint: '合併進請求 body；GLM 建議 {"thinking": {"type": "disabled"}}；值為 null 可移除預設欄位' },
+    { key: 'cost_in_per_m', label: '輸入單價（USD / 百萬 tokens）', type: 'number', step: '0.01' },
+    { key: 'cost_out_per_m', label: '輸出單價（USD / 百萬 tokens）', type: 'number', step: '0.01' },
+  ];
+
+  async function renderModels(root) {
+    root.append(...header('模型', 'Provider 設定存在 DB 的 Providers tab；API key 只進 Script Properties，這裡只顯示末 4 碼。'));
+
+    const $status = el('span', { class: 'hint' });
+    const $table = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+    const $form = el('div', { class: 'panel form-panel', style: 'display:none' });
+    const btnAdd = el('button', { class: 'primary', onclick: () => openForm(null) }, '新增 provider');
+    const btnReload = el('button', { onclick: () => load() }, '重新整理');
+
+    root.append(
+      el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [btnAdd, btnReload, $status]), $table]),
+      $form,
+    );
+
+    let providers = [];
+
+    async function load() {
+      $table.innerHTML = '';
+      $table.append(el('div', { class: 'loading' }, '載入中…'));
+      $status.textContent = '';
+      try {
+        providers = await call('adminListProviders');
+        renderTable();
+      } catch (err) {
+        $table.innerHTML = '';
+        $table.append(errorBox(err));
+      }
+    }
+
+    function renderTable() {
+      $table.innerHTML = '';
+      if (!providers.length) {
+        $table.append(el('div', { class: 'placeholder' }, '尚無 provider。按「新增 provider」，建議先接 Z.ai GLM 當 main，再加一個 Anthropic 或 Gemini 當備援。'));
+        return;
+      }
+      const thead = el('thead', {}, el('tr', {}, ['', 'id', '名稱', '協定', 'model', '角色', '優先', 'key', ''].map((h) => el('th', {}, h))));
+      const tbody = el('tbody');
+      providers
+        .slice()
+        .sort((a, b) => (a.role < b.role ? -1 : a.role > b.role ? 1 : 0) || (a.priority - b.priority) || a.id.localeCompare(b.id))
+        .forEach((p) => {
+          const $result = el('tr', { class: 'row-detail', style: 'display:none' }, el('td', { colspan: 9 }));
+          const btnTest = el('button', { class: 'small', onclick: () => test(p, btnTest, $result) }, '測試連線');
+          const btnToggle = el('button', { class: 'small', onclick: () => toggle(p, btnToggle) }, p.enabled ? '停用' : '啟用');
+          const btnEdit = el('button', { class: 'small', onclick: () => openForm(p) }, '編輯');
+          const btnDelete = el('button', { class: 'small danger', onclick: () => remove(p) }, '刪除');
+          tbody.append(el('tr', { class: p.enabled ? '' : 'disabled-row' }, [
+            el('td', {}, el('span', { class: 'dot ' + (p.enabled ? 'on' : 'off'), title: p.enabled ? '啟用' : '停用' })),
+            el('td', {}, el('code', {}, p.id)),
+            el('td', {}, p.label),
+            el('td', {}, el('span', { class: 'badge' }, p.protocol)),
+            el('td', {}, p.model),
+            el('td', {}, p.role),
+            el('td', {}, String(p.priority)),
+            el('td', {}, p.hasKey ? el('code', {}, p.keyHint) : el('span', { class: 'warn-text' }, '未設定')),
+            el('td', { class: 'actions' }, [btnTest, btnEdit, btnToggle, btnDelete]),
+          ]), $result);
+        });
+      $table.append(el('table', { class: 'table' }, [thead, tbody]));
+    }
+
+    async function test(p, btn, $result) {
+      btn.disabled = true;
+      const td = $result.firstChild;
+      td.innerHTML = '';
+      td.append(el('span', { class: 'loading-inline' }, `測試 ${p.id}…`));
+      $result.style.display = '';
+      try {
+        const r = await call('adminTestProvider', p.id);
+        td.innerHTML = '';
+        if (r.ok) {
+          td.append(
+            el('span', { class: 'summary ok' }, `OK ${r.ms} ms`),
+            el('span', { class: 'meta' }, ` ${r.model} · tokens ${r.usage ? r.usage.prompt + '/' + r.usage.completion : '-'} · 回覆：`),
+            el('code', {}, (r.text || '(空)').slice(0, 200)),
+          );
+        } else {
+          td.append(el('span', { class: 'summary fail' }, `失敗 ${r.ms} ms`), el('div', { class: 'error' }, r.error));
+        }
+      } catch (err) {
+        td.innerHTML = '';
+        td.append(errorBox(err));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function toggle(p, btn) {
+      btn.disabled = true;
+      try {
+        await call('adminSetProviderEnabled', p.id, !p.enabled);
+        await load();
+      } catch (err) {
+        $status.innerHTML = '';
+        $status.append(errorBox(err));
+        btn.disabled = false;
+      }
+    }
+
+    async function remove(p) {
+      if (!confirm(`刪除 provider「${p.id}」？其 API key 也會一併從 Script Properties 移除。`)) return;
+      try {
+        await call('adminDeleteProvider', p.id);
+        await load();
+      } catch (err) {
+        $status.innerHTML = '';
+        $status.append(errorBox(err));
+      }
+    }
+
+    function openForm(p) {
+      const isNew = !p;
+      $form.innerHTML = '';
+      $form.style.display = '';
+      const inputs = {};
+      const $msg = el('div');
+
+      const grid = el('div', { class: 'form-grid' });
+      if (isNew) {
+        const sel = el('select', {
+          onchange: () => {
+            const preset = PROVIDER_PRESETS.find((x) => x.id === sel.value);
+            if (!preset) return;
+            PROVIDER_FIELDS.forEach((f) => { if (preset[f.key] !== undefined) inputs[f.key].value = preset[f.key]; });
+            if (!inputs.id.value) inputs.id.value = preset.id;
+          },
+        }, [el('option', { value: '' }, '— 套用範本（選填）—')].concat(PROVIDER_PRESETS.map((x) => el('option', { value: x.id }, x.label))));
+        grid.append(field('範本', sel, '填好 base_url / model / 建議設定，再自行調整'));
+      }
+
+      PROVIDER_FIELDS.forEach((f) => {
+        let input;
+        if (f.type === 'select') {
+          input = el('select', {}, f.options.map((o) => el('option', { value: o }, o)));
+        } else if (f.type === 'textarea') {
+          input = el('textarea', { rows: 2, spellcheck: 'false' });
+        } else {
+          input = el('input', { type: f.type || 'text', step: f.step || null });
+        }
+        const current = p ? p[f.key] : (f.value !== undefined ? f.value : '');
+        if (current !== undefined && current !== null) {
+          // JSON 欄位：空 object 顯示空白；數字欄位：0 代表未設定，也顯示空白（priority 除外）。
+          if (typeof current === 'object') input.value = Object.keys(current).length ? JSON.stringify(current) : '';
+          else if (f.type === 'number' && f.key !== 'priority' && Number(current) === 0) input.value = '';
+          else input.value = String(current);
+        }
+        if (f.key === 'id' && !isNew) input.disabled = true;
+        inputs[f.key] = input;
+        grid.append(field(f.label + (f.required ? ' *' : ''), input, f.hint));
+      });
+
+      const enabled = el('input', { type: 'checkbox' });
+      enabled.checked = p ? !!p.enabled : true;
+      grid.append(field('啟用', el('label', { class: 'checkbox' }, [enabled, ' 啟用（加入備援鏈）'])));
+
+      const keyInput = el('input', { type: 'password', autocomplete: 'off', placeholder: p && p.hasKey ? `已設定（${p.keyHint}），留空則不變` : '貼上 API key' });
+      const keyRow = el('div', { class: 'key-row' }, [keyInput]);
+      if (p && p.hasKey) {
+        keyRow.append(el('button', { class: 'small danger', onclick: async () => {
+          if (!confirm(`清除「${p.id}」的 API key？`)) return;
+          try { await call('adminClearProviderKey', p.id); await load(); openForm(providers.find((x) => x.id === p.id)); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); }
+        } }, '清除 key'));
+      }
+      grid.append(field('API key', keyRow, '只寫入 Script Properties PROVIDER_KEY_<id>，不存 sheet、不回傳明文'));
+
+      const btnSave = el('button', { class: 'primary', onclick: save }, isNew ? '新增' : '儲存');
+      const btnCancel = el('button', { onclick: () => { $form.style.display = 'none'; $form.innerHTML = ''; } }, '取消');
+
+      $form.append(
+        el('h3', {}, isNew ? '新增 provider' : `編輯 ${p.id}`),
+        grid,
+        el('div', { class: 'toolbar' }, [btnSave, btnCancel]),
+        $msg,
+      );
+      $form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      async function save() {
+        const payload = {};
+        PROVIDER_FIELDS.forEach((f) => { payload[f.key] = inputs[f.key].value.trim(); });
+        payload.enabled = enabled.checked;
+        payload.apiKey = keyInput.value;
+        btnSave.disabled = true;
+        $msg.innerHTML = '';
+        try {
+          await call('adminSaveProvider', payload);
+          keyInput.value = '';
+          $form.style.display = 'none';
+          $form.innerHTML = '';
+          await load();
+        } catch (err) {
+          $msg.append(errorBox(err));
+          btnSave.disabled = false;
+        }
+      }
+    }
+
+    function field(label, control, hint) {
+      return el('label', { class: 'field' }, [
+        el('span', { class: 'field-label' }, label),
+        control,
+        hint ? el('span', { class: 'field-hint' }, hint) : null,
+      ]);
+    }
+
+    load();
+  }
+
+  // ---- 聊天台 ------------------------------------------------------------------
+
+  async function renderChat(root) {
+    root.append(...header('聊天台', 'M1：單輪對話，沒有工具、不保存 session；每則訊息各自獨立送出。'));
+
+    const $provider = el('select', { title: '選擇 provider' }, el('option', { value: '' }, '自動（main 備援鏈）'));
+    const $system = el('textarea', { rows: 2, placeholder: 'system prompt（選填）' });
+    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出' });
+    const $log = el('div', { class: 'chat-log' });
+    const btnSend = el('button', { class: 'primary', onclick: send }, '送出');
+    const btnClear = el('button', { onclick: () => { $log.innerHTML = ''; } }, '清空畫面');
+
+    $input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); send(); }
+    });
+
+    root.append(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'toolbar' }, [el('span', { class: 'field-label' }, 'provider'), $provider, btnClear]),
+        el('details', { class: 'system-box' }, [el('summary', {}, 'system prompt'), $system]),
+        $log,
+        el('div', { class: 'chat-input' }, [$input, btnSend]),
+      ]),
+    );
+
+    try {
+      const providers = await call('adminListProviders');
+      providers
+        .filter((p) => p.enabled && p.role !== 'embed')
+        .sort((a, b) => (a.role < b.role ? -1 : 1) || (a.priority - b.priority))
+        .forEach((p) => $provider.append(el('option', { value: p.id }, `${p.label || p.id}（${p.role} · ${p.protocol} · ${p.model}）${p.hasKey ? '' : ' — 無 key'}`)));
+      if (!providers.some((p) => p.enabled && p.role === 'main')) {
+        $log.append(el('div', { class: 'placeholder' }, '還沒有啟用的 main provider，請先到「模型」分頁新增。'));
+      }
+    } catch (err) {
+      $log.append(errorBox(err));
+    }
+
+    async function send() {
+      const message = $input.value.trim();
+      if (!message) return;
+      btnSend.disabled = true;
+      $input.disabled = true;
+      $log.append(bubble('user', message));
+      const $pending = bubble('assistant', '…', null, true);
+      $log.append($pending);
+      $pending.scrollIntoView({ block: 'end' });
+      const t0 = Date.now();
+      try {
+        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value });
+        const meta = [
+          `${r.provider} · ${r.model}`,
+          `tokens ${r.usage.prompt} + ${r.usage.completion}`,
+          `${r.ms} ms（含往返 ${Date.now() - t0} ms）`,
+          r.costEst ? `≈ $${r.costEst}` : null,
+          r.stop !== 'end' ? `stop=${r.stop}` : null,
+        ].filter(Boolean).join(' · ');
+        const fallbacks = (r.fallbacks || []).map((f) => `備援：${f.error}`).join('\n');
+        $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : '')));
+        $input.value = '';
+      } catch (err) {
+        $pending.replaceWith(el('div', { class: 'bubble assistant' }, errorBox(err)));
+      } finally {
+        btnSend.disabled = false;
+        $input.disabled = false;
+        $input.focus();
+        $log.lastChild.scrollIntoView({ block: 'end' });
+      }
+    }
+
+    function bubble(role, text, meta, pending) {
+      return el('div', { class: `bubble ${role}${pending ? ' pending' : ''}` }, [
+        el('div', { class: 'bubble-text' }, text),
+        meta ? el('div', { class: 'meta' }, meta) : null,
+      ]);
+    }
+  }
+
   // ---- 尚未實作的分頁 ----------------------------------------------------------
 
   function renderPlaceholder(item) {
     return (root) => {
       root.append(...header(item.label));
       root.append(el('div', { class: 'placeholder' },
-        `「${item.label}」分頁預計在 ${item.milestone} 實作。M0 只有骨架：儀表板與 Doctor。`));
+        `「${item.label}」分頁預計在 ${item.milestone} 實作。`));
     };
   }
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {
