@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <base target="_top">
+  <?!= include_('admin_css') ?>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-name">GAS Agent</span>
+        <span class="brand-version" id="brand-version"></span>
+      </div>
+      <nav class="nav" id="nav" aria-label="主選單"></nav>
+      <div class="sidebar-footer">
+        <div class="owner" id="owner-email" title="目前登入的 owner"></div>
+      </div>
+    </aside>
+    <main class="main" id="main">
+      <div class="loading">載入中…</div>
+    </main>
+  </div>
+  <script>window.BOOTSTRAP = <?!= bootstrap ?>;</script>
+  <?!= include_('admin_js') ?>
+</body>
+</html>

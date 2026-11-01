@@ -1,0 +1,5 @@
+# clasp 綁定檔（含 scriptId）；另有 .clasp.json.example 可複製
+.clasp.json
+.clasprc.json
+.DS_Store
+node_modules/

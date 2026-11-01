@@ -1,0 +1,248 @@
+<script>
+(function () {
+  'use strict';
+
+  /** 左側分頁。只有儀表板與 Doctor 在 M0 有內容，其餘標註預計實作的里程碑。 */
+  const NAV = [
+    { id: 'dashboard', label: '儀表板' },
+    { id: 'chat', label: '聊天台', milestone: 'M1' },
+    { id: 'models', label: '模型', milestone: 'M1' },
+    { id: 'tools', label: '工具', milestone: 'M2' },
+    { id: 'memory', label: '記憶', milestone: 'M3' },
+    { id: 'skills', label: '技能', milestone: 'M5' },
+    { id: 'cron', label: '排程', milestone: 'M4' },
+    { id: 'logs', label: '紀錄', milestone: 'M4' },
+    { id: 'settings', label: '設定', milestone: 'M1' },
+    { id: 'doctor', label: 'Doctor' },
+  ];
+
+  const bootstrap = window.BOOTSTRAP || {};
+  const $main = document.getElementById('main');
+  const $nav = document.getElementById('nav');
+
+  /**
+   * 包 google.script.run 成 Promise。
+   * @param {string} fn 後端函式名
+   * @param {...*} args
+   * @return {Promise<*>}
+   */
+  function call(fn, ...args) {
+    return new Promise((resolve, reject) => {
+      if (!window.google || !google.script || !google.script.run) {
+        reject(new Error('google.script.run 不可用（此頁需由 Apps Script Web App 提供）'));
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler((err) => reject(err instanceof Error ? err : new Error(String(err && err.message || err))))
+        [fn](...args);
+    });
+  }
+
+
+  /**
+   * @param {string} tag
+   * @param {Object=} attrs
+   * @param {(string|Node|Array)=} children
+   * @return {HTMLElement}
+   */
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    Object.entries(attrs || {}).forEach(([k, v]) => {
+      if (k === 'class') node.className = v;
+      else if (k === 'html') node.innerHTML = v;
+      else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
+      else if (v != null) node.setAttribute(k, v);
+    });
+    [].concat(children || []).forEach((c) => {
+      if (c == null) return;
+      node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return node;
+  }
+
+  function header(title, desc) {
+    return [el('h1', { class: 'page-title' }, title), desc ? el('p', { class: 'page-desc' }, desc) : null];
+  }
+
+  function errorBox(err) {
+    return el('div', { class: 'error' }, '錯誤：' + (err && err.message ? err.message : String(err)));
+  }
+
+  // ---- 儀表板 ----------------------------------------------------------------
+
+  async function renderDashboard(root) {
+    root.append(...header('儀表板', '目前安裝狀態一覽。詳細健檢請看 Doctor 分頁。'));
+    const cards = el('div', { class: 'cards' }, el('div', { class: 'loading' }, '載入中…'));
+    root.append(cards);
+    try {
+      const o = await call('adminGetOverview');
+      cards.innerHTML = '';
+      cards.append(
+        card('版本', o.version),
+        card('Owner', o.owner),
+        card('時區', o.timeZone),
+        card('DB spreadsheet', o.db.url
+          ? el('a', { href: o.db.url, target: '_blank', rel: 'noopener' }, 'GAS Agent DB')
+          : '尚未建立'),
+        card('Queue trigger', o.triggerCount === 1 ? '已安裝（每分鐘）' : `${o.triggerCount} 支（預期 1）`),
+        card('Web App 網址', o.webAppUrl ? el('a', { href: o.webAppUrl, target: '_blank', rel: 'noopener' }, o.webAppUrl) : '未部署'),
+      );
+    } catch (err) {
+      cards.innerHTML = '';
+      cards.append(errorBox(err));
+    }
+  }
+
+  function card(label, value) {
+    return el('div', { class: 'card' }, [
+      el('div', { class: 'card-label' }, label),
+      el('div', { class: 'card-value' }, value),
+    ]);
+  }
+
+  // ---- Doctor ---------------------------------------------------------------
+
+  async function renderDoctor(root) {
+    root.append(...header('Doctor', '檢查 Script Properties、DB 每個 tab 與表頭、trigger、授權 scopes。'));
+
+    const $summary = el('span', { class: 'hint' });
+    const $list = el('ul', { class: 'checks' });
+    const $tests = el('div');
+
+    const btnDoctor = el('button', { class: 'primary', onclick: () => runDoctor() }, '重新檢查');
+    const btnTests = el('button', { onclick: () => runTests() }, '跑 smoke tests');
+    const btnReinstall = el('button', { onclick: () => reinstall() }, '重新安裝（補 tabs / trigger）');
+
+    root.append(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'toolbar' }, [btnDoctor, btnTests, btnReinstall, $summary]),
+        $list,
+      ]),
+      el('div', { class: 'panel' }, [el('h3', {}, 'Smoke tests'), $tests]),
+    );
+
+    function setBusy(busy) {
+      [btnDoctor, btnTests, btnReinstall].forEach((b) => { b.disabled = busy; });
+    }
+
+    async function runDoctor() {
+      setBusy(true);
+      $list.innerHTML = '';
+      $list.append(el('li', { class: 'loading' }, '檢查中…'));
+      $summary.textContent = '';
+      try {
+        const r = await call('adminRunDoctor');
+        renderChecks(r);
+      } catch (err) {
+        $list.innerHTML = '';
+        $list.append(el('li', {}, errorBox(err)));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderChecks(r) {
+      $list.innerHTML = '';
+      r.checks.forEach((c) => {
+        $list.append(el('li', { class: 'check status-' + c.status }, [
+          el('span', { class: 'dot', title: c.status }),
+          el('div', { class: 'check-body' }, [
+            el('div', { class: 'check-label' }, c.label),
+            c.detail ? el('div', { class: 'check-detail' }, c.detail) : null,
+          ]),
+        ]));
+      });
+      const fails = r.checks.filter((c) => c.status === 'fail').length;
+      const warns = r.checks.filter((c) => c.status === 'warn').length;
+      $summary.innerHTML = '';
+      $summary.append(el('span', { class: 'summary ' + (r.ok ? 'ok' : 'fail') },
+        r.ok ? `全綠（${r.checks.length} 項${warns ? `，${warns} 項提醒` : ''}）` : `${fails} 項失敗`));
+    }
+
+    async function runTests() {
+      setBusy(true);
+      $tests.innerHTML = '';
+      $tests.append(el('div', { class: 'loading' }, '執行中…'));
+      try {
+        const r = await call('adminRunSmokeTests');
+        $tests.innerHTML = '';
+        $tests.append(el('div', { class: 'toolbar' }, [
+          el('span', { class: 'summary ' + (r.ok ? 'ok' : 'fail') }, `${r.passed} 通過 / ${r.failed} 失敗`),
+          el('span', { class: 'hint' }, `${r.ms} ms`),
+        ]));
+        const ul = el('ul', { class: 'checks' });
+        r.results.forEach((t) => {
+          ul.append(el('li', { class: 'check status-' + (t.ok ? 'ok' : 'fail') }, [
+            el('span', { class: 'dot' }),
+            el('div', { class: 'check-body' }, [
+              el('div', { class: 'check-label' }, `${t.name}（${t.ms} ms）`),
+              t.error ? el('div', { class: 'check-detail' }, t.error) : null,
+            ]),
+          ]));
+        });
+        $tests.append(ul);
+      } catch (err) {
+        $tests.innerHTML = '';
+        $tests.append(errorBox(err));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function reinstall() {
+      setBusy(true);
+      try {
+        await call('adminReinstall');
+        await runDoctor();
+      } catch (err) {
+        $list.innerHTML = '';
+        $list.append(el('li', {}, errorBox(err)));
+        setBusy(false);
+      }
+    }
+
+    runDoctor();
+  }
+
+  // ---- 尚未實作的分頁 ----------------------------------------------------------
+
+  function renderPlaceholder(item) {
+    return (root) => {
+      root.append(...header(item.label));
+      root.append(el('div', { class: 'placeholder' },
+        `「${item.label}」分頁預計在 ${item.milestone} 實作。M0 只有骨架：儀表板與 Doctor。`));
+    };
+  }
+
+  // ---- 路由 ------------------------------------------------------------------
+
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor };
+  NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
+
+  function currentRoute() {
+    const id = (location.hash || '').replace(/^#\/?/, '');
+    return NAV.some((n) => n.id === id) ? id : 'dashboard';
+  }
+
+  function renderNav() {
+    $nav.innerHTML = '';
+    const active = currentRoute();
+    NAV.forEach((item) => {
+      $nav.append(el('a', { href: '#/' + item.id, class: item.id === active ? 'active' : '' }, item.label));
+    });
+  }
+
+  function route() {
+    renderNav();
+    $main.innerHTML = '';
+    const view = VIEWS[currentRoute()];
+    Promise.resolve(view($main)).catch((err) => $main.append(errorBox(err)));
+  }
+
+  document.getElementById('brand-version').textContent = bootstrap.version ? 'v' + bootstrap.version : '';
+  document.getElementById('owner-email').textContent = bootstrap.owner || '';
+  window.addEventListener('hashchange', route);
+  route();
+})();
+</script>
