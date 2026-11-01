@@ -80,6 +80,7 @@ function smokeTestTable_() {
     ['approval: 批准 / 拒絕後 enqueue continuation 把結果接回原 session；curation 提議與已關閉 session 不續跑', testApprovalContinuation_, 'pure'],
     ['cron: 到期掃描入列並推進 next_run；cron job 建新 session、autonomous 模式送審批、投遞 doc、更新 last_status；cronjob_manage 在 autonomous 只能 list', testCronJobAutonomous_, 'pure'],
     ['deliver: 標題「<name> YYYY-MM-DD」、內文含結果與執行資訊；doc / email / none；handler 失敗回 ok=false', testDeliverContent_, 'pure'],
+    ['gmail: 附件參數宣告、數量 / 總量上限、轉寄內文組裝、gmail_forward 為 X 類走審批', testGmailAttachments_, 'pure'],
   ];
 }
 
@@ -593,7 +594,7 @@ function testRegistryValid_() {
   assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
   assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob'], 'toolset 順序');
   assertEqual_(registry.list.filter((t) => t.risk === 'D').length, 0, '不應有 D 類工具（刻意不開放刪除）');
-  assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_send'], 'X 類只有 share / send');
+  assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_forward', 'gmail_send'], 'X 類只有 share / send / forward');
   registry.list.forEach((t) => {
     validateToolDeclaration_(t);
     assertEqual_(t.parameters.additionalProperties, false, `${t.name} 應宣告 additionalProperties=false`);
@@ -1802,4 +1803,36 @@ function testDeliverContent_() {
   const fallback = deliverResult_({ name: 'n', deliver_to: 'email' }, result, { ownerEmail: '', sendEmail: () => {} });
   assertEqual_([fallback.ok, fallback.ref], [!!getOwnerEmail_(), getOwnerEmail_()], '沒注入 ownerEmail 時退回 OWNER_EMAIL');
   if (!fallback.ok) assert_(/OWNER_EMAIL 未設定/.test(fallback.error), '未安裝時的錯誤訊息');
+}
+
+function testGmailAttachments_() {
+  const tools = gmailTools_();
+  const byName = {};
+  tools.forEach((t) => { byName[t.name] = t; });
+  assert_(byName.gmail_save_attachments && byName.gmail_forward, '新工具存在');
+  assertEqual_([byName.gmail_save_attachments.risk, byName.gmail_forward.risk], ['W', 'X'], '存附件是 W、轉寄是 X');
+  ['gmail_send', 'gmail_create_draft'].forEach((n) => assertEqual_(byName[n].parameters.properties.attachment_file_ids.type, 'array', `${n} 有 attachment_file_ids`));
+  assertEqual_(byName.gmail_forward.parameters.required, ['thread_id', 'to'], 'forward required');
+  // 上限
+  checkAttachmentTotal_([{ name: 'a.pdf', size: 1024 }]);
+  assertThrows_(() => checkAttachmentTotal_(new Array(11).fill({ name: 'x', size: 1 })), '超過 10 個');
+  const big = assertThrows_(() => checkAttachmentTotal_([{ name: 'big.zip', size: 20 * 1024 * 1024 }, { name: 'b.pdf', size: 6 * 1024 * 1024 }]), '超過 25 MB');
+  assert_(/25 MB/.test(big.message) && /big.zip/.test(big.message), big.message);
+  // 轉寄內文
+  const body = forwardBody_('  請協助列印 ', { from: 'Stripe <r@stripe.com>', date: '2026-10-01T10:00:00+08:00', subject: '收據', to: 'me@x.com', body: '內容' });
+  assertEqual_(body.split('\n').slice(0, 4), ['請協助列印', '', '---------- 轉寄的郵件 ----------', '寄件者：Stripe <r@stripe.com>'], '說明在前、再原信標頭');
+  assert_(/主旨：收據\n收件者：me@x.com\n\n內容$/.test(body), '原信內文在最後');
+  assertEqual_(forwardBody_('', { from: 'a', date: 'd', subject: 's', to: 't', body: 'b' }).indexOf('---------- 轉寄'), 0, '沒說明就直接原信');
+  // 參數驗證：attachment_file_ids 收字串陣列；gmail_forward 在 RBAC external 關時被擋、開時依審批策略送審
+  const registry = buildToolRegistry_(gmailTools_());
+  const sink = memorySink_();
+  const run = (name, args, cfg) => executeTool_(name, args, { sessionId: 's', mode: 'interactive' }, { registry, config: cfg, sink: sink.sink, spill: memorySpill_().store });
+  const closed = fakeToolConfig_({ rbac: { gmail: { read: true, write: true, delete: false, external: false } } });
+  assertEqual_(run('gmail_forward', { thread_id: 't1', to: 'a@b.c' }, closed).status, 'denied', 'external 關 → denied');
+  const open = fakeToolConfig_({ rbac: { gmail: { read: true, write: true, delete: false, external: true } }, approvalPolicy: 'always' });
+  const pending = run('gmail_forward', { thread_id: 't1', to: 'a@b.c', body: '請看' }, open);
+  assertEqual_(pending.status, 'pending_approval', 'external 開 + always → 送審');
+  assertEqual_(JSON.parse(sink.approvals[0].args), { thread_id: 't1', to: 'a@b.c', body: '請看' }, 'Approvals 參數');
+  assertEqual_(run('gmail_send', { to: 'a', subject: 's', body: 'b', attachment_file_ids: 'notarray' }, open).status, 'invalid', 'attachment_file_ids 非陣列拒絕');
+  assertEqual_(validateToolArgs_(byName.gmail_send, { to: 'a', subject: 's', body: 'b', attachment_file_ids: '["f1","f2"]' }).attachment_file_ids, ['f1', 'f2'], 'JSON 字串陣列可轉型');
 }

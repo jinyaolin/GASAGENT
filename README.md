@@ -190,7 +190,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
 | sheets | `sheets_create`(W) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) |
 | slides | `slides_create_deck`(W，一次收整份 deck；類型 title / section / content / two_column / quote / closing，上限 40 頁) `slides_read`(R) `slides_add_slide`(W) `slides_replace_text`(W) |
-| gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_label`(W) `gmail_archive`(W) —— **沒有任何刪除工具** |
+| gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) |
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
