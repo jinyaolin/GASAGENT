@@ -414,6 +414,7 @@ node scripts/local-tests.js
 | 升到 M1 後 Doctor 說 `Providers` / `Usage` tab 缺欄位 | 新版本加了欄位：Doctor 分頁按「重新安裝」（或編輯器執行 `installAgent()`）往右補欄，既有資料不動 |
 | 測試連線 / 聊天台等很久才回錯 | UrlFetch 無法設 timeout；請把該 provider 的 `max_tokens` 調低、GLM 類在 `extra_body` 關 thinking |
 | Z.ai 回 401 | coding plan 的 key 只能打 `https://api.z.ai/api/coding/paas/v4`，不能打 bigmodel.cn 一般 endpoint |
+| 新增第二個同協定 provider 後第一個不見了 | 舊版會以 id 覆寫（範本預設 id 相同）。現在新增時 id 重複會被拒絕、範本會自動帶 `gemini-2` 之類的 id；被覆寫的那組請重新新增並貼 key |
 | 聊天台選「自動」回「沒有可用的 provider」 | 沒有 enabled 的 `main` provider；到「模型」分頁新增或啟用 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |

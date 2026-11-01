@@ -119,12 +119,17 @@ function adminListProviders() {
 
 /**
  * 模型分頁：新增 / 編輯 provider。若 input.apiKey 非空，同時寫入 Script Properties；key 不會回傳。
- * @param {!Object} input 表單欄位（extra_headers / extra_body 為 JSON 字串）+ 可選 apiKey
+ * input.isNew=true 表示「新增」：id 已存在就拒絕，避免同一個範本（例如兩個 gemini）互相覆蓋。
+ * @param {!Object} input 表單欄位（extra_headers / extra_body 為 JSON 字串）+ 可選 apiKey + 可選 isNew
  * @return {!Object} publicProvider_
  */
 function adminSaveProvider(input) {
   assertOwner();
-  const p = saveProvider_(input || {});
+  input = input || {};
+  if (input.isNew && getProvider_(String(input.id || '').trim().toLowerCase())) {
+    throw new Error(`provider id「${input.id}」已存在。同一協定要加第二組請換一個 id（例如 ${input.id}-2）；要修改既有的請用該列的「編輯」。`);
+  }
+  const p = saveProvider_(input);
   if (input && typeof input.apiKey === 'string' && input.apiKey.trim()) {
     setProviderKey_(p.id, input.apiKey);
   }

@@ -227,7 +227,7 @@
   ];
 
   const PROVIDER_FIELDS = [
-    { key: 'id', label: 'id', hint: '小寫字母 / 數字 / _ / -；存檔後不可改（key 綁 PROVIDER_KEY_<id>）', required: true },
+    { key: 'id', label: 'id', hint: '小寫字母 / 數字 / _ / -；每個 provider 唯一、存檔後不可改（key 綁 PROVIDER_KEY_<id>）。同協定第二組請換 id，例如 gemini-2', required: true },
     { key: 'label', label: '顯示名稱' },
     { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini'], required: true },
     { key: 'base_url', label: 'base_url', hint: 'openai：到 /v1 為止（不含 /chat/completions）；anthropic / gemini：只到網域', required: true },
@@ -365,7 +365,12 @@
             const preset = PROVIDER_PRESETS.find((x) => x.id === sel.value);
             if (!preset) return;
             PROVIDER_FIELDS.forEach((f) => { if (preset[f.key] !== undefined) inputs[f.key].value = preset[f.key]; });
-            if (!inputs.id.value) inputs.id.value = preset.id;
+            // id 已被用掉就自動接 -2、-3…，避免新增時覆蓋既有的同範本 provider。
+            if (!inputs.id.value || providers.some((x) => x.id === inputs.id.value)) {
+              let candidate = preset.id;
+              for (let n = 2; providers.some((x) => x.id === candidate); n++) candidate = `${preset.id}-${n}`;
+              inputs.id.value = candidate;
+            }
           },
         }, [el('option', { value: '' }, '— 套用範本（選填）—')].concat(PROVIDER_PRESETS.map((x) => el('option', { value: x.id }, x.label))));
         grid.append(field('範本', sel, '填好 base_url / model / 建議設定，再自行調整'));
@@ -422,6 +427,7 @@
         PROVIDER_FIELDS.forEach((f) => { payload[f.key] = inputs[f.key].value.trim(); });
         payload.enabled = enabled.checked;
         payload.apiKey = keyInput.value;
+        payload.isNew = isNew;
         btnSave.disabled = true;
         $msg.innerHTML = '';
         try {
