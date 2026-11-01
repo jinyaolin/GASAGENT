@@ -84,13 +84,19 @@ clasp open-script
 | 執行身分 | **我** |
 | 具有存取權的使用者 | **只有我自己** |
 
-部署後複製「網頁應用程式 URL」。之後每次 `clasp push` 後要讓線上管理頁更新，需「部署 → 管理部署作業 → 編輯 → 版本：新版本」，或用：
+部署後複製「網頁應用程式 URL」。**這個 URL 綁定某一個版本號**：之後 `clasp push` 只更新編輯器裡的程式碼，線上頁面不會變。要讓線上更新，用既有部署 ID 推新版本（URL 不變）：
 
 ```bash
-clasp create-deployment --description "m0"
+clasp deployments
 ```
 
-> 注意：`clasp create-deployment` 會建立一個**新的**部署（新 URL）。要更新既有部署請用 `clasp update-deployment <deploymentId>`（`clasp list-deployments` 可查 id）。
+```bash
+clasp deploy -i <deploymentId> -d "說明"
+```
+
+> 不要再按「新增部署作業」或 `clasp deploy` 不帶 `-i`：那會產生**另一個** URL，舊 URL 永遠停在舊版本（且保留當時的存取權設定）。多出來的舊部署請到「管理部署作業」封存，或 `clasp undeploy <deploymentId>`。
+>
+> 用 `clasp deploy -i` 更新時，Web App 的「執行身分 / 存取權」會依 `appsscript.json` 的 `webapp` 區段（USER_DEPLOYING / MYSELF）設定。
 
 ### 5. 打開管理頁，看 Doctor
 
@@ -114,7 +120,7 @@ clasp push
 clasp status
 ```
 
-- 編輯 `src/` 下的檔案 → `clasp push` → 在編輯器或管理頁驗證 → `git commit`。
+- 編輯 `src/` 下的檔案 → `clasp push` → `clasp deploy -i <deploymentId> -d "…"` → 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
 - 不要把 `.clasp.json`（含 scriptId）以外的任何金鑰放進 repo；金鑰只進 Script Properties。
@@ -128,6 +134,8 @@ clasp status
 | Doctor「scopes」紅燈 | 在編輯器重新執行 `installAgent()`，讓 Google 重新要求授權 |
 | Doctor「trigger」顯示 0 支 | 執行 `installAgent()`；若要清掉重裝可先 `removeAgentTriggers()` |
 | `installAgent()` 說 owner 不符 | 這個 script 已綁別的帳號；到「專案設定 → 指令碼屬性」刪 `OWNER_EMAIL` 再執行 |
+| 側欄分頁點了整頁空白、網址變成 `…script.googleusercontent.com/userCodeAppPanel#/…` | 線上是舊版本：`clasp deploy -i <deploymentId>` 推新版本。根因是 HtmlService 注入 `<base target="_top">`，導航已改為 `preventDefault` + 自設 `location.hash` |
+| 沒登入的瀏覽器也看得到管理頁 | 該部署存取權被設成「任何人」。「以我執行」下 `getEffectiveUser()` 永遠是 owner，`assertOwner()` 因此改用 `getActiveUser()`（匿名為空字串即拒絕）；仍請把部署改回「只有我自己」 |
 | DB 被誤刪 | `installAgent()` 偵測到檔案在垃圾桶會建新的；要救回舊資料請先從垃圾桶還原再執行 |
 
 ## 里程碑
