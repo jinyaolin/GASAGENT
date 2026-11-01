@@ -3,7 +3,8 @@
  *
  * 測試只對已安裝的環境做無副作用（或幂等）的操作：不會新建 spreadsheet、不會改 Properties、不打外部網路。
  * M1 的 adapter / 備援鏈測試是純函式 + 注入的 fetch stub；M2 的 registry / executor / 迴圈測試用假 registry、
- * 記憶體 sink 與假 provider，不寫 Sheet、不碰 Drive。第三欄 'pure' 的測試可在本機 node 跑（scripts/local-tests.js）。
+ * 記憶體 sink 與假 provider，不寫 Sheet、不碰 Drive；M4 的 queue / cron / deliver 測試用記憶體 store、假鎖與注入的投遞 handler。
+ * 第三欄 'pure' 的測試可在本機 node 跑（scripts/local-tests.js）。
  */
 
 /**
@@ -72,6 +73,13 @@ function smokeTestTable_() {
     ['search: searchSessions_ 依 AND 關鍵字計分、片段、排除目前 session；session_search 工具', testSessionSearch_, 'pure'],
     ['curation: JSON 解析成 memory_manage 操作；預設寫 Approvals、auto_apply 直接套用', testCuration_, 'pure'],
     ['embed: openai / gemini 嵌入請求與解析、cosine、備援鏈無 provider 報錯', testEmbeddings_, 'pure'],
+    // M4
+    ['cron: 5 欄 cron 與捷徑解析、computeNextRun_（分 / 時 / 日 / 週 / 月跳躍、dom|dow 取或、找不到報錯）、輸入驗證', testCronSchedule_, 'pure'],
+    ['queue: enqueue → tick → done；例外重試到 3 次即 failed；鎖住略過；卡住的 running 重排；一次只跑一個；重試按鈕', testQueueStateMachine_, 'pure'],
+    ['queue: 步數 / 時間預算中止時 enqueue continuation 接同一 session，上限 3 次；正常結束不續跑', testCheckpointContinuation_, 'pure'],
+    ['approval: 批准 / 拒絕後 enqueue continuation 把結果接回原 session；curation 提議與已關閉 session 不續跑', testApprovalContinuation_, 'pure'],
+    ['cron: 到期掃描入列並推進 next_run；cron job 建新 session、autonomous 模式送審批、投遞 doc、更新 last_status；cronjob_manage 在 autonomous 只能 list', testCronJobAutonomous_, 'pure'],
+    ['deliver: 標題「<name> YYYY-MM-DD」、內文含結果與執行資訊；doc / email / none；handler 失敗回 ok=false', testDeliverContent_, 'pure'],
   ];
 }
 
@@ -183,10 +191,13 @@ function testAssertOwnerCurrentUser_() {
 }
 
 function testQueueTickNoop_() {
-  assertEqual_(getProp_(PROP.QUEUE_DIRTY), '', 'M0 不應有 QUEUE_DIRTY 旗標');
+  // 有 queued job 或排程剛好到期時會真的跑 job，閒置路徑測不到，直接略過。
+  if (getProp_(PROP.QUEUE_DIRTY) === '1') return;
+  const nextCron = getProp_(PROP.CRON_NEXT_RUN);
+  if (nextCron && new Date(nextCron).getTime() <= Date.now() + 60000) return;
   const t0 = Date.now();
   queueTick();
-  assert_(Date.now() - t0 < 2000, 'queueTick 無 job 時應在 2 秒內返回');
+  assert_(Date.now() - t0 < 2000, 'queueTick 閒置時應在 2 秒內返回（只讀兩個 Property）');
 }
 
 function testDoGetTelegramPlain_() {
@@ -580,8 +591,8 @@ function execFake_(name, args, ctx, cfg, registry) {
 function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
   assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
-  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory'], 'toolset 順序');
-  assertEqual_(registry.list.filter((t) => t.risk === 'D').length, 0, 'M2 不應有 D 類工具');
+  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob'], 'toolset 順序');
+  assertEqual_(registry.list.filter((t) => t.risk === 'D').length, 0, '不應有 D 類工具（刻意不開放刪除）');
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_send'], 'X 類只有 share / send');
   registry.list.forEach((t) => {
     validateToolDeclaration_(t);
@@ -1356,4 +1367,436 @@ function testEmbeddings_() {
   const r = embedWithChain_(['q'], { fetch: chainStub.fetch, keyFor: () => 'k', providers: [oa, Object.assign({}, gm, { priority: 20 })] });
   assertEqual_([r.provider, r.vectors], ['gemb', [[2, 2]]], '503 換下一個');
   assertThrows_(() => embedWithChain_(['q'], { providers: [] }), '沒有 embed provider');
+}
+
+// ---- M4：cron / queue / deliver -------------------------------------------------------------------
+
+/** @return {{store: Object, jobs: !Array}} 記憶體版 Queue store（list 回副本、update 以 id 覆寫，行為同 Sheet 版） */
+function memoryQueueStore_() {
+  const jobs = [];
+  const clone = (j) => Object.assign({}, j, { payload: JSON.parse(JSON.stringify(j.payload || {})) });
+  return {
+    jobs,
+    store: {
+      list: () => jobs.map(clone),
+      get: (id) => { const j = jobs.find((x) => x.id === id); return j ? clone(j) : null; },
+      add: (j) => { jobs.push(clone(j)); return j; },
+      update: (j) => { const i = jobs.findIndex((x) => x.id === j.id); if (i === -1) throw new Error('no job ' + j.id); jobs[i] = clone(j); },
+    },
+  };
+}
+
+/** @return {{store: Object, crons: !Array}} 記憶體版 Cron store */
+function memoryCronStore_() {
+  const crons = [];
+  const clone = (c) => Object.assign({}, c);
+  return {
+    crons,
+    store: {
+      list: () => crons.map(clone),
+      get: (id) => { const c = crons.find((x) => x.id === id); return c ? clone(c) : null; },
+      add: (c) => { crons.push(clone(c)); return c; },
+      update: (c) => { const i = crons.findIndex((x) => x.id === c.id); if (i === -1) throw new Error('no cron ' + c.id); crons[i] = clone(c); },
+    },
+  };
+}
+
+/** @return {{lock: Object, held: boolean, busy: boolean}} 假鎖；busy=true 時 tryLock 失敗 */
+function fakeLock_(busy) {
+  const o = { held: false, busy: !!busy, acquired: 0, released: 0 };
+  o.lock = { tryLock: () => { if (o.busy) return false; o.held = true; o.acquired++; return true; }, releaseLock: () => { o.held = false; o.released++; } };
+  return o;
+}
+
+/** @return {{store: Object, rows: !Array}} 記憶體版 Approvals store（decideApproval_ 用） */
+function memoryApprovalStore_(rows) {
+  const data = rows.slice();
+  return {
+    rows: data,
+    store: {
+      list: () => data.map((r) => Object.assign({}, r)),
+      update: (row, fields) => { const i = data.findIndex((r) => r.id === row.id); Object.assign(data[i], fields); },
+    },
+  };
+}
+
+function testCronSchedule_() {
+  assertEqual_(normalizeSchedule_('daily 09:00'), '0 9 * * *', 'daily');
+  assertEqual_(normalizeSchedule_('Daily'), '0 9 * * *', 'daily 無時間 → 09:00');
+  assertEqual_(normalizeSchedule_('每天 8:05'), '5 8 * * *', '中文 daily');
+  assertEqual_(normalizeSchedule_('weekly mon 09:30'), '30 9 * * 1', 'weekly');
+  assertEqual_(normalizeSchedule_('每週一 09:00'), '0 9 * * 1', '中文 weekly');
+  assertEqual_(normalizeSchedule_('每週日'), '0 9 * * 0', '每週日預設時間');
+  assertEqual_(normalizeSchedule_('hourly'), '0 * * * *', 'hourly');
+  assertEqual_(normalizeSchedule_(' 0  9 * * 1-5 '), '0 9 * * 1-5', '5 欄原樣（去多餘空白）');
+  ['', '* * *', '60 * * * *', '0 24 * * *', '0 9 32 * *', '0 9 * 13 *', '0 9 * * 8', 'daily 25:00', 'weekly xyz 09:00', '*/0 * * * *', '5-1 * * * *', 'a b c d e']
+    .forEach((bad) => assertThrows_(() => normalizeSchedule_(bad), `應拒絕「${bad}」`));
+  const p = parseCronSchedule_('*/15 9-17 1,15 * mon-fri');
+  assertEqual_([p.minute, p.hour, p.dom, p.month, p.dow], [{ 0: true, 15: true, 30: true, 45: true }, { 9: true, 10: true, 11: true, 12: true, 13: true, 14: true, 15: true, 16: true, 17: true }, { 1: true, 15: true }, null, { 1: true, 2: true, 3: true, 4: true, 5: true }], '欄位解析');
+  assertEqual_(parseCronSchedule_('0 9 * * 7').dow, { 0: true }, '週 7 = 日');
+  assertEqual_(parseCronSchedule_('0 9 * * sun,6').dow, { 0: true, 6: true }, '週名與數字混用');
+
+  // 2026-11-02 是星期一（本地時間）
+  const from = new Date(2026, 10, 2, 8, 30, 20);
+  const iso = (d) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()} ${d.getHours()}:${d.getMinutes()}`;
+  assertEqual_(iso(computeNextRun_('daily 09:00', from)), '2026-11-2 9:0', '當天 09:00');
+  assertEqual_(iso(computeNextRun_('daily 09:00', new Date(2026, 10, 2, 9, 0, 0))), '2026-11-3 9:0', 'from 正好在那分鐘 → 隔天（不含 from）');
+  assertEqual_(iso(computeNextRun_('*/15 * * * *', from)), '2026-11-2 8:45', '每 15 分');
+  assertEqual_(iso(computeNextRun_('hourly', from)), '2026-11-2 9:0', 'hourly');
+  assertEqual_(iso(computeNextRun_('weekly fri 18:00', from)), '2026-11-6 18:0', '本週五');
+  assertEqual_(iso(computeNextRun_('0 9 1 * *', from)), '2026-12-1 9:0', '每月 1 日 → 跨月');
+  assertEqual_(iso(computeNextRun_('0 9 * * 1-5', new Date(2026, 10, 6, 10, 0))), '2026-11-9 9:0', '週五 10:00 → 下週一');
+  assertEqual_(iso(computeNextRun_('0 9 15 * 1', from)), '2026-11-2 9:0', 'dom 與 dow 都有限制取「或」：當天是週一');
+  assertEqual_(iso(computeNextRun_('0 9 15 * 1', new Date(2026, 10, 2, 10, 0))), '2026-11-9 9:0', '過了當天 09:00 → 下週一（早於 15 日）');
+  assertEqual_(iso(computeNextRun_('0 9 15 * 1', new Date(2026, 10, 10, 10, 0))), '2026-11-15 9:0', '15 日早於再下個週一（16 日）');
+  assertEqual_(iso(computeNextRun_('30 6 1 1 *', from)), '2027-1-1 6:30', '跨年');
+  assertThrows_(() => computeNextRun_('0 0 31 2 *', from), '2 月 31 日永遠不會到');
+  assertEqual_(computeNextRun_('daily 09:00', from).getSeconds(), 0, '秒歸零');
+
+  // 輸入驗證
+  const ok = validateCronInput_({ name: ' 郵件摘要 ', schedule: 'daily 09:00', prompt: '摘要昨天的信', deliver_to: 'DOC', model_pin: 'p1', skills: '', enabled: 'TRUE' }, undefined, ['p1']);
+  assertEqual_([ok.name, ok.deliver_to, ok.model_pin, ok.enabled], ['郵件摘要', 'doc', 'p1', true], '正規化');
+  assertThrows_(() => validateCronInput_({ schedule: 'daily', prompt: 'x' }), '缺 name');
+  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: '' }), '缺 prompt');
+  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'nope', prompt: 'x' }), 'schedule 壞');
+  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: 'x', deliver_to: 'telegram' }), 'deliver_to 未支援');
+  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: 'x', model_pin: 'ghost' }, undefined, ['p1']), 'model_pin 不存在');
+  const edited = validateCronInput_({ prompt: '新指令' }, ok);
+  assertEqual_([edited.name, edited.prompt, edited.schedule], ['郵件摘要', '新指令', 'daily 09:00'], '編輯時沿用既有欄位');
+  const crons = [
+    { id: 'a', enabled: true, next_run: new Date(2026, 10, 2, 9, 0) }, { id: 'b', enabled: false, next_run: new Date(2026, 10, 2, 7, 0) },
+    { id: 'c', enabled: true, next_run: new Date(2026, 10, 2, 7, 0) }, { id: 'd', enabled: true, next_run: null },
+  ];
+  assertEqual_(dueCrons_(crons, new Date(2026, 10, 2, 8, 0)).map((c) => c.id), ['c'], '到期：enabled 且 next_run <= now');
+  assertEqual_(earliestCronNextRun_(crons).getHours(), 7, '最早的 enabled next_run');
+  assertEqual_(earliestCronNextRun_([crons[1], crons[3]]), null, '沒有可用的 → null');
+}
+
+function testQueueStateMachine_() {
+  const q = memoryQueueStore_();
+  const cron = memoryCronStore_();
+  const lock = fakeLock_();
+  setProp_(PROP.QUEUE_DIRTY, '');
+  assertThrows_(() => enqueue_('bogus', {}, '', { store: q.store }), 'type 不合法');
+  const job = enqueue_('turn', { message: 'hi' }, 'sX', { store: q.store });
+  assert_(/^job_/.test(job.id) && jobCreatedAt_(job.id), 'job id 格式可還原時間');
+  assertEqual_([job.state, job.attempts, q.jobs.length, getProp_(PROP.QUEUE_DIRTY)], ['queued', 0, 1, '1'], 'enqueue 寫一列並設旗標');
+  // 成功
+  const ran = [];
+  const okRun = (j) => { ran.push(j.id); return { state: 'done', result: { text: 'ok ' + j.payload.message } }; };
+  let t = Date.parse('2026-11-02T01:00:00Z');
+  const now = () => t;
+  let r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  assertEqual_([r.skipped, r.ran.id, r.ran.state, r.remaining, ran], ['', job.id, 'done', 0, [job.id]], 'tick 跑完一個 job');
+  const done = q.store.get(job.id);
+  assertEqual_([done.state, done.attempts, done.payload.result.text, done.error, !!done.started, !!done.finished], ['done', 1, 'ok hi', '', true, true], 'job 寫回 done 與結果');
+  assertEqual_(getProp_(PROP.QUEUE_DIRTY), '', '沒有 queued 就清旗標');
+  assertEqual_([lock.acquired, lock.released, lock.held], [1, 1, false], '鎖取得並釋放');
+  // 無 job 的 tick
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  assertEqual_([r.ran, ran.length], [null, 1], '沒 job 不跑');
+  // 例外 → 重試到 3 次 → failed
+  const bad = enqueue_('turn', { message: 'boom' }, '', { store: q.store });
+  const boom = () => { throw new Error('kaboom'); };
+  for (let i = 1; i <= 3; i++) {
+    r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
+    const j = q.store.get(bad.id);
+    assertEqual_([j.attempts, j.state], [i, i < 3 ? 'queued' : 'failed'], `第 ${i} 次失敗`);
+    assert_(/kaboom/.test(j.error), '記錯誤');
+    assertEqual_(getProp_(PROP.QUEUE_DIRTY), i < 3 ? '1' : '', '旗標跟著 queued 數');
+  }
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
+  assertEqual_(r.ran, null, 'failed 不再跑');
+  // 重試按鈕
+  assertThrows_(() => retryJob_(job.id, { store: q.store }), 'done 不能重試');
+  const retried = retryJob_(bad.id, { store: q.store });
+  assertEqual_([retried.state, retried.attempts, retried.error, getProp_(PROP.QUEUE_DIRTY)], ['queued', 0, '', '1'], '重試回 queued');
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  assertEqual_(q.store.get(bad.id).state, 'done', '重試後成功');
+  // 鎖住 → 略過
+  const j3 = enqueue_('turn', { message: 'c' }, '', { store: q.store });
+  const busy = fakeLock_(true);
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: busy.lock, now, runJob: okRun });
+  assertEqual_([r.skipped, q.store.get(j3.id).state], ['locked', 'queued'], '鎖住不動任何東西');
+  // 一次只跑一個（最舊的先）
+  const j4 = enqueue_('turn', { message: 'd' }, '', { store: q.store });
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  assertEqual_([r.ran.id, q.store.get(j4.id).state, r.remaining, getProp_(PROP.QUEUE_DIRTY)], [j3.id, 'queued', 1, '1'], '只跑最舊的，旗標保留');
+  // 預算不足不接新 job
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun, budgetMs: 1000 });
+  assertEqual_([r.ran, q.store.get(j4.id).state], [null, 'queued'], '剩餘預算 < 1 分鐘不接');
+  queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  // 卡住的 running：11 分鐘前開始 → 重排；attempts 已滿 → failed
+  const stuck = enqueue_('turn', { message: 'stuck' }, '', { store: q.store });
+  const s1 = q.store.get(stuck.id); s1.state = 'running'; s1.attempts = 1; s1.started = new Date(t - 11 * 60000); q.store.update(s1);
+  const stuck2 = enqueue_('turn', { message: 'stuck2' }, '', { store: q.store });
+  const s2 = q.store.get(stuck2.id); s2.state = 'running'; s2.attempts = 3; s2.started = new Date(t - 11 * 60000); q.store.update(s2);
+  const fresh = enqueue_('turn', { message: 'fresh' }, '', { store: q.store });
+  const s3 = q.store.get(fresh.id); s3.state = 'running'; s3.attempts = 1; s3.started = new Date(t - 2 * 60000); q.store.update(s3);
+  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  assertEqual_(r.recovered.sort(), [stuck.id, stuck2.id].sort(), '兩個卡住的被處理，2 分鐘的不動');
+  assertEqual_([q.store.get(stuck.id).state, q.store.get(stuck2.id).state, q.store.get(fresh.id).state], ['done', 'failed', 'running'], '重排的這次就跑掉、滿次數的失敗');
+  assert_(/超過 10 分鐘/.test(q.store.get(stuck2.id).error), '錯誤說明');
+  // publicJob_ / 摘要
+  const pub = publicJob_(q.store.get(stuck.id));
+  assertEqual_([pub.state, pub.summary, pub.payload.result.text], ['done', 'stuck', 'ok stuck'], 'publicJob_');
+  assertEqual_(jobSummary_({ type: 'continuation', payload: { origin: 'approval', cron: { name: 'X' } } }), '審批後續跑：排程「X」', 'continuation 摘要');
+  setProp_(PROP.QUEUE_DIRTY, '');
+}
+
+/** Queue 測試用：runSessionTurn_ 的假依賴（記憶體 session / memory store、假 chat、可選 turnDeps） */
+function fakeQueueSessionDeps_(chat, turnOverrides) {
+  const d = fakeSessionDeps_(chat);
+  d.turnDeps = Object.assign({}, d.turnDeps, turnOverrides || {});
+  return d;
+}
+
+function testCheckpointContinuation_() {
+  const q = memoryQueueStore_();
+  const cron = memoryCronStore_();
+  const lock = fakeLock_();
+  // 每次都要工具、maxSteps=1 → 每輪都 max_steps 中止
+  const loop = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_echo', args: { text: 'x' } }], stop: 'tool_calls' }]);
+  const sessionDeps = fakeQueueSessionDeps_(loop.chat, { maxSteps: 1 });
+  const first = enqueue_('turn', { message: '做一件很長的事', channel: 'admin', mode: 'interactive' }, '', { store: q.store });
+  const tick = () => queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, sessionDeps });
+  let r = tick();
+  const j1 = q.store.get(first.id);
+  assertEqual_([r.ran.state, j1.state, j1.payload.result.stopped, j1.payload.result.steps.length], ['done', 'done', 'max_steps', 1], '第一輪 max_steps');
+  assert_(j1.session_id && j1.session_id === j1.payload.result.sessionId, 'job 記下建立的 session');
+  assertEqual_(q.jobs.length, 2, 'enqueue 了一個 continuation');
+  const c1 = q.jobs[1];
+  assertEqual_([c1.type, c1.session_id, c1.payload.origin, c1.payload.continuations, c1.payload.root_job_id, c1.payload.message, j1.payload.result.continued_by], ['continuation', j1.session_id, 'checkpoint', 1, first.id, CONTINUATION_PROMPT, c1.id], 'continuation 內容');
+  assertEqual_(getProp_(PROP.QUEUE_DIRTY), '1', '還有 queued → 旗標在');
+  // 續跑 2、3 次：第 3 次（continuations=3）後不再 enqueue
+  tick(); tick(); tick();
+  assertEqual_(q.jobs.length, 4, '共 1 + 3 個 job，第 4 個不再續');
+  const last = q.jobs[3];
+  assertEqual_([last.state, last.payload.continuations, last.payload.result.continuation_exhausted, last.payload.result.continued_by], ['done', 3, true, undefined], '續跑上限');
+  assertEqual_(getProp_(PROP.QUEUE_DIRTY), '', '全部跑完旗標清掉');
+  // 續跑的 user 訊息真的進了模型，且歷史帶著前一輪的 tool 訊息
+  const req = loop.calls[1].messages;
+  assertEqual_(req[req.length - 1], { role: 'user', content: CONTINUATION_PROMPT }, '第二輪 user 訊息是續跑提示');
+  assert_(req.some((m) => m.role === 'tool'), '歷史含第一輪的 tool 結果');
+  assertEqual_(sessionDeps._ss.sessions.length, 1, '四輪都在同一個 session');
+  assertEqual_(sessionDeps._ss.store.get(j1.session_id).turns, 4, 'session 累計 4 輪');
+  // 時間預算：假時鐘每次 chat 前進 300 秒 → time_budget 也續跑
+  let t = Date.parse('2026-11-02T01:00:00Z');
+  const slow = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_echo', args: { text: 'x' } }], stop: 'tool_calls' }]);
+  const slowDeps = fakeQueueSessionDeps_((req2) => { t += 300000; return slow.chat(req2); });
+  const q2 = memoryQueueStore_();
+  const tb = enqueue_('turn', { message: 'slow' }, '', { store: q2.store });
+  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: lock.lock, now: () => t, sessionDeps: slowDeps });
+  assertEqual_([q2.store.get(tb.id).payload.result.stopped, q2.jobs.length, q2.jobs[1].payload.origin], ['time_budget', 2, 'checkpoint'], '時間預算中止也續跑');
+  // 正常結束：不續跑、state done
+  const q3 = memoryQueueStore_();
+  const fine = fakeChat_([{ text: '做完了', stop: 'end' }]);
+  const ok = enqueue_('turn', { message: '簡單' }, '', { store: q3.store });
+  queueTickCore_({ store: q3.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
+  assertEqual_([q3.jobs.length, q3.store.get(ok.id).state, q3.store.get(ok.id).payload.result.text], [1, 'done', '做完了'], '正常結束');
+  // 待審批 → needs_approval
+  const q4 = memoryQueueStore_();
+  const send = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_send', args: { text: 'mail' } }], stop: 'tool_calls' }, { text: '已送審', stop: 'end' }]);
+  const pj = enqueue_('turn', { message: '寄信' }, '', { store: q4.store });
+  queueTickCore_({ store: q4.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(send.chat) });
+  assertEqual_(q4.store.get(pj.id).state, 'needs_approval', '有 pending_approval 步驟 → needs_approval');
+  // payload.message 空 → 例外（會重試到 failed）
+  const q5 = memoryQueueStore_();
+  const empty = enqueue_('turn', {}, '', { store: q5.store });
+  queueTickCore_({ store: q5.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
+  assert_(/message/.test(q5.store.get(empty.id).error), '缺 message 記錯誤');
+  setProp_(PROP.QUEUE_DIRTY, '');
+}
+
+function testApprovalContinuation_() {
+  const ss = memorySessionStore_();
+  const active = ss.store.create({ channel: 'admin' });
+  const closed = ss.store.create({ channel: 'admin' });
+  closed.status = 'closed'; ss.store.update(closed);
+  const cronSess = ss.store.create({ channel: 'cron' });
+  const rows = [
+    { _row: 2, id: 'apr_1', job_id: active.id, tool: 'fake_send', args: '{"text":"go"}', reason: '風險 X（外發）；審批策略 always；模式 interactive', state: 'pending', decided_at: '', result: '' },
+    { _row: 3, id: 'apr_2', job_id: active.id, tool: 'fake_send', args: '{"text":"no"}', reason: '風險 X', state: 'pending', decided_at: '', result: '' },
+    { _row: 4, id: 'apr_3', job_id: active.id, tool: 'memory_manage', args: '{"target":"memory","action":"add","content":"x"}', reason: 'curation 提議（session s1 第 3 輪）', state: 'pending', decided_at: '', result: '' },
+    { _row: 5, id: 'apr_4', job_id: closed.id, tool: 'fake_send', args: '{"text":"late"}', reason: '風險 X', state: 'pending', decided_at: '', result: '' },
+    { _row: 6, id: 'apr_5', job_id: cronSess.id, tool: 'fake_send', args: '{"text":"cron"}', reason: '風險 X；模式 autonomous', state: 'pending', decided_at: '', result: '' },
+    { _row: 7, id: 'apr_6', job_id: '', tool: 'fake_send', args: '{}', reason: '風險 X', state: 'approved', decided_at: '', result: '' },
+  ];
+  const ap = memoryApprovalStore_(rows);
+  const q = memoryQueueStore_();
+  const sink = memorySink_();
+  const deps = { approvalStore: ap.store, sessionStore: ss.store, queueStore: q.store, registry: fakeM3Registry_(), config: fakeM3ToolConfig_(), sink: sink.sink, spill: memorySpill_().store };
+  // 批准：執行一次、寫回結果、enqueue continuation
+  const r1 = decideApproval_('apr_1', true, deps);
+  assertEqual_([r1.state, r1.outcome.status, r1.outcome.content, ap.rows[0].state, ap.rows[0].result], ['approved', 'ok', '{"sent":"go"}', 'approved', 'OK: {"sent":"go"}'], '批准並執行');
+  assert_(ap.rows[0].decided_at instanceof Date, 'decided_at');
+  assertEqual_(q.jobs.length, 1, 'enqueue 一個 continuation');
+  const c1 = q.jobs[0];
+  assertEqual_([c1.type, c1.session_id, c1.payload.origin, c1.payload.approval_id, c1.payload.mode, c1.payload.channel, r1.continuation], ['continuation', active.id, 'approval', 'apr_1', 'interactive', 'admin', c1.id], 'continuation 欄位');
+  assert_(/（系統）先前待審批的 fake_send 已由 owner 批准並執行，結果：\{"sent":"go"\}/.test(c1.payload.message), '訊息內容：' + c1.payload.message);
+  assertEqual_(sink.audits.length, 1, '執行寫 AuditLog');
+  // 拒絕：不執行、也通知
+  const r2 = decideApproval_('apr_2', false, deps);
+  assertEqual_([r2.state, r2.outcome, ap.rows[1].state, q.jobs.length], ['denied', null, 'denied', 2], '拒絕');
+  assert_(/已由 owner 拒絕，未執行/.test(q.jobs[1].payload.message) && /"text":"no"/.test(q.jobs[1].payload.message), '拒絕訊息含參數：' + q.jobs[1].payload.message);
+  assertEqual_(sink.audits.length, 1, '拒絕不執行工具');
+  // curation 提議：批准套用但不續跑
+  const mem = memoryMemoryStore_();
+  const r3 = decideApproval_('apr_3', true, Object.assign({}, deps, { memoryStore: mem.store, agentConfig: fakeAgentConfig_() }));
+  assertEqual_([r3.state, r3.outcome.status, r3.continuation, q.jobs.length, mem.data.memory.length], ['approved', 'ok', '', 2, 1], 'curation 批准寫記憶但不續跑');
+  // 已關閉的 session：不續跑
+  const r4 = decideApproval_('apr_4', true, deps);
+  assertEqual_([r4.state, r4.continuation, q.jobs.length], ['approved', '', 2], '關閉的 session 不續跑');
+  // cron session：續跑用 autonomous
+  decideApproval_('apr_5', true, deps);
+  assertEqual_([q.jobs[2].payload.mode, q.jobs[2].payload.channel], ['autonomous', 'cron'], 'cron session 續跑用 autonomous');
+  // 已處理 / 不存在
+  assertThrows_(() => decideApproval_('apr_6', true, deps), '已處理');
+  assertThrows_(() => decideApproval_('nope', true, deps), '不存在');
+  // 把 continuation 真的跑過 Queue：訊息以 user 進模型、接在原 session
+  ss.store.appendMessages(active.id, 1, [{ role: 'user', content: '幫我寄信' }, { role: 'assistant', content: '已送審' }]);
+  const act = ss.store.get(active.id); act.turns = 1; ss.store.update(act);
+  const chat = fakeChat_([{ text: '好，信已寄出。', stop: 'end' }]);
+  const sessionDeps = fakeQueueSessionDeps_(chat.chat);
+  sessionDeps.store = ss.store;
+  const r = queueTickCore_({ store: q.store, cronStore: memoryCronStore_().store, lock: fakeLock_().lock, sessionDeps });
+  assertEqual_([r.ran.id, r.ran.state], [c1.id, 'done'], '續跑 job 完成');
+  const msgs = chat.calls[0].messages;
+  assertEqual_(msgs.map((m) => m.role), ['system', 'user', 'assistant', 'user'], '帶原 session 歷史');
+  assert_(/已由 owner 批准並執行/.test(msgs[3].content), '最後的 user 訊息是系統通知');
+  assertEqual_(ss.store.get(active.id).turns, 2, '原 session 多一輪');
+  setProp_(PROP.QUEUE_DIRTY, '');
+}
+
+function testCronJobAutonomous_() {
+  const q = memoryQueueStore_();
+  const cron = memoryCronStore_();
+  let t = new Date(2026, 10, 2, 9, 0, 30).getTime();
+  const now = () => t;
+  // 建排程（走 createCron_）：next_run 算好、旗標寫入
+  const c = createCron_({ name: '郵件摘要', schedule: 'daily 09:00', prompt: '摘要昨天的信件並寫成 Doc', deliver_to: 'doc' }, { cronStore: cron.store, providerIds: [], now });
+  assertEqual_([cron.crons.length, c.enabled, c.next_run.getDate(), c.next_run.getHours()], [1, true, 3, 9], '建立並算出明天 09:00');
+  assertEqual_(getProp_(PROP.CRON_NEXT_RUN), c.next_run.toISOString(), 'CRON_NEXT_RUN 旗標');
+  // 未到期：掃描不入列
+  assertEqual_(scanCronDue_({ cronStore: cron.store, queueStore: q.store, now }).length, 0, '未到期');
+  // 到期：入列、next_run 推進、last_status
+  t = new Date(2026, 10, 3, 9, 0, 10).getTime();
+  const jobs = scanCronDue_({ cronStore: cron.store, queueStore: q.store, now });
+  assertEqual_([jobs.length, jobs[0].type, jobs[0].payload.cron_id, jobs[0].payload.prompt, jobs[0].payload.deliver_to], [1, 'cron', c.id, '摘要昨天的信件並寫成 Doc', 'doc'], 'cron job payload');
+  const after = cron.store.get(c.id);
+  assertEqual_([after.next_run.getDate(), after.next_run.getHours(), after.last_run.getTime()], [4, 9, t], 'next_run → 11/4 09:00，last_run = now');
+  assert_(/queued（job job_/.test(after.last_status), 'last_status');
+  assertEqual_(scanCronDue_({ cronStore: cron.store, queueStore: q.store, now }).length, 0, '同一分鐘不重複入列');
+  // 停用的與沒有 next_run 的
+  const off = createCron_({ name: 'off', schedule: 'hourly', prompt: 'x', enabled: false }, { cronStore: cron.store, now });
+  assertEqual_(off.next_run, null, '停用不算 next_run');
+  const noNext = cron.store.get(off.id); noNext.enabled = true; cron.store.update(noNext);
+  scanCronDue_({ cronStore: cron.store, queueStore: q.store, now });
+  assert_(cron.store.get(off.id).next_run instanceof Date, 'enabled 但沒 next_run → 補算（不執行）');
+  assertEqual_(q.jobs.length, 1, '補算不入列');
+  // 跑 cron job：autonomous、新 session、X 工具送審、投遞 doc
+  const fake = fakeChat_([
+    { toolCalls: [{ id: 'c1', name: 'fake_echo', args: { text: '昨天的信' } }], stop: 'tool_calls' },
+    { toolCalls: [{ id: 'c2', name: 'fake_send', args: { text: '摘要' } }], stop: 'tool_calls' },
+    { text: '# 昨日郵件摘要\n- 一封重要信\n寄信已送審。', stop: 'end' },
+  ]);
+  const sessionDeps = fakeQueueSessionDeps_(fake.chat);
+  sessionDeps.toolConfig = fakeM3ToolConfig_({ approvalPolicy: 'autonomous_only' });
+  const docs = [];
+  const mails = [];
+  const deliverDeps = { createDoc: (title, body) => { docs.push({ title, body }); return { id: 'doc1', url: 'https://docs.google.com/document/d/doc1' }; }, sendEmail: (to, subject, body) => mails.push({ to, subject, body }), ownerEmail: 'owner@example.com' };
+  const r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps, deliverDeps });
+  const job = q.store.get(jobs[0].id);
+  assertEqual_([r.ran.state, job.state, job.payload.mode, job.payload.channel], ['needs_approval', 'needs_approval', 'autonomous', 'cron'], 'cron job 轉成 autonomous turn，X 工具待審 → needs_approval');
+  const sess = sessionDeps._ss.sessions[0];
+  assertEqual_([sessionDeps._ss.sessions.length, sess.channel, sess.external_id, sess.title, job.session_id], [1, 'cron', c.id, '郵件摘要', sess.id], '新 session：channel cron、external_id = cron id');
+  assert_(/本輪是排程自動執行/.test(fake.calls[0].messages[0].content), 'system prompt 含無人模式指示');
+  assertEqual_(fake.calls[0].messages[1].content, '摘要昨天的信件並寫成 Doc', 'user 訊息 = prompt');
+  assertEqual_(job.payload.result.steps.map((s) => s.status), ['ok', 'pending_approval'], 'autonomous_only 在無人模式送審');
+  assertEqual_(sessionDeps._sink.approvals.length, 1, '寫一筆 Approvals');
+  assertEqual_(sessionDeps._sink.approvals[0].job_id, sess.id, 'Approvals.job_id = cron session id（批准後可續跑）');
+  assert_(/模式 autonomous/.test(sessionDeps._sink.approvals[0].reason), 'reason 標 autonomous');
+  // 投遞
+  assertEqual_([docs.length, mails.length], [1, 0], 'deliver_to=doc 建一份文件');
+  assertEqual_(docs[0].title, '郵件摘要 2026-11-03', '標題「<name> YYYY-MM-DD」');
+  assert_(/# 昨日郵件摘要/.test(docs[0].body) && /待 owner 審批：fake_send/.test(docs[0].body) && /session：/.test(docs[0].body), '內文含結果與執行資訊：' + docs[0].body);
+  assertEqual_([job.payload.result.delivery.channel, job.payload.result.delivery.ok, job.payload.result.delivery.ref], ['doc', true, 'https://docs.google.com/document/d/doc1'], 'delivery 記錄');
+  assert_(/needs_approval/.test(cron.store.get(c.id).last_status) && /doc1/.test(cron.store.get(c.id).last_status), 'Cron last_status：' + cron.store.get(c.id).last_status);
+  // 續跑中的 cron 不投遞，最終才投遞
+  const loop = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_echo', args: { text: 'x' } }], stop: 'tool_calls' }]);
+  const loopDeps = fakeQueueSessionDeps_(loop.chat, { maxSteps: 1 });
+  const q2 = memoryQueueStore_();
+  const rn = runCronNow_(c.id, { cronStore: cron.store, queueStore: q2.store, now });
+  assert_(/手動/.test(cron.store.get(c.id).last_status), 'run_now 記 last_status');
+  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  assertEqual_([q2.jobs.length, docs.length, q2.jobs[1].payload.cron.cron_id], [2, 1, c.id], '續跑：不投遞，continuation 帶 cron 資訊');
+  assert_(/續跑 job/.test(cron.store.get(c.id).last_status), 'last_status 標續跑');
+  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  assertEqual_([q2.jobs.length, docs.length, q2.jobs[3].payload.result.continuation_exhausted], [4, 2, true], '續跑上限後投遞一次');
+  assert_(/已達續跑上限/.test(docs[1].body), '投遞內文標示未完成');
+  // 投遞失敗 → failed 但保留結果
+  const q3 = memoryQueueStore_();
+  runCronNow_(c.id, { cronStore: cron.store, queueStore: q3.store, now });
+  const fine = fakeChat_([{ text: '完成', stop: 'end' }]);
+  queueTickCore_({ store: q3.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fine.chat), deliverDeps: { createDoc: () => { throw new Error('Drive 掛了'); } } });
+  assertEqual_([q3.jobs[0].state, q3.jobs[0].payload.result.text, q3.jobs[0].payload.result.delivery.ok], ['failed', '完成', false], '投遞失敗 → failed、結果保留');
+  assert_(/Drive 掛了/.test(q3.jobs[0].error), 'error 欄');
+  // email 投遞
+  const em = createCron_({ name: '週報', schedule: 'weekly mon 09:00', prompt: 'x', deliver_to: 'email' }, { cronStore: cron.store, now });
+  const q4 = memoryQueueStore_();
+  runCronNow_(em.id, { cronStore: cron.store, queueStore: q4.store, now });
+  queueTickCore_({ store: q4.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fakeChat_([{ text: '週報內容', stop: 'end' }]).chat), deliverDeps });
+  assertEqual_([mails.length, mails[0].to, mails[0].subject], [1, 'owner@example.com', '[GAS Agent] 週報 2026-11-03'], 'email 寄給 owner');
+  assert_(/週報內容/.test(mails[0].body), '郵件內文');
+  // cronjob_manage 工具：autonomous 只能 list；interactive 可建 / 改 / 停 / run_now
+  const registry = buildToolRegistry_(fakeToolDecls_().concat(sessionTools_(), memoryTools_(), cronTools_()));
+  const cfg = fakeM3ToolConfig_({ rbac: Object.assign(fakeRbac_(), { cronjob: { read: true, write: true, delete: false, external: false } }) });
+  const sink = memorySink_();
+  const q5 = memoryQueueStore_();
+  const run = (args, mode) => executeTool_('cronjob_manage', args, { sessionId: 'sX', mode }, { registry, config: cfg, sink: sink.sink, spill: memorySpill_().store, cronStore: cron.store, queueStore: q5.store, providerIds: ['p1'], now });
+  const blocked = run({ action: 'create', name: '遞迴', schedule: 'hourly', prompt: 'x' }, 'autonomous');
+  assertEqual_(blocked.status, 'error', 'autonomous 不可建');
+  assert_(/不可建立/.test(blocked.content), blocked.content);
+  assertEqual_(run({ action: 'run_now', id: c.id }, 'autonomous').status, 'error', 'autonomous 不可 run_now');
+  const listed = JSON.parse(run({ action: 'list' }, 'autonomous').content);
+  assertEqual_(listed.count, 3, 'autonomous 可 list');
+  const created = JSON.parse(run({ action: 'create', name: '新排程', schedule: '0 9 * * 1-5', prompt: '做事', deliver_to: 'email', model_pin: 'p1' }, 'interactive').content);
+  assertEqual_([created.ok, created.cron.name, created.cron.cron_expr, created.cron.deliver_to, created.cron.model_pin, !!created.cron.next_run], [true, '新排程', '0 9 * * 1-5', 'email', 'p1', true], 'interactive 建立');
+  assertEqual_(run({ action: 'create', name: 'bad', schedule: 'hourly', prompt: 'x', model_pin: 'ghost' }, 'interactive').status, 'error', 'model_pin 不存在回錯');
+  const upd = JSON.parse(run({ action: 'update', id: created.cron.id, schedule: 'daily 07:00' }, 'interactive').content);
+  assertEqual_([upd.cron.schedule, cron.store.get(created.cron.id).next_run.getHours()], ['daily 07:00', 7], 'update 改 schedule 重算 next_run');
+  const del = JSON.parse(run({ action: 'delete', id: created.cron.id }, 'interactive').content);
+  assertEqual_([del.cron.enabled, cron.crons.length], [false, 4], 'delete = 停用不刪列');
+  const rn2 = JSON.parse(run({ action: 'run_now', id: c.id }, 'interactive').content);
+  assertEqual_([rn2.ok, q5.jobs.length, q5.jobs[0].type], [true, 1, 'cron'], 'run_now 入列');
+  assertEqual_(run({ action: 'update' }, 'interactive').status, 'error', 'update 缺 id');
+  assertEqual_(run({ action: 'fly' }, 'interactive').status, 'invalid', 'action enum');
+  setProp_(PROP.QUEUE_DIRTY, '');
+  setProp_(PROP.CRON_NEXT_RUN, '');
+}
+
+function testDeliverContent_() {
+  const now = new Date(2026, 10, 3, 9, 5);
+  const result = { text: '## 重點\n- A\n- B', sessionId: 's_1', steps: [{ tool: 'gmail_search', status: 'ok', ms: 120 }, { tool: 'gmail_send', status: 'pending_approval', ms: 3 }], stopped: '', llmCalls: 3, provider: 'zai', model: 'glm-4.6' };
+  const c = buildDeliveryContent_({ id: 'cron_1', name: '郵件摘要', schedule: 'daily 09:00' }, result, now);
+  assertEqual_([c.title, c.subject], ['郵件摘要 2026-11-03', '[GAS Agent] 郵件摘要 2026-11-03'], '標題 / 主旨');
+  assert_(c.body.indexOf('## 重點\n- A\n- B') === 0, '內文以結果開頭');
+  assert_(/## 執行資訊/.test(c.body) && /排程：郵件摘要（cron_1），schedule daily 09:00/.test(c.body) && /session：s_1/.test(c.body) && /zai \/ glm-4.6，呼叫 3 次；工具 2 步/.test(c.body), '執行資訊：' + c.body);
+  assert_(/待 owner 審批：gmail_send/.test(c.body) && /- gmail_search：ok，120 ms/.test(c.body), '步驟列');
+  const empty = buildDeliveryContent_({ name: 'x' }, { text: '', steps: [], stopped: 'time_budget', continuation_exhausted: true }, now);
+  assert_(/沒有文字結果/.test(empty.body) && /中止原因：time_budget（已達續跑上限，未完成）/.test(empty.body), '空結果與中止');
+  // deliverResult_
+  const calls = [];
+  const deps = { createDoc: (t, b) => { calls.push(['doc', t]); return { id: 'd1', url: 'u1' }; }, sendEmail: (to, s, b) => calls.push(['mail', to, s]), ownerEmail: 'o@x.com', now: () => now.getTime() };
+  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'doc' }, result, deps), { channel: 'doc', ok: true, ref: 'u1', id: 'd1', summary: 'Doc「n 2026-11-03」 u1', error: '' }, 'doc');
+  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'email' }, result, deps).summary, '已寄到 o@x.com（[GAS Agent] n 2026-11-03）', 'email');
+  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'none' }, result, deps).ok, true, 'none');
+  assertEqual_(calls, [['doc', 'n 2026-11-03'], ['mail', 'o@x.com', '[GAS Agent] n 2026-11-03']], 'handler 呼叫');
+  const unknown = deliverResult_({ name: 'n', deliver_to: 'telegram' }, result, deps);
+  assertEqual_([unknown.ok, /未知/.test(unknown.error)], [false, true], '未知目標');
+  const broken = deliverResult_({ name: 'n', deliver_to: 'email' }, result, Object.assign({}, deps, { sendEmail: () => { throw new Error('quota'); } }));
+  assertEqual_([broken.ok, broken.error, broken.summary], [false, 'quota', '投遞失敗：quota'], 'handler 丟錯不 throw');
+  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'email' }, result, { ownerEmail: '', sendEmail: () => {} }).ok, false, '沒有 owner email');
 }

@@ -8,7 +8,7 @@
  */
 
 /** 應用版本，顯示於管理頁與 Doctor。 */
-const APP_VERSION = '0.3.0-m3';
+const APP_VERSION = '0.4.0-m4';
 
 /** Script Properties 鍵名。 */
 const PROP = Object.freeze({
@@ -21,6 +21,11 @@ const PROP = Object.freeze({
    * 讓每分鐘 trigger 在閒置時幾乎不耗 trigger 配額。
    */
   QUEUE_DIRTY: 'QUEUE_DIRTY',
+  /**
+   * 最早到期的排程時間（ISO）。Cron 有異動時由 refreshCronNextRunProp_ 更新；queueTick 閒置時連同 QUEUE_DIRTY
+   * 一起看，兩者都沒到就不開 spreadsheet。
+   */
+  CRON_NEXT_RUN: 'CRON_NEXT_RUN',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 

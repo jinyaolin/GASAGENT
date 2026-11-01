@@ -446,7 +446,7 @@ function adminListApprovals() {
  * 紀錄分頁：批准（立即執行一次）或拒絕。
  * @param {string} id
  * @param {boolean} approve
- * @return {{id: string, state: string, outcome: ?Object}}
+ * @return {{id: string, state: string, outcome: ?Object, continuation: string}}
  */
 function adminDecideApproval(id, approve) {
   assertOwner();
@@ -454,7 +454,7 @@ function adminDecideApproval(id, approve) {
   if (r.outcome) {
     r.outcome = { status: r.outcome.status, ok: r.outcome.ok, ms: r.outcome.ms, content: truncateText_(r.outcome.content, 2000).text };
   }
-  return r;
+  return r; // r.continuation = 續跑 job id（M4），沒有為空字串
 }
 
 /**
@@ -475,6 +475,124 @@ function adminListAuditLog(limit) {
     ok: toBoolean_(r.ok),
     ms: toNumber_(r.ms, 0),
   }));
+}
+
+// ---- M4：Queue / 排程 -----------------------------------------------------------------------
+
+/**
+ * 聊天台「背景執行」：把一輪排進 Queue（turn job），由每分鐘 trigger 執行；前端用 adminGetJob 輪詢。
+ * @param {{providerId: (string|undefined), message: string, system: (string|undefined), sessionId: (string|undefined)}} input
+ * @return {!Object} publicJob_
+ */
+function adminEnqueueChat(input) {
+  assertOwner();
+  input = input || {};
+  const message = String(input.message || '').trim();
+  if (!message) throw new Error('訊息不可為空。');
+  ensureToolConfigDefaults_();
+  const job = enqueue_('turn', {
+    message, providerId: input.providerId || '', systemExtra: input.system || '', channel: 'admin', mode: 'interactive',
+  }, String(input.sessionId || ''));
+  return publicJob_(job);
+}
+
+/**
+ * 紀錄分頁 / 聊天台輪詢：單一 job。
+ * @param {string} id
+ * @return {?Object} publicJob_；找不到回 null
+ */
+function adminGetJob(id) {
+  assertOwner();
+  const job = sheetQueueStore_().get(String(id || ''));
+  return job ? publicJob_(job) : null;
+}
+
+/**
+ * 紀錄分頁：最近的 job（新的在前）與旗標狀態。
+ * @param {number=} limit 預設 30，上限 200
+ * @return {{jobs: !Array<!Object>, dirty: boolean, cronNextRun: string, triggerCount: number}}
+ */
+function adminListQueue(limit) {
+  assertOwner();
+  const n = clampInt_(limit, 30, 1, 200);
+  const jobs = sheetQueueStore_().list();
+  return {
+    jobs: jobs.slice(Math.max(0, jobs.length - n)).reverse().map(publicJob_),
+    dirty: getProp_(PROP.QUEUE_DIRTY) === '1',
+    cronNextRun: getProp_(PROP.CRON_NEXT_RUN),
+    triggerCount: listQueueTriggers_().length,
+  };
+}
+
+/**
+ * 紀錄分頁：把 failed 的 job 重新排回 queued。
+ * @param {string} id
+ * @return {!Object} publicJob_
+ */
+function adminRetryJob(id) {
+  assertOwner();
+  return publicJob_(retryJob_(String(id || '')));
+}
+
+/**
+ * 紀錄分頁：立刻跑一次 tick（同步，最多 4.5 分鐘；trigger 同時在跑時會因鎖而略過）。除錯 / 不想等 trigger 時用。
+ * @return {!Object} queueTickCore_ 的報告
+ */
+function adminQueueTick() {
+  assertOwner();
+  return queueTickCore_({});
+}
+
+/**
+ * 排程分頁：全部排程 + 可選的 provider + 旗標。
+ * @return {{crons: !Array<!Object>, providers: !Array<!Object>, cronNextRun: string, deliverTargets: !Array<string>}}
+ */
+function adminListCron() {
+  assertOwner();
+  ensureToolConfigDefaults_();
+  const crons = sheetCronStore_().list();
+  // 旗標與 tab 對齊（例如直接在 sheet 改過）。
+  try { refreshCronNextRunProp_(crons); } catch (err) { /* 忽略 */ }
+  return {
+    crons: crons.map(publicCron_),
+    providers: listProviders_().filter((p) => p.enabled && p.role !== 'embed').map((p) => ({ id: p.id, label: p.label, model: p.model, role: p.role })),
+    cronNextRun: getProp_(PROP.CRON_NEXT_RUN),
+    deliverTargets: CRON_DELIVER_TARGETS.slice(),
+  };
+}
+
+/**
+ * 排程分頁：新增（無 id）或編輯（有 id）。
+ * @param {!Object} input id? / name / schedule / prompt / deliver_to / model_pin / skills / enabled
+ * @return {!Object} publicCron_
+ */
+function adminSaveCron(input) {
+  assertOwner();
+  input = input || {};
+  const deps = { cronStore: sheetCronStore_(), providerIds: listProviders_().map((p) => p.id) };
+  const c = input.id ? updateCron_(String(input.id), input, deps) : createCron_(input, deps);
+  return publicCron_(c);
+}
+
+/**
+ * 排程分頁：啟用 / 停用（停用不刪列）。
+ * @param {string} id
+ * @param {boolean} enabled
+ * @return {!Object} publicCron_
+ */
+function adminSetCronEnabled(id, enabled) {
+  assertOwner();
+  return publicCron_(updateCron_(String(id || ''), { enabled: !!enabled }, { cronStore: sheetCronStore_() }));
+}
+
+/**
+ * 排程分頁：立即執行（enqueue 一個 cron job；trigger 一分鐘內會跑）。
+ * @param {string} id
+ * @return {!Object} publicJob_
+ */
+function adminRunCronNow(id) {
+  assertOwner();
+  return publicJob_(runCronNow_(String(id || ''), { cronStore: sheetCronStore_(), queueStore: sheetQueueStore_() }));
 }
 
 /**

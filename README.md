@@ -4,14 +4,14 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M3 記憶**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M4 排程與非同步 Queue**。
 
 ## 設計要點
 
 - **純 JavaScript `.gs` + JSDoc，零 npm runtime 依賴**；前端 vanilla JS 單頁。開發只用全域安裝的 `clasp` 同步到 git。
 - **安全**：管理頁部署為「以我執行 / 只限我」，後端每個 `google.script.run` 入口第一行 `assertOwner()`；金鑰只進 Script Properties，其他設定放 Sheet。模型不執行自生程式碼，一律白名單工具；每個 toolset 有 RBAC 四開關，外發動作（寄信 / 分享）走審批（見下方「工具與 RBAC」「審批」）。
 - **兩個 Web App 部署**（M6 才需要第二個）：管理頁「只限我」；Telegram webhook 另開一個「任何人」部署並在 URL 帶 secret，`doGet` 依 `?src=telegram` 分流，回應用 `HtmlService` 避免 302。
-- **Queue runner**：每分鐘 time trigger 跑 `queueTick()`，無 job 時只讀一個 Script Property 就 return，省 trigger 每日 90 分鐘配額。
+- **Queue runner**：每分鐘 time trigger 跑 `queueTick()`，無 job 且沒有排程到期時只讀兩個 Script Property（`QUEUE_DIRTY` / `CRON_NEXT_RUN`）就 return，省 trigger 每日 90 分鐘配額。長任務每 4.5 分鐘 checkpoint 一次由續跑 job 接手（見「Queue 與排程」）。
 
 ## 檔案
 
@@ -25,15 +25,18 @@ src/
   ToolExecutor.gs   # M2：參數驗證 → RBAC → 審批策略 → 執行 → AuditLog → 溢寫；Config 設定讀寫；Approvals 決定
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
   Tools_Gmail.gs  Tools_Calendar.gs  Tools_Web.gs  Tools_Session.gs   # M2：八個 toolset 的 handler
+  Tools_Cron.gs     # M4：cronjob_manage 宣告（toolset cronjob）
   Agent.gs          # M2：runTurn_() 工具呼叫迴圈、system prompt、步數 / 時間 / 熔斷
   Sessions.gs       # M3：Sessions / Messages 持久化、CacheService 熱快取、context 壓縮、/new、runSessionTurn_()
   Memory.gs         # M3：Memory / UserProfile 上限與快照、memory_manage、session_search、curation
-  Queue.gs          # queueTick() 空殼（M4 放 job 狀態機）
-  Setup.gs          # installAgent()：寫 OWNER_EMAIL、建 DB、裝每分鐘 trigger、補工具設定預設值（可重跑）
+  Queue.gs          # M4：job 狀態機、LockService、queueTick()、checkpoint 續跑、turn / cron / continuation / curation runner
+  Cron.gs           # M4：schedule 解析（5 欄 cron + 捷徑）、computeNextRun_、Cron store、到期掃描、cronjob_manage handler
+  Deliver.gs        # M4：cron 結果投遞（doc / email / none）
+  Setup.gs          # installAgent()：寫 OWNER_EMAIL、建 DB、裝每分鐘 trigger、補工具設定預設值、對齊 CRON_NEXT_RUN（可重跑）
   Admin.gs          # doGet 路由 + admin* 後端入口
   AdminPage.html / admin_js.html / admin_css.html   # 管理頁 SPA（檔名避開與 Admin.gs 撞名）
-  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session 健檢
-  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項；標 'pure' 的可在本機跑
+  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron 健檢
+  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 .clasp.json.example # clasp 綁定範本（.clasp.json 本身不進 git）
 ```
@@ -192,6 +195,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) |
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
+| cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 
 M2 沒有任何 D 類工具（刻意不開放刪除）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
 
@@ -224,7 +228,7 @@ M2 沒有任何 D 類工具（刻意不開放刪除）。`docs_create` / `docs_a
 | 項目 | 說明 | 預設 |
 |---|---|---|
 | 每個 toolset 的 read / write / delete / external | RBAC 四開關，存 `Config` `rbac.<toolset>`（JSON） | read 開、write 開、delete 關、external 關 |
-| 審批策略 | `approval_policy` | `always` |
+| 審批策略 | `approval_policy`：`autonomous_only` = 只有排程（無人模式）送審，聊天台直接執行 | `always` |
 | spill_threshold | 工具結果溢寫門檻（字元） | 8000 |
 | max_tool_steps | 單輪工具步數上限 | 25 |
 | web_fetch 域名白名單 | 一行一個。`example.com` 只允許該主機；`*.example.com` 含所有子網域與本身。**空 = 全部拒絕** | 空 |
@@ -241,7 +245,7 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 - **批准並執行**：立刻以同樣的參數執行該工具**一次**（RBAC 仍會檢查），結果寫回 `Approvals.result` 與 `AuditLog`，state → `approved`。
 - **拒絕**：state → `denied`。
 
-**M2 不做「批准後續跑原對話」**：那需要 M3 的 session 持久化與 M4 的 Queue。所以流程是「agent 準備好草稿 → 要寄出時停在審批 → 你在紀錄分頁批准 → 信寄出」，agent 不會再回來跟你說「已寄出」；要確認就看審批卡片的執行結果。同一輪裡模型若重複要求同一個被攔的動作，不會再寫第二筆。
+**M4 起批准 / 拒絕後會續跑原對話**：若 `Approvals.job_id`（存 session id）對應的 session 仍 active，會排一個 `continuation` job，以 user 訊息「（系統）先前待審批的 X 已由 owner 批准並執行，結果：…」（拒絕則「已由 owner 拒絕，未執行」）接回該 session，由 trigger 一分鐘內跑完；到聊天台切到該 session 就看得到 agent 的後續回覆。curation 提議（`memory_manage`）批准只套用、不續跑。同一輪裡模型若重複要求同一個被攔的動作，不會再寫第二筆。
 
 「紀錄」分頁下方同時列最近 50 筆 `AuditLog`（每次工具執行一列，失敗列紅底）。
 
@@ -296,6 +300,7 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 | curation 直接套用 | `curation_auto_apply` | 關 |
 | session 閒置幾小時自動切新（0 關） | `session_idle_hours` | 6 |
 | session 向量搜尋 | `session_embeddings` | 關 |
+| 單輪時間預算（秒） | `turn_budget_seconds`（M4；到了就停並由 Queue 續跑） | 270 |
 
 token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何時壓縮。Doctor 加：兩表容量、Sessions 可讀、有 fast provider（沒有只是提醒）、開了向量搜尋就要有 embed provider。
 
@@ -307,6 +312,73 @@ token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何
 4. 聊天台輸入 `/new` → 回「已開新 session」；再問「我的偏好是什麼？」→ 應直接從快照回答，不需查詢。
 5. 問「上個月我們聊過哪個專案？」→ 預期 `session_search` 步驟並列出先前 session。
 6. 「記憶」分頁對 session A 按「整理記憶」→ 「紀錄」分頁出現 `memory_manage` 的待審批（或回「沒有需要更新的記憶」）。
+
+## Queue 與排程（M4）
+
+### Queue runner
+
+`installAgent()` 裝的每分鐘 trigger 跑 `queueTick()`（[Queue.gs](src/Queue.gs)）。閒置時只讀兩個 Script Property：`QUEUE_DIRTY`（有 queued job）與 `CRON_NEXT_RUN`（最早到期的排程），都沒到就不開 spreadsheet。有事要做時一次 tick：
+
+1. `LockService.tryLock` 防重入（trigger 與管理頁「處理一個 job」同時跑時後者略過）。
+2. 掃 `Cron` tab：`next_run <= now` 且啟用的排程各排一個 `cron` job，`next_run` 推到下一次。
+3. 卡在 `running` 超過 10 分鐘的 job（執行被 GAS 中止）重排；嘗試滿 3 次就判 `failed`。
+4. 取**最舊的一個** `queued` job → `running` → 依 type 執行 → `done` / `needs_approval`（有工具停在審批）/ `failed`。整個 tick 預算 4.5 分鐘；程式例外會重試，`attempts ≥ 3` 不再重試。
+5. 沒有 queued 就清 `QUEUE_DIRTY`。
+
+`Queue` tab 欄位：`id / type / session_id / payload(JSON) / state / attempts / started / finished / error`；結果寫在 `payload.result`（文字、工具步驗摘要、`stopped`、`sessionId`、`continued_by`、`delivery`）。
+
+| type | 來源 | 做什麼 |
+|---|---|---|
+| `turn` | 聊天台勾「背景執行」 | `runSessionTurn_()` 一輪（interactive；審批策略照常） |
+| `cron` | 排程到期 / 立即執行 | 建**新 session**（channel `cron`、`external_id` = 排程 id、`model_override` = model_pin），`mode='autonomous'` 跑 prompt，結束後依 `deliver_to` 投遞並寫回 `Cron.last_status` |
+| `continuation` | checkpoint 或審批決定 | 在**同一 session** 再跑一輪，user 訊息是系統提示 |
+| `curation` | 預留（目前 curation 仍同步跑） | `curateSession_()` |
+
+### Checkpoint 續跑
+
+`runTurn_` 到時間預算（Config `turn_budget_seconds`，預設 270 秒）或步數上限會停，這一輪的訊息已由 `runSessionTurn_` 寫進 `Messages`。Queue 看到 `stopped` 是 `time_budget` / `max_steps` 就排一個 `continuation` job，帶「（系統）上一輪因時間預算或步數上限而中止…請接續完成」提示接回同一 session；**上限續跑 3 次**，之後標 `continuation_exhausted`。cron 任務只在最終那一輪（不再續跑）投遞；續跑中 `last_status` 會顯示「running（續跑 job …）」。
+
+要驗證續跑，到「設定」把 `turn_budget_seconds` 暫時調到 20–40 秒，再把一個會呼叫幾個工具的任務用「背景執行」送出；驗完記得調回 270。
+
+### 排程（`Cron` tab）
+
+欄位：`id / name / schedule / next_run / prompt / skills / deliver_to / model_pin / enabled / last_run / last_status`。管理頁「排程」分頁可新增 / 編輯 / 啟停 / 立即執行，`cronjob_manage` 工具（toolset `cronjob`）讓 agent 在聊天中代勞（`delete` 只停用不刪列）。
+
+`schedule` 寫法（[Cron.gs](src/Cron.gs) `computeNextRun_` 純函式，時區 Asia/Taipei）：
+
+| 寫法 | 意思 |
+|---|---|
+| `0 9 * * *` | 5 欄 cron：分 時 日 月 週；支援 `*`、數字、`,`、`-`、`*/n`；週 0 或 7 = 日，也接受 `mon`..`sun`。日與週都有限制時取「或」（cron 慣例） |
+| `daily 09:00` / `每天 09:00` | 每天固定時間（省略時間 = 09:00） |
+| `weekly mon 09:00` / `每週一 09:00` | 每週固定日 |
+| `hourly` / `每小時` | 每小時整點 |
+
+排程任務在**無人模式**跑：system prompt 會加「沒有使用者在線、不要提問、輸出可直接交付的結果」；X 類工具依 `approval_policy` 處理（`always` / `autonomous_only` 都會送審，結果文件裡會列出待審批的動作，批准後會續跑該 session）。**排程任務執行中 `cronjob_manage` 只能 `list`**，不能再建 / 改 / 觸發排程（避免遞迴）。`skills` 欄位 M5 才生效。
+
+### 投遞（`Deliver.gs`）
+
+| `deliver_to` | 做法 |
+|---|---|
+| `doc` | 在 Drive `GAS Agent/reports/` 建一份 Google 文件，標題「`<name> YYYY-MM-DD`」，內文 = agent 的最終回覆（輕量 markdown）+「執行資訊」（session、模型、工具步驟、待審批、中止原因） |
+| `email` | 同樣內容寄給 `OWNER_EMAIL`。**只寄給 owner 自己不算外發**，不走 `gmail_send` 工具也不走審批 |
+| `none` | 不投遞；結果仍在 Queue job 與該 session 裡 |
+
+投遞失敗時 job 標 `failed`（結果保留、`error` 欄記原因），不會自動重跑模型；Telegram 投遞留 M6。
+
+### 管理頁
+
+- **排程**：列表（下次 / 上次 / 狀態）、新增 / 編輯 / 啟停、「立即執行」會排 job 並輪詢到完成，顯示投遞結果與 Doc 連結。
+- **紀錄 → Queue**：最近 30 個 job、狀態、失敗原因、「重試」（failed → queued）、「處理一個 job」（不想等 trigger 時手動跑一次 tick）。
+- **聊天台 → 背景執行**：勾了就排 `turn` job 並每 5 秒輪詢 `adminGetJob`，續跑會自動跟到下一個 job，證明 Queue 路徑可用。
+- **Doctor** 加三項：Queue 沒有卡在 running 超過 10 分鐘的 job、Cron 的 schedule 都能解析、`CRON_NEXT_RUN` 旗標與 Cron tab 一致（黃燈提醒）。
+
+### M4 驗收步驟（請在瀏覽器操作）
+
+1. Doctor → 「重新安裝」（Config 補 `rbac.cronjob` 與 `turn_budget_seconds`、對齊 `CRON_NEXT_RUN`）→ 全綠 → 「跑 smoke tests」50 項全過。
+2. 「排程」→「新增排程」：名稱 `每日郵件摘要`、schedule `daily 09:00`、投遞 `doc`、任務指令 `搜尋昨天收到的信件（newer_than:1d），挑出重要的 5–10 封，整理成「重點 / 待回覆 / 可忽略」三段摘要。` → 新增。列表應顯示下次 = 明天 09:00。
+3. 按該列「立即執行」→ 狀態從「排隊中」變「執行中」再變「完成」（trigger 每分鐘跑一次，約 1–3 分鐘；或到「紀錄」按「處理一個 job」立刻跑）→ 出現「Doc「每日郵件摘要 YYYY-MM-DD」」連結，點開確認內容；Drive `GAS Agent/reports/` 裡有這份文件；排程列的「上次 / 狀態」更新。
+4. 「設定」把 `turn_budget_seconds` 調成 30 → 儲存。「聊天台」勾「背景執行」，輸入一個要呼叫幾個工具的任務（例：`列出我 Drive 最近 10 個檔案，逐一讀出前 200 字，最後整理成一份 Doc`）→ 送出。預期：氣泡顯示 job id 與輪詢秒數；「紀錄 → Queue」看到第一個 job `done`、結果標「中止 time_budget」「續跑 → job_…」，接著出現 `continuation` job；全部跑完後聊天台顯示合併的回覆（各段以「— 續跑 —」分隔）與 `Queue job：job_a → job_b` 鏈。驗完把 `turn_budget_seconds` 調回 270。
+5. 審批後續跑：聊天台（不勾背景）要求寄一封信給自己 → 停在審批 → 「紀錄」按「批准並執行」→ 卡片下方出現「已排續跑 job …」→ 一分鐘後聊天台切回該 session（或重新整理），最後一則是 agent 根據「已由 owner 批准並執行」的系統訊息做的收尾。
 
 ## 開發流程
 
@@ -353,6 +425,11 @@ node scripts/local-tests.js
 | `memory_manage` 回「命中 N 條」 | 模型給的 old_content 太短；通常會自己重試，否則在「記憶」分頁手動改 |
 | 聊天台回「前一個 session 閒置超過 N 小時」 | 正常：超過 `session_idle_hours` 自動開新 session；要延長到「設定」調 |
 | 壓縮 / curation 很慢或很貴 | 加一個 `role=fast` 的便宜 provider；沒有 fast 會用 main |
+| 排程「立即執行」一直「排隊中」 | trigger 沒在跑：Doctor 看 trigger 是否 1 支；或到「紀錄」按「處理一個 job」手動跑。`QUEUE_DIRTY` 旗標若被清掉（Doctor 黃燈），重新 enqueue 或手動 tick 即可 |
+| 排程到點沒執行 | 排程未啟用、`schedule` 無法解析（Doctor 紅燈）、或 `CRON_NEXT_RUN` 旗標不對（開一次「排程」分頁或「重新安裝」會對齊） |
+| Queue job 標 `failed`、error 寫「running 超過 10 分鐘」 | 該次執行被 GAS 6 分鐘上限中止（通常是某個工具或模型回應太慢）。按「重試」；長任務請靠續跑而非一步到底，或調低 `turn_budget_seconds` |
+| cron 任務的信沒寄出 / 文件沒分享 | 無人模式下 X 類工具依審批策略送審：到「紀錄」批准，agent 會續跑收尾。投遞到 owner 自己的 `email` 不受此限 |
+| agent 在排程任務裡說「不可建立排程」 | 刻意限制：排程任務執行中 `cronjob_manage` 只能 list，避免遞迴排程 |
 
 ## 里程碑
 
@@ -360,7 +437,7 @@ node scripts/local-tests.js
 - [x] M1 多 provider（OpenAI 相容 / Anthropic / Gemini）、備援鏈、Usage、模型分頁、聊天台（單輪、同步）
 - [x] M2 工具與 RBAC（八個 toolset、registry / executor、審批、溢寫、工具迴圈、工具 / 紀錄分頁）—— 批准後續跑對話留到 M3/M4
 - [x] M3 記憶：Sessions / Messages 持久化、context 壓縮、Memory / UserProfile 上限與快照、memory_manage、session_search（可選向量）、curation 進審批、記憶 / 設定分頁
-- [ ] M4 排程與非同步 Queue
+- [x] M4 排程與非同步 Queue：job 狀態機、checkpoint 續跑、審批後續跑、Cron 解析與到期掃描、`cronjob_manage`、投遞 doc / email、排程 / Queue 分頁、背景執行
 - [ ] M5 技能（Drive `skills/`）
 - [ ] M6 通道（Telegram webhook 部署 B、Email 指令信）
 - [ ] M7 加固與維運

@@ -29,12 +29,14 @@ const AGENT_CONFIG_DEFAULTS = Object.freeze({
   curation_auto_apply: false,
   session_idle_hours: 6,
   session_embeddings: false,
+  turn_budget_seconds: 270,
 });
 
 /**
  * @typedef {{
  *   memoryMaxChars: number, profileMaxChars: number, contextMaxTokens: number, keepRecentTurns: number,
- *   curationEveryTurns: number, curationAutoApply: boolean, sessionIdleHours: number, sessionEmbeddings: boolean
+ *   curationEveryTurns: number, curationAutoApply: boolean, sessionIdleHours: number, sessionEmbeddings: boolean,
+ *   turnBudgetSeconds: number
  * }} AgentConfig
  */
 
@@ -54,6 +56,8 @@ function parseAgentConfig_(map) {
     curationAutoApply: map.curation_auto_apply === undefined ? d.curation_auto_apply : toBoolean_(map.curation_auto_apply),
     sessionIdleHours: clampInt_(map.session_idle_hours, d.session_idle_hours, 0, 720),
     sessionEmbeddings: map.session_embeddings === undefined ? d.session_embeddings : toBoolean_(map.session_embeddings),
+    // 單輪時間預算（秒）。預設 270 = Agent.gs 的 TURN_TIME_BUDGET_MS；驗收 Queue 續跑時可調小。
+    turnBudgetSeconds: clampInt_(map.turn_budget_seconds, d.turn_budget_seconds, 20, 300),
   };
 }
 
@@ -529,6 +533,8 @@ function runSessionTurn_(input, deps) {
     systemExtra: input.systemExtra || '',
     contextBlocks,
   }, Object.assign({ registry, config: toolConfig, chat: deps.chat, now: deps.now }, deps.turnDeps || {}, {
+    // 時間預算：Config turn_budget_seconds 與呼叫端（Queue 剩餘預算）取小。
+    budgetMs: Math.min(cfg.turnBudgetSeconds * 1000, (deps.turnDeps && deps.turnDeps.budgetMs) || Infinity),
     executeDeps: Object.assign({ registry, config: toolConfig, memoryStore, sessionStore: store, agentConfig: cfg }, (deps.turnDeps && deps.turnDeps.executeDeps) || {}),
   }));
 

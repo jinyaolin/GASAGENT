@@ -52,6 +52,7 @@ function allToolDeclarations_() {
     webTools_(),
     sessionTools_(),
     memoryTools_(),
+    cronTools_(),
   );
 }
 

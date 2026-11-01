@@ -1,5 +1,5 @@
 /**
- * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）。
+ * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）、Queue 與排程（M4）。
  *
  * 回傳純 JSON，管理頁 Doctor 分頁以綠 / 紅 / 黃清單顯示。
  * status：'ok' 通過、'fail' 失敗（整體 ok=false）、'warn' 提醒（不影響整體）。
@@ -165,6 +165,32 @@ function runDoctor() {
       }
     } catch (err) {
       push('memory', '記憶 / session 健檢', 'fail', String(err && err.message || err));
+    }
+  }
+
+  // 10. Queue 與排程（M4）
+  if (ss) {
+    try {
+      const jobs = sheetQueueStore_().list();
+      const nowMs = Date.now();
+      const stuck = jobs.filter((j) => j.state === 'running' && j.started && nowMs - j.started.getTime() > QUEUE_STUCK_RUNNING_MS);
+      const queued = jobs.filter((j) => j.state === 'queued').length;
+      const failed = jobs.filter((j) => j.state === 'failed').length;
+      const dirty = getProp_(PROP.QUEUE_DIRTY) === '1';
+      push('queue_stuck', `Queue 沒有卡在 running 超過 ${QUEUE_STUCK_RUNNING_MS / 60000} 分鐘的 job`, stuck.length ? 'fail' : 'ok',
+        stuck.length ? `卡住：${stuck.map((j) => j.id).join(', ')}（下次 tick 會重排或判失敗）` : `${jobs.length} 個 job：${queued} queued、${failed} failed；QUEUE_DIRTY=${dirty ? '1' : '（空）'}`);
+      if (queued && !dirty) push('queue_dirty', 'QUEUE_DIRTY 旗標與 Queue tab 一致', 'warn', `有 ${queued} 個 queued job 但旗標未設，trigger 不會處理；按一次「處理一個 job」或重新 enqueue 即可。`);
+      const crons = sheetCronStore_().list();
+      const bad = crons.filter((c) => { try { parseCronSchedule_(c.schedule); return false; } catch (err) { return true; } });
+      const enabledCrons = crons.filter((c) => c.enabled);
+      const next = earliestCronNextRun_(crons);
+      push('cron_schedules', 'Cron 的 schedule 都能解析', bad.length ? 'fail' : 'ok',
+        bad.length ? `無法解析：${bad.map((c) => `${c.name}「${c.schedule}」`).join('、')}` : `${crons.length} 個排程（${enabledCrons.length} 啟用）${next ? `，最早下次 ${fmtDate_(next)}` : ''}`);
+      const prop = getProp_(PROP.CRON_NEXT_RUN);
+      const expected = next ? next.toISOString() : '';
+      if (prop !== expected) push('cron_next_prop', 'CRON_NEXT_RUN 旗標與 Cron tab 一致', 'warn', `旗標 ${prop || '（空）'}，應為 ${expected || '（空）'}；開「排程」分頁或重新安裝會對齊。`);
+    } catch (err) {
+      push('queue', 'Queue / 排程健檢', 'fail', String(err && err.message || err));
     }
   }
 

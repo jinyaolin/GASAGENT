@@ -168,6 +168,7 @@ function saveAgentConfig_(input) {
     memory_max_chars: parsed.memoryMaxChars, profile_max_chars: parsed.profileMaxChars, context_max_tokens: parsed.contextMaxTokens,
     keep_recent_turns: parsed.keepRecentTurns, curation_every_turns: parsed.curationEveryTurns, curation_auto_apply: parsed.curationAutoApply,
     session_idle_hours: parsed.sessionIdleHours, session_embeddings: parsed.sessionEmbeddings,
+    turn_budget_seconds: parsed.turnBudgetSeconds,
   };
   const out = {};
   Object.keys(values).forEach((k) => { out[k] = normalized[k]; });
@@ -523,26 +524,83 @@ function approvalCreatedAt_(id) {
 }
 
 /**
+ * Sheet 版 Approvals store（decideApproval_ 用；測試可注入記憶體版）。
+ * @return {{list: function(): !Array<!Object>, update: function(!Object, !Object)}}
+ */
+function sheetApprovalStore_() {
+  return {
+    list: () => listApprovals_(),
+    update: (row, fields) => {
+      writeTableRow_('Approvals', row._row, Object.assign({ id: row.id, job_id: row.job_id, tool: row.tool, args: row.args, reason: row.reason }, fields));
+    },
+  };
+}
+
+/**
  * owner 決定一筆審批。批准 = 立刻以 approved=true 執行該工具一次（RBAC 仍檢）並把結果寫回；拒絕 = 標記 denied。
- * M2 不續跑原對話（要 M3 session 持久化 + M4 Queue）。
+ * M4：若 Approvals.job_id 對應一個仍 active 的 session（M2 起 job_id 存 sessionId），再 enqueue 一個 continuation job，
+ * 以 user 訊息「（系統）先前待審批的 X 已由 owner 批准並執行，結果：…」（拒絕也通知）接回該 session 續跑。
+ * curation 提議（reason 以 curation 開頭）不是對話中的動作，不續跑。
  * @param {string} id
  * @param {boolean} approve
- * @param {Object=} deps 傳給 executeTool_
- * @return {{id: string, state: string, outcome: ?ToolOutcome}}
+ * @param {{approvalStore: (Object|undefined), sessionStore: (Object|undefined), queueStore: (Object|undefined),
+ *   enqueue: (Function|undefined)}=} deps 其餘欄位（registry / config / sink / spill…）透給 executeTool_
+ * @return {{id: string, state: string, outcome: ?ToolOutcome, continuation: string}} continuation = 續跑 job id（沒有為空）
  * @throws {Error} 找不到或已處理
  */
 function decideApproval_(id, approve, deps) {
-  const row = listApprovals_().find((r) => r.id === id);
+  deps = deps || {};
+  const approvalStore = deps.approvalStore || sheetApprovalStore_();
+  const row = approvalStore.list().find((r) => r.id === id);
   if (!row) throw new Error(`找不到審批「${id}」。`);
   if (row.state !== 'pending') throw new Error(`審批「${id}」已處理（${row.state}）。`);
   const now = new Date();
-  const base = { id: row.id, job_id: row.job_id, tool: row.tool, args: row.args, reason: row.reason };
+  const execDeps = {};
+  Object.keys(deps).forEach((k) => { if (['approvalStore', 'sessionStore', 'queueStore', 'enqueue'].indexOf(k) === -1) execDeps[k] = deps[k]; });
   if (!approve) {
-    writeTableRow_('Approvals', row._row, Object.assign(base, { state: 'denied', decided_at: now, result: '' }));
-    return { id, state: 'denied', outcome: null };
+    approvalStore.update(row, { state: 'denied', decided_at: now, result: '' });
+    const c = enqueueApprovalContinuation_(row, false, null, deps);
+    return { id, state: 'denied', outcome: null, continuation: c ? c.id : '' };
   }
-  const outcome = executeTool_(row.tool, parseJsonArgs_(row.args), { sessionId: row.job_id, mode: 'interactive', approved: true }, deps);
+  const outcome = executeTool_(row.tool, parseJsonArgs_(row.args), { sessionId: row.job_id, mode: 'interactive', approved: true }, execDeps);
   const resultText = truncateText_((outcome.ok ? 'OK: ' : `[${outcome.status}] `) + outcome.content, 2000).text;
-  writeTableRow_('Approvals', row._row, Object.assign(base, { state: 'approved', decided_at: now, result: resultText }));
-  return { id, state: 'approved', outcome: Object.assign({}, outcome, { result: null }) };
+  approvalStore.update(row, { state: 'approved', decided_at: now, result: resultText });
+  const c = enqueueApprovalContinuation_(row, true, outcome, deps);
+  return { id, state: 'approved', outcome: Object.assign({}, outcome, { result: null }), continuation: c ? c.id : '' };
+}
+
+/**
+ * 審批決定後把結果接回原 session：enqueue 一個 continuation job。沒有可續跑的 session 時回 null。
+ * @param {!Object} row Approvals 列
+ * @param {boolean} approved
+ * @param {?ToolOutcome} outcome
+ * @param {{sessionStore: (Object|undefined), queueStore: (Object|undefined), enqueue: (Function|undefined)}} deps
+ * @return {?Object} job
+ */
+function enqueueApprovalContinuation_(row, approved, outcome, deps) {
+  if (/^curation/i.test(String(row.reason || ''))) return null;
+  const sessionId = String(row.job_id || '');
+  if (!sessionId) return null;
+  let session = null;
+  try {
+    session = (deps.sessionStore || sheetSessionStore_()).get(sessionId);
+  } catch (err) {
+    return null;
+  }
+  if (!session || session.status !== 'active') return null;
+  const argsPreview = truncateText_(String(row.args || ''), 300).text;
+  const text = approved
+    ? `（系統）先前待審批的 ${row.tool} 已由 owner 批准並執行，結果：${truncateText_(outcome ? outcome.content : '', 1500).text}`
+    : `（系統）先前待審批的 ${row.tool}（參數 ${argsPreview}）已由 owner 拒絕，未執行。`;
+  const payload = {
+    message: text + '\n請據此接續完成原本的任務並回覆（不要再重送同一個動作）。',
+    origin: 'approval', approval_id: row.id, continuations: 0,
+    channel: session.channel || 'admin', mode: session.channel === 'cron' ? 'autonomous' : 'interactive',
+  };
+  try {
+    return (deps.enqueue || enqueue_)('continuation', payload, sessionId, { store: deps.queueStore });
+  } catch (err) {
+    console.warn('審批後續跑 enqueue 失敗：' + (err && err.message || err));
+    return null;
+  }
 }

@@ -10,7 +10,7 @@
     { id: 'tools', label: '工具' },
     { id: 'memory', label: '記憶' },
     { id: 'skills', label: '技能', milestone: 'M5' },
-    { id: 'cron', label: '排程', milestone: 'M4' },
+    { id: 'cron', label: '排程' },
     { id: 'logs', label: '紀錄' },
     { id: 'settings', label: '設定' },
     { id: 'doctor', label: 'Doctor' },
@@ -461,6 +461,7 @@
     const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。/new 開新 session。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
     const $log = el('div', { class: 'chat-log' });
     const $sessInfo = el('span', { class: 'hint' });
+    const $bg = el('input', { type: 'checkbox', title: '把這則訊息排進 Queue，由每分鐘 trigger 執行並輪詢結果（驗證 M4 Queue 路徑；超過時間預算會自動續跑）' });
     const btnSend = el('button', { class: 'primary', onclick: send }, '送出');
     const btnNew = el('button', { onclick: () => { $input.value = '/new'; send(); } }, '/new');
     let sessionId = '';
@@ -475,7 +476,7 @@
         el('div', { class: 'toolbar' }, [el('span', { class: 'field-label' }, 'provider'), $provider, el('span', { class: 'field-label' }, 'session'), $session, btnNew, $sessInfo]),
         el('details', { class: 'system-box' }, [el('summary', {}, '額外 system 指示'), $system]),
         $log,
-        el('div', { class: 'chat-input' }, [$input, btnSend]),
+        el('div', { class: 'chat-input' }, [$input, el('div', { class: 'chat-send' }, [btnSend, el('label', { class: 'checkbox small-check' }, [$bg, ' 背景執行（Queue）'])])]),
       ]),
     );
 
@@ -530,7 +531,9 @@
       $pending.scrollIntoView({ block: 'end' });
       const t0 = Date.now();
       try {
-        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value, sessionId });
+        const r = $bg.checked
+          ? await runInBackground({ providerId: $provider.value, message, system: $system.value, sessionId }, $pending)
+          : await call('adminChat', { providerId: $provider.value, message, system: $system.value, sessionId });
         const meta = [
           r.provider ? `${r.provider} · ${r.model}` : null,
           r.llmCalls ? `LLM ${r.llmCalls} 次 · 工具 ${r.steps.length} 步` : null,
@@ -538,6 +541,7 @@
           `${r.ms} ms（含往返 ${Date.now() - t0} ms）`,
           r.costEst ? `≈ $${r.costEst}` : null,
           r.stopped ? `中止：${r.stopped}` : null,
+          r.jobChain ? `Queue job：${r.jobChain.join(' → ')}` : null,
           r.compacted ? '本輪前已壓縮較早對話' : null,
           r.curation ? `記憶整理：${r.curation}` : null,
           r.sessionReason || null,
@@ -563,6 +567,38 @@
         $input.disabled = false;
         $input.focus();
         if ($log.lastChild) $log.lastChild.scrollIntoView({ block: 'end' });
+      }
+    }
+
+    /**
+     * 背景執行：enqueue 一個 turn job，每 5 秒輪詢 adminGetJob；job 續跑（result.continued_by）就跟著下一個 job。
+     * 回傳與 adminChat 相容的物件。
+     */
+    async function runInBackground(payload, $pending) {
+      const job = await call('adminEnqueueChat', payload);
+      const chain = [job.id];
+      const texts = [];
+      const steps = [];
+      let current = job;
+      const t0 = Date.now();
+      for (;;) {
+        $pending.firstChild && ($pending.querySelector('.bubble-text').textContent =
+          `已排入 Queue：${current.id}（${current.state}${current.attempts ? `，第 ${current.attempts} 次` : ''}）。每分鐘 trigger 會處理，輪詢中… ${Math.round((Date.now() - t0) / 1000)}s`);
+        await new Promise((res) => setTimeout(res, 5000));
+        if (Date.now() - t0 > 30 * 60000) throw new Error(`輪詢超過 30 分鐘仍未完成：${current.id}（到「紀錄」分頁看 Queue）`);
+        const j = await call('adminGetJob', current.id);
+        if (!j) throw new Error(`job ${current.id} 消失了`);
+        current = j;
+        if (j.state === 'queued' || j.state === 'running') continue;
+        if (j.state === 'failed') throw new Error(`job ${j.id} 失敗（第 ${j.attempts} 次）：${j.error}`);
+        const res = j.payload.result || {};
+        if (res.text) texts.push(res.text);
+        (res.steps || []).forEach((st) => steps.push(st));
+        if (res.continued_by) { chain.push(res.continued_by); current = { id: res.continued_by, state: 'queued', attempts: 0 }; continue; }
+        return Object.assign({}, res, {
+          text: texts.join('\n\n— 續跑 —\n\n'), steps, fallbacks: [], jobChain: chain, sessionId: res.sessionId, turns: res.turns,
+          ms: res.ms, curation: '', command: '', sessionReason: res.sessionCreated ? '背景 job 建了新 session' : '',
+        });
       }
     }
 
@@ -734,6 +770,7 @@
     { key: 'curation_auto_apply', label: 'curation 直接套用', type: 'checkbox', hint: '關閉時提議進「紀錄 → 審批」由你批准（建議）' },
     { key: 'session_idle_hours', label: 'session 閒置幾小時自動切新', hint: '0 = 不自動切' },
     { key: 'session_embeddings', label: 'session 向量搜尋', type: 'checkbox', hint: '需要一個 role=embed 的 provider（openai / gemini）；在 curation 時為 session 摘要算向量' },
+    { key: 'turn_budget_seconds', label: '單輪時間預算（秒）', hint: '到了就停並由 Queue 續跑（上限 3 次）。GAS 單次執行 6 分鐘，別超過 300；要驗證續跑可暫時調到 20–40' },
   ];
 
   async function renderSettings(root) {
@@ -852,7 +889,7 @@
       el('div', { class: 'panel' }, [el('h3', {}, 'RBAC：toolset 開關'), $rbac,
         el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。M2 沒有 D 類工具（刻意不開放任何刪除）。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
       el('div', { class: 'panel' }, [el('h3', {}, 'Agent 設定'), el('div', { class: 'form-grid' }, [
-        field('審批策略（X 類工具）', $policy, 'M2 只有互動模式；autonomous_only 要到 M4 排程才有差別'),
+        field('審批策略（X 類工具）', $policy, 'autonomous_only = 只有排程（無人模式）才送審，聊天台直接執行'),
         field('spill_threshold（字元）', $spill, '工具結果超過此長度就溢寫到 Drive「GAS Agent/spill」，context 只留前 1000 字'),
         field('max_tool_steps', $steps, '單輪工具步數上限；另有 4.5 分鐘時間預算與同參數失敗 3 次熔斷'),
       ])]),
@@ -883,16 +920,84 @@
   // ---- 紀錄：審批 + AuditLog ---------------------------------------------------------------
 
   async function renderLogs(root) {
-    root.append(...header('紀錄', '審批：X 類工具被攔下的動作，批准即立刻執行一次（不續跑原對話，M3/M4 再做）。AuditLog：每次工具執行一列。'));
+    root.append(...header('紀錄', '審批：X 類工具被攔下的動作，批准即立刻執行一次，並排一個續跑 job 把結果接回原對話。Queue：背景 job 與排程執行。AuditLog：每次工具執行一列。'));
     const $approvals = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    const $queue = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    const $queueInfo = el('span', { class: 'hint' });
     const $audit = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
-    const btnReload = el('button', { onclick: () => { loadApprovals(); loadAudit(); } }, '重新整理');
+    const btnReload = el('button', { onclick: () => { loadApprovals(); loadQueue(); loadAudit(); } }, '重新整理');
+    const btnTick = el('button', { onclick: () => tickNow() }, '處理一個 job');
     root.append(
       el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, '審批'), btnReload]), $approvals]),
+      el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, 'Queue（最近 30 個 job）'), btnTick, $queueInfo]), $queue]),
       el('div', { class: 'panel' }, [el('h3', {}, 'AuditLog（最近 50 筆）'), $audit]),
     );
     loadApprovals();
+    loadQueue();
     loadAudit();
+
+    async function loadQueue() {
+      $queue.innerHTML = '';
+      $queue.append(el('div', { class: 'loading' }, '載入中…'));
+      try {
+        const r = await call('adminListQueue', 30);
+        $queueInfo.textContent = `trigger ${r.triggerCount} 支 · QUEUE_DIRTY ${r.dirty ? '1' : '空'} · 下一個排程 ${r.cronNextRun ? r.cronNextRun.slice(0, 16).replace('T', ' ') + 'Z' : '無'}`;
+        $queue.innerHTML = '';
+        if (!r.jobs.length) { $queue.append(el('div', { class: 'placeholder' }, '尚無 job。聊天台勾「背景執行」或排程「立即執行」會產生 job。')); return; }
+        $queue.append(el('div', { class: 'table-wrap' }, el('table', { class: 'table audit' }, [
+          el('thead', {}, el('tr', {}, ['建立', '類型', '狀態', '內容', 'session', '次', '完成', '結果 / 錯誤', ''].map((h) => el('th', {}, h)))),
+          el('tbody', {}, r.jobs.map((j) => jobRow(j))),
+        ])));
+      } catch (err) {
+        $queue.innerHTML = '';
+        $queue.append(errorBox(err));
+      }
+    }
+
+    function jobRow(j) {
+      const res = j.payload.result;
+      const $detail = el('div', { class: 'audit-cell' });
+      if (j.error) $detail.append(el('div', { class: 'error' }, j.error));
+      if (res) {
+        if (res.text) $detail.append(el('div', {}, res.text.slice(0, 400) + (res.text.length > 400 ? '…' : '')));
+        const bits = [];
+        if (res.steps && res.steps.length) bits.push(`工具 ${res.steps.length} 步`);
+        if (res.stopped) bits.push(`中止 ${res.stopped}`);
+        if (res.continued_by) bits.push(`續跑 → ${res.continued_by}`);
+        if (res.continuation_exhausted) bits.push('已達續跑上限');
+        if (res.delivery) bits.push(res.delivery.summary);
+        if (bits.length) $detail.append(el('div', { class: 'meta' }, bits.join(' · ')));
+        if (res.delivery && res.delivery.ok && res.delivery.channel === 'doc') $detail.append(el('a', { href: res.delivery.ref, target: '_blank', rel: 'noopener' }, '開啟 Doc'));
+      }
+      const btnRetry = j.state === 'failed' ? el('button', { class: 'small', onclick: async () => { btnRetry.disabled = true; try { await call('adminRetryJob', j.id); loadQueue(); } catch (err) { $detail.append(errorBox(err)); } } }, '重試') : null;
+      return el('tr', { class: j.state === 'failed' ? 'audit-fail' : '' }, [
+        el('td', { class: 'nowrap' }, (j.created_at || '').slice(5, 16).replace('T', ' ')),
+        el('td', {}, el('code', {}, j.type)),
+        el('td', {}, el('span', { class: 'badge state-' + j.state, title: j.id }, JOB_STATE_LABEL[j.state] || j.state)),
+        el('td', { class: 'audit-cell' }, j.summary || ''),
+        el('td', {}, el('span', { class: 'meta' }, j.session_id)),
+        el('td', {}, String(j.attempts)),
+        el('td', { class: 'nowrap' }, (j.finished || '').slice(5, 16).replace('T', ' ')),
+        el('td', {}, $detail),
+        el('td', { class: 'actions' }, btnRetry),
+      ]);
+    }
+
+    async function tickNow() {
+      btnTick.disabled = true;
+      $queueInfo.textContent = '執行中（最多 4.5 分鐘）…';
+      try {
+        const r = await call('adminQueueTick');
+        $queueInfo.textContent = r.skipped ? `略過：${r.skipped}（trigger 正在跑）` : `跑了 ${r.ran ? `${r.ran.id} → ${r.ran.state}` : '0 個 job'}；排程入列 ${r.cronEnqueued.length}；剩 ${r.remaining} queued`;
+        loadQueue();
+        loadApprovals();
+      } catch (err) {
+        $queueInfo.innerHTML = '';
+        $queueInfo.append(errorBox(err));
+      } finally {
+        btnTick.disabled = false;
+      }
+    }
 
     async function loadApprovals() {
       $approvals.innerHTML = '';
@@ -942,7 +1047,8 @@
         } else {
           $result.append(el('div', { class: 'summary fail' }, '已拒絕'));
         }
-        setTimeout(() => { loadApprovals(); loadAudit(); }, 800);
+        if (r.continuation) $result.append(el('div', { class: 'meta' }, `已排續跑 job ${r.continuation}：結果會以系統訊息接回原 session（trigger 一分鐘內處理）。`));
+        setTimeout(() => { loadApprovals(); loadQueue(); loadAudit(); }, 800);
       } catch (err) {
         $result.append(errorBox(err));
         buttons.forEach((b) => { b.disabled = false; });
@@ -973,6 +1079,153 @@
     }
   }
 
+  // ---- 排程（Cron）------------------------------------------------------------------------------
+
+  const JOB_STATE_LABEL = { queued: '排隊中', running: '執行中', needs_approval: '待審批', done: '完成', failed: '失敗' };
+  const DELIVER_LABEL = { doc: 'doc — 建一份 Google 文件（GAS Agent/reports）', email: 'email — 寄給 owner', none: 'none — 不投遞' };
+
+  async function renderCron(root) {
+    root.append(...header('排程', '到期時由每分鐘 trigger 排進 Queue，在全新 session、無人模式（autonomous）執行；X 類工具依審批策略送審。結果依 deliver_to 投遞。schedule 用 5 欄 cron 或 hourly / daily 09:00 / weekly mon 09:00。'));
+    const $status = el('span', { class: 'hint' });
+    const $table = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+    const $form = el('div', { class: 'panel', style: 'display:none' });
+    const $run = el('div');
+    const btnAdd = el('button', { class: 'primary', onclick: () => openForm(null) }, '新增排程');
+    const btnReload = el('button', { onclick: () => load() }, '重新整理');
+    root.append(el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [btnAdd, btnReload, $status]), $table, $run]), $form);
+    let data = { crons: [], providers: [], deliverTargets: ['doc', 'email', 'none'] };
+
+    async function load() {
+      $table.innerHTML = '';
+      $table.append(el('div', { class: 'loading' }, '載入中…'));
+      try {
+        data = await call('adminListCron');
+        $status.textContent = data.cronNextRun ? `下一個到期：${data.cronNextRun.slice(0, 16).replace('T', ' ')}Z` : '沒有啟用的排程';
+        renderTable();
+      } catch (err) {
+        $table.innerHTML = '';
+        $table.append(errorBox(err));
+      }
+    }
+
+    function renderTable() {
+      $table.innerHTML = '';
+      if (!data.crons.length) {
+        $table.append(el('div', { class: 'placeholder' }, '尚無排程。按「新增排程」，例如：每天 09:00「摘要昨天的信件並寫成 Doc」。'));
+        return;
+      }
+      const thead = el('thead', {}, el('tr', {}, ['', '名稱', 'schedule', '下次', '投遞', '模型', '上次 / 狀態', ''].map((h) => el('th', {}, h))));
+      const tbody = el('tbody', {}, data.crons.map((c) => {
+        const btnRun = el('button', { class: 'small primary', onclick: () => runNow(c, btnRun) }, '立即執行');
+        const btnEdit = el('button', { class: 'small', onclick: () => openForm(c) }, '編輯');
+        const btnToggle = el('button', { class: 'small', onclick: () => toggle(c, btnToggle) }, c.enabled ? '停用' : '啟用');
+        return el('tr', { class: c.enabled ? '' : 'disabled-row' }, [
+          el('td', {}, el('span', { class: 'dot ' + (c.enabled ? 'on' : 'off'), title: c.enabled ? '啟用' : '停用' })),
+          el('td', {}, [el('div', {}, c.name), el('div', { class: 'meta' }, c.id), el('div', { class: 'meta', title: c.prompt }, c.prompt.slice(0, 80) + (c.prompt.length > 80 ? '…' : ''))]),
+          el('td', {}, [el('code', {}, c.schedule), c.cron_expr && c.cron_expr !== c.schedule ? el('div', { class: 'meta' }, c.cron_expr) : null, c.schedule_error ? el('div', { class: 'warn-text' }, c.schedule_error) : null]),
+          el('td', { class: 'nowrap' }, (c.next_run || '—').slice(0, 16).replace('T', ' ')),
+          el('td', {}, c.deliver_to),
+          el('td', {}, c.model_pin || el('span', { class: 'meta' }, '自動')),
+          el('td', {}, [el('div', { class: 'nowrap' }, (c.last_run || '—').slice(0, 16).replace('T', ' ')), el('div', { class: 'meta' }, c.last_status || '')]),
+          el('td', { class: 'actions' }, [btnRun, btnEdit, btnToggle]),
+        ]);
+      }));
+      $table.append(el('table', { class: 'table' }, [thead, tbody]));
+    }
+
+    async function toggle(c, btn) {
+      btn.disabled = true;
+      try { await call('adminSetCronEnabled', c.id, !c.enabled); await load(); } catch (err) { $run.innerHTML = ''; $run.append(errorBox(err)); btn.disabled = false; }
+    }
+
+    /** 立即執行：enqueue 後輪詢 job（含續跑鏈），顯示投遞結果。 */
+    async function runNow(c, btn) {
+      btn.disabled = true;
+      $run.innerHTML = '';
+      const $box = el('div', { class: 'placeholder' }, `已排入 Queue，等待每分鐘 trigger…`);
+      $run.append($box);
+      try {
+        let job = await call('adminRunCronNow', c.id);
+        const chain = [job.id];
+        const t0 = Date.now();
+        for (;;) {
+          $box.textContent = `job ${job.id}：${JOB_STATE_LABEL[job.state] || job.state}（${Math.round((Date.now() - t0) / 1000)}s）。trigger 每分鐘跑一次；也可到「紀錄」按「處理一個 job」。`;
+          await new Promise((res) => setTimeout(res, 5000));
+          if (Date.now() - t0 > 30 * 60000) throw new Error('輪詢超過 30 分鐘，請到「紀錄」分頁看 Queue。');
+          const j = await call('adminGetJob', job.id);
+          if (!j) throw new Error(`job ${job.id} 消失了`);
+          job = j;
+          if (j.state === 'queued' || j.state === 'running') continue;
+          const res = j.payload.result || {};
+          if (res.continued_by) { chain.push(res.continued_by); job = { id: res.continued_by, state: 'queued' }; continue; }
+          $box.innerHTML = '';
+          $box.className = 'panel';
+          $box.append(
+            el('div', { class: 'step-head' }, [el('span', { class: 'badge state-' + j.state }, JOB_STATE_LABEL[j.state] || j.state), el('span', { class: 'meta' }, `job ${chain.join(' → ')} · session ${res.sessionId || ''} · ${res.llmCalls || 0} 次模型 · ${(res.steps || []).length} 步工具${res.stopped ? ' · 中止 ' + res.stopped : ''}`)]),
+            j.error ? el('div', { class: 'error' }, j.error) : null,
+            res.delivery ? el('div', { class: 'summary ' + (res.delivery.ok ? 'ok' : 'fail') }, res.delivery.summary) : null,
+            res.delivery && res.delivery.ok && res.delivery.channel === 'doc' ? el('div', {}, el('a', { href: res.delivery.ref, target: '_blank', rel: 'noopener' }, '開啟 Doc')) : null,
+            el('div', { class: 'bubble assistant', style: 'max-width:100%' }, res.text || '（無文字結果）'),
+          );
+          await load();
+          return;
+        }
+      } catch (err) {
+        $box.replaceWith(errorBox(err));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function openForm(c) {
+      const isNew = !c;
+      $form.innerHTML = '';
+      $form.style.display = '';
+      const $name = el('input', { type: 'text', placeholder: '例：每日郵件摘要' });
+      const $schedule = el('input', { type: 'text', placeholder: 'daily 09:00 / weekly mon 09:00 / hourly / 0 9 * * 1-5' });
+      const $prompt = el('textarea', { rows: 4, style: 'font-family: inherit', placeholder: '例：搜尋昨天收到的信件（newer_than:1d），挑出重要的 5–10 封，整理成「重點 / 待回覆 / 可忽略」三段摘要。' });
+      const $deliver = el('select', {}, data.deliverTargets.map((t) => el('option', { value: t }, DELIVER_LABEL[t] || t)));
+      const $model = el('select', {}, [el('option', { value: '' }, '自動（main 備援鏈）')].concat(data.providers.map((p) => el('option', { value: p.id }, `${p.label || p.id}（${p.role} · ${p.model}）`))));
+      const $skills = el('input', { type: 'text', placeholder: 'M5 才生效' });
+      const $enabled = el('input', { type: 'checkbox' });
+      if (c) { $name.value = c.name; $schedule.value = c.schedule; $prompt.value = c.prompt; $deliver.value = c.deliver_to; $model.value = c.model_pin; $skills.value = c.skills; $enabled.checked = c.enabled; }
+      else { $deliver.value = 'doc'; $enabled.checked = true; }
+      const $msg = el('div');
+      const btnSave = el('button', { class: 'primary', onclick: save }, isNew ? '新增' : '儲存');
+      const btnCancel = el('button', { onclick: () => { $form.style.display = 'none'; $form.innerHTML = ''; } }, '取消');
+      $form.append(
+        el('h3', {}, isNew ? '新增排程' : `編輯 ${c.name}`),
+        el('div', { class: 'form-grid' }, [
+          field('名稱 *', $name, '也是投遞文件的標題前綴：「<名稱> YYYY-MM-DD」'),
+          field('schedule *', $schedule, '5 欄 cron（分 時 日 月 週；* , - */n）或 hourly / daily HH:MM / weekly <mon..sun> HH:MM；時區 Asia/Taipei'),
+          field('投遞', $deliver, 'email 只寄給 owner 自己，不走審批'),
+          field('模型', $model, '空 = main 備援鏈'),
+          field('技能', $skills, '逗號分隔；M5 才會載入'),
+          field('啟用', el('label', { class: 'checkbox' }, [$enabled, ' 啟用'])),
+        ]),
+        field('任務指令 *', $prompt, '會在全新 session、無人模式下執行：寫清楚要查什麼、產出什麼格式；不要期待模型反問'),
+        el('div', { class: 'toolbar' }, [btnSave, btnCancel]),
+        $msg,
+      );
+      $form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      async function save() {
+        btnSave.disabled = true;
+        $msg.innerHTML = '';
+        try {
+          await call('adminSaveCron', { id: c ? c.id : '', name: $name.value, schedule: $schedule.value, prompt: $prompt.value, deliver_to: $deliver.value, model_pin: $model.value, skills: $skills.value, enabled: $enabled.checked });
+          $form.style.display = 'none';
+          $form.innerHTML = '';
+          await load();
+        } catch (err) {
+          $msg.append(errorBox(err));
+          btnSave.disabled = false;
+        }
+      }
+    }
+
+    load();
+  }
+
   // ---- 尚未實作的分頁 ----------------------------------------------------------
 
   function renderPlaceholder(item) {
@@ -985,7 +1238,7 @@
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings, cron: renderCron };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {

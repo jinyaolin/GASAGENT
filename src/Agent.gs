@@ -7,7 +7,8 @@
  *
  * 三道煞車：
  * - 步數上限 Config `max_tool_steps`（預設 25；一個工具呼叫算一步）
- * - 時間預算 TURN_TIME_BUDGET_MS（4.5 分鐘；GAS 單次執行 6 分鐘），到了就停並回報
+ * - 時間預算 TURN_TIME_BUDGET_MS（4.5 分鐘；GAS 單次執行 6 分鐘；M4 起可由 Config turn_budget_seconds 調小），到了就停並回報；
+ *   M4 的 Queue 看到 stopped=time_budget / max_steps 會 enqueue continuation 續跑
  * - 熔斷：同一工具 + 同參數失敗 CIRCUIT_BREAKER_FAILURES（3）次即中止
  *
  * M1 的 runChatTurn_ 負責打 provider（備援鏈）；本檔只管迴圈。M4 的 Queue runner 呼叫同一個 runTurn_，
@@ -153,7 +154,7 @@ function preview_(s, max) {
 function stopMessage_(stopped, detail, steps) {
   const reasons = {
     max_steps: '已達單輪工具步數上限',
-    time_budget: '已達單輪時間預算（4.5 分鐘）',
+    time_budget: '已達單輪時間預算（Config turn_budget_seconds，預設 270 秒）',
     circuit_breaker: '同一工具以相同參數連續失敗 3 次，已熔斷',
   };
   const done = steps.filter((s) => s.ok).map((s) => s.tool);

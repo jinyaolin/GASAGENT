@@ -28,6 +28,9 @@ function installAgent() {
   const trigger = ensureQueueTrigger_();
   // M2：每個 toolset 的 RBAC 開關、審批策略等預設值（只補缺的，不覆寫）。
   const toolConfig = { addedKeys: ensureToolConfigDefaults_() };
+  // M4：CRON_NEXT_RUN 旗標與 Cron tab 對齊（queueTick 閒置時靠它判斷有沒有排程要跑）。
+  let cronNextRun = '';
+  try { cronNextRun = refreshCronNextRunProp_(sheetCronStore_().list()); } catch (err) { cronNextRun = `failed: ${err && err.message || err}`; }
 
   const summary = {
     version: APP_VERSION,
@@ -36,6 +39,7 @@ function installAgent() {
     schema,
     trigger,
     toolConfig,
+    cronNextRun,
   };
   console.log(JSON.stringify(summary, null, 2));
   return summary;

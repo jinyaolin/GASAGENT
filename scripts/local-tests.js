@@ -31,7 +31,11 @@ const sandbox = {
   },
   Utilities: {
     getUuid: () => crypto.randomUUID(),
-    formatDate: (d) => d.toISOString(),
+    formatDate: (d, tz, pattern) => {
+      // 只模擬程式用到的兩種樣式：yyyy-MM-dd（本地日期）與其餘回 ISO。
+      if (pattern === 'yyyy-MM-dd') { const p = (n) => (n < 10 ? '0' + n : String(n)); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }
+      return d.toISOString();
+    },
     newBlob: (s) => ({ getBytes: () => Array.from(Buffer.from(String(s))) }),
   },
   MimeType: { PLAIN_TEXT: 'text/plain', PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document', GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet', GOOGLE_SLIDES: 'application/vnd.google-apps.presentation' },

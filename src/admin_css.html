@@ -171,6 +171,15 @@
   .summary-box { white-space: pre-wrap; font-size: 13px; padding: 10px 14px; margin-bottom: 8px; }
   .bubble.tool-msg { font-size: 12px; color: var(--muted); }
 
+  /* M4：Queue / 排程 */
+  .chat-send { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  .small-check { font-size: 12px; color: var(--muted); padding: 0; white-space: nowrap; }
+  .badge.state-queued { background: var(--bg); color: var(--muted); }
+  .badge.state-running { background: var(--warn-soft); color: var(--warn); }
+  .badge.state-needs_approval { background: var(--warn-soft); color: var(--warn); }
+  .badge.state-done { background: var(--ok-soft); color: var(--ok); }
+  .badge.state-failed { background: var(--fail-soft); color: var(--fail); }
+
   @media (max-width: 720px) {
     .app { flex-direction: column; }
     .sidebar { width: auto; flex: none; height: auto; position: static; }
