@@ -229,8 +229,14 @@
     $nav.innerHTML = '';
     const active = currentRoute();
     NAV.forEach((item) => {
-      // target=_self：GAS 的 HtmlService 會注入 <base target="_top">，hash 連結若不指回 iframe 自己，整個視窗會跳到 userCodeAppPanel 空白頁。
-      $nav.append(el('a', { href: '#/' + item.id, target: '_self', class: item.id === active ? 'active' : '' }, item.label));
+      // GAS 的 HtmlService 會注入 <base target="_top">，hash 連結若交給瀏覽器預設行為，整個視窗會跳到
+      // userCodeAppPanel 空白頁。所以一律 preventDefault 後自己改 location.hash（target=_self 只是保險）。
+      $nav.append(el('a', {
+        href: '#/' + item.id,
+        target: '_self',
+        class: item.id === active ? 'active' : '',
+        onclick: (ev) => { ev.preventDefault(); location.hash = '/' + item.id; },
+      }, item.label));
     });
   }
 
