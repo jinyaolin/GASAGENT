@@ -91,17 +91,21 @@ function normalizeEmail_(email) {
 /**
  * Owner 驗證。每個 google.script.run 後端入口與 doGet 的第一行都要呼叫。
  *
- * 在「以我執行 / 只限我」的部署下，Session.getEffectiveUser() 永遠是部署者本人，
- * 真正把陌生人擋在門外的是部署的存取等級；這裡是第二道保險：
- * 若部署被誤設成「以存取者身分執行」，effective user 會變成訪客而被擋下。
- * Session.getActiveUser() 在這種部署通常拿不到值，但只要拿到且不是 owner 也一併拒絕。
+ * 在「以我執行」的部署下，Session.getEffectiveUser() 永遠是部署者本人，所以不能拿它當門禁。
+ * 真正能分辨「是不是 owner 本人在看」的是 Session.getActiveUser()：
+ *   - owner 自己開頁面：回 owner 的 email（自己永遠看得到自己）。
+ *   - 其他人或匿名訪客（部署若被誤設成「任何人」）：消費者帳號下回空字串。
+ * 因此這裡要求 active user **必須存在且等於 owner**，空字串一律拒絕。
+ * 部署的存取等級「只限我」仍是第一道門，這裡是第二道，兩道都要過。
  *
  * @throws {Error} 未安裝或不是 owner
  */
 function assertOwner() {
-  assertOwnerEmail_(Session.getEffectiveUser().getEmail());
   const active = Session.getActiveUser().getEmail();
-  if (active) assertOwnerEmail_(active);
+  if (!active) {
+    throw new Error('拒絕存取：無法識別目前使用者（匿名或非 owner）。請確認 Web App 部署為「以我執行 / 只限我」並以 owner 帳號登入。');
+  }
+  assertOwnerEmail_(active);
 }
 
 /**

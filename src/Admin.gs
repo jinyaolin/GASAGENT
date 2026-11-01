@@ -29,7 +29,14 @@ function doGet(e) {
     ).setTitle('GAS Agent');
   }
 
-  assertOwner();
+  try {
+    assertOwner();
+  } catch (err) {
+    // 匿名或非 owner：回一頁乾淨的拒絕訊息，不洩漏堆疊。
+    return HtmlService.createHtmlOutput(
+      '<p style="font-family:system-ui,sans-serif;padding:2rem">' + escapeHtml_(String(err.message || err)) + '</p>'
+    ).setTitle('GAS Agent');
+  }
 
   const template = HtmlService.createTemplateFromFile('AdminPage');
   template.bootstrap = JSON.stringify({
@@ -97,4 +104,12 @@ function adminRunSmokeTests() {
 function adminReinstall() {
   assertOwner();
   return installAgent();
+}
+
+/**
+ * @param {string} str
+ * @return {string}
+ */
+function escapeHtml_(str) {
+  return str.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
