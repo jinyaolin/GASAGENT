@@ -178,41 +178,133 @@ function adminTestProvider(id) {
   return testProvider_(id);
 }
 
-// ---- M1：聊天台 -------------------------------------------------------------------
+// ---- M2：聊天台（接工具迴圈）------------------------------------------------------
 
 /**
- * 聊天台：單輪對話（M1 無工具、無 session 持久化）。
- * @param {{providerId: (string|undefined), message: string, system: (string|undefined)}} input
- *   providerId 空字串 / 省略 = 走 main 備援鏈
- * @return {{text: string, provider: string, model: string, usage: Object, ms: number, costEst: number,
- *   stop: string, fallbacks: !Array<!Object>}}
+ * 聊天台：一輪含工具呼叫的對話。M2 仍是同步 google.script.run（上限 6 分鐘；迴圈自己在 4.5 分鐘停）。
+ * history 由前端保存（只含 user / assistant 文字），M3 才做 server 端 session。
+ * @param {{providerId: (string|undefined), message: string, system: (string|undefined),
+ *   history: (!Array<{role: string, content: string}>|undefined)}} input
+ * @return {!Object} runTurn_ 的結果去掉 messages（可能很大）
  */
 function adminChat(input) {
   assertOwner();
   input = input || {};
-  const message = String(input.message || '').trim();
-  if (!message) throw new Error('訊息不可為空。');
-  const messages = [];
-  if (input.system && String(input.system).trim()) messages.push({ role: 'system', content: String(input.system).trim() });
-  messages.push({ role: 'user', content: message });
-  const r = runChatTurn_({
+  ensureToolConfigDefaults_(); // 新 toolset 沒有 rbac 列會被一律拒絕；這裡幂等補預設值
+  const r = runTurn_({
+    message: String(input.message || ''),
+    history: Array.isArray(input.history) ? input.history.slice(-20) : [],
     providerId: input.providerId || '',
-    role: 'main',
-    messages,
+    systemExtra: input.system || '',
     sessionId: 'admin-chat',
+    mode: 'interactive',
   });
-  // raw 可能很大且含 provider 專屬欄位，不回前端。
   return {
     text: r.text,
+    steps: r.steps.map((s) => ({
+      tool: s.tool, argsPreview: s.argsPreview, resultPreview: s.resultPreview, status: s.status, ok: s.ok, ms: s.ms,
+      approvalId: s.approvalId, spillFileId: s.spillFileId,
+    })),
+    stopped: r.stopped,
+    stoppedDetail: r.stoppedDetail,
     provider: r.provider,
     model: r.model,
     usage: r.usage,
-    ms: r.ms,
     costEst: r.costEst,
-    stop: r.stop,
-    toolCalls: r.toolCalls,
+    ms: r.ms,
+    llmCalls: r.llmCalls,
     fallbacks: r.fallbacks || [],
   };
+}
+
+// ---- M2：工具分頁 -----------------------------------------------------------------
+
+/**
+ * 工具分頁：registry（每個 toolset 的工具與風險）+ 目前 Config 設定。
+ * @return {{toolsets: !Array<!Object>, approval_policy: string, spill_threshold: number, max_tool_steps: number,
+ *   web_allowed_domains: string, persona: string, default_persona: string, policies: !Array<string>}}
+ */
+function adminGetToolSettings() {
+  assertOwner();
+  ensureToolConfigDefaults_();
+  const registry = getToolRegistry_();
+  const config = getToolConfig_();
+  return {
+    toolsets: registry.toolsets.map((name) => ({
+      name,
+      perms: config.rbac[name] || null,
+      tools: registry.list.filter((t) => t.toolset === name).map((t) => ({ name: t.name, risk: t.risk, description: t.description })),
+    })),
+    approval_policy: config.approvalPolicy,
+    spill_threshold: config.spillThreshold,
+    max_tool_steps: config.maxToolSteps,
+    web_allowed_domains: config.webAllowedDomains.join('\n'),
+    persona: config.persona,
+    default_persona: DEFAULT_PERSONA,
+    default_perms: DEFAULT_TOOLSET_PERMS,
+    policies: APPROVAL_POLICIES.slice(),
+  };
+}
+
+/**
+ * 工具分頁：儲存設定到 Config sheet。
+ * @param {!Object} input 見 saveToolConfig_
+ * @return {!Object} adminGetToolSettings()
+ */
+function adminSaveToolSettings(input) {
+  assertOwner();
+  saveToolConfig_(input || {});
+  return adminGetToolSettings();
+}
+
+// ---- M2：紀錄 / 審批 -----------------------------------------------------------------
+
+/**
+ * 紀錄分頁：待審批 + 最近已處理的審批。
+ * @return {{pending: !Array<!Object>, decided: !Array<!Object>}}
+ */
+function adminListApprovals() {
+  assertOwner();
+  const all = listApprovals_().map((r) => { const o = Object.assign({}, r); delete o._row; return o; });
+  return {
+    pending: all.filter((r) => r.state === 'pending'),
+    decided: all.filter((r) => r.state !== 'pending').slice(0, 30),
+  };
+}
+
+/**
+ * 紀錄分頁：批准（立即執行一次）或拒絕。
+ * @param {string} id
+ * @param {boolean} approve
+ * @return {{id: string, state: string, outcome: ?Object}}
+ */
+function adminDecideApproval(id, approve) {
+  assertOwner();
+  const r = decideApproval_(String(id || ''), !!approve);
+  if (r.outcome) {
+    r.outcome = { status: r.outcome.status, ok: r.outcome.ok, ms: r.outcome.ms, content: truncateText_(r.outcome.content, 2000).text };
+  }
+  return r;
+}
+
+/**
+ * 紀錄分頁：最近的 AuditLog（新的在前）。
+ * @param {number=} limit 預設 50，上限 200
+ * @return {!Array<!Object>}
+ */
+function adminListAuditLog(limit) {
+  assertOwner();
+  const n = clampInt_(limit, 50, 1, 200);
+  const rows = readTable_('AuditLog').rows;
+  return rows.slice(Math.max(0, rows.length - n)).reverse().map((r) => ({
+    ts: r.ts instanceof Date ? fmtDate_(r.ts) : String(r.ts || ''),
+    session_id: String(r.session_id || ''),
+    tool: String(r.tool || ''),
+    args_preview: String(r.args_preview || ''),
+    result_preview: String(r.result_preview || ''),
+    ok: toBoolean_(r.ok),
+    ms: toNumber_(r.ms, 0),
+  }));
 }
 
 /**

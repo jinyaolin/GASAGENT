@@ -131,6 +131,34 @@
   .placeholder { padding: 28px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); background: var(--panel); }
   .error { background: var(--fail-soft); color: var(--fail); padding: 10px 14px; border-radius: 8px; white-space: pre-wrap; }
 
+
+  /* M2：工具步驗、工具分頁、審批、AuditLog */
+  .steps { margin-bottom: 8px; font-size: 13px; }
+  .steps summary { cursor: pointer; color: var(--muted); }
+  .step-list { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+  .step { border-left: 3px solid var(--border); padding: 4px 8px; background: var(--panel); border-radius: 0 6px 6px 0; }
+  .step.status-ok { border-left-color: var(--ok); }
+  .step.status-error, .step.status-invalid { border-left-color: var(--fail); }
+  .step.status-denied { border-left-color: var(--warn); }
+  .step.status-pending_approval { border-left-color: var(--accent); }
+  .step-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .step-args { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin-top: 2px; }
+  .step-result { font-size: 12px; white-space: pre-wrap; word-break: break-word; margin-top: 2px; max-height: 120px; overflow: auto; }
+  .tool-names { display: flex; flex-wrap: wrap; gap: 4px; max-width: 420px; }
+  .tool-chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); cursor: help; }
+  .tool-chip.risk-W { border-color: #c7d2fe; }
+  .tool-chip.risk-X { border-color: var(--warn); color: var(--warn); }
+  .tool-chip.risk-D { border-color: var(--fail); color: var(--fail); }
+  .approval { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .approval.pending { border-color: var(--accent); background: var(--accent-soft); }
+  .approval.state-denied { opacity: 0.7; }
+  .approval-args { margin: 6px 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; background: var(--panel); padding: 6px 8px; border-radius: 6px; }
+  .approval .toolbar { margin-bottom: 0; }
+  .table.audit td { font-size: 12px; vertical-align: top; }
+  .audit-cell { max-width: 320px; white-space: pre-wrap; word-break: break-all; max-height: 80px; overflow: auto; display: block; }
+  .audit-fail td { background: var(--fail-soft); }
+  .nowrap { white-space: nowrap; }
+
   @media (max-width: 720px) {
     .app { flex-direction: column; }
     .sidebar { width: auto; flex: none; height: auto; position: static; }

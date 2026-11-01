@@ -8,7 +8,7 @@
  */
 
 /** 應用版本，顯示於管理頁與 Doctor。 */
-const APP_VERSION = '0.1.0-m1';
+const APP_VERSION = '0.2.0-m2';
 
 /** Script Properties 鍵名。 */
 const PROP = Object.freeze({
@@ -123,4 +123,48 @@ function assertOwnerEmail_(email, expectedOwner) {
   if (normalizeEmail_(email) !== owner) {
     throw new Error('拒絕存取：目前使用者不是這個 agent 的 owner。');
   }
+}
+
+// ---- Config sheet（可調設定；M2 起使用）------------------------------------------
+//
+// 一列一個 key：value 一律存字串（object 自動 JSON 化），updated 記最後修改時間。
+// 金鑰與身分資訊仍在 Script Properties，這裡只放「可調」設定：RBAC 開關、審批策略、人格、門檻值等。
+
+/**
+ * 讀整張 Config 成 {key: value}；value 一律轉成字串，空值為 ''。
+ * @return {!Object<string, string>}
+ */
+function getConfigMap_() {
+  const map = {};
+  readTable_('Config').rows.forEach((r) => {
+    const key = String(r.key || '').trim();
+    if (!key) return;
+    map[key] = r.value === null || r.value === undefined ? '' : String(r.value);
+  });
+  return map;
+}
+
+/**
+ * 寫入多個設定值（以 key upsert）。object / array 會 JSON 化；null / undefined 寫成空字串（保留列）。
+ * @param {!Object<string, *>} values
+ * @return {!Array<string>} 寫入的 key
+ */
+function setConfigValues_(values) {
+  const rows = readTable_('Config').rows;
+  const now = new Date();
+  Object.keys(values).forEach((key) => {
+    let v = values[key];
+    if (v === null || v === undefined) v = '';
+    else if (typeof v === 'object') v = JSON.stringify(v);
+    else v = String(v);
+    const existing = rows.find((r) => String(r.key || '').trim() === key);
+    if (existing) {
+      writeTableRow_('Config', existing._row, { key, value: v, updated: now });
+      existing.value = v;
+    } else {
+      const rowIndex = appendTableRow_('Config', { key, value: v, updated: now });
+      rows.push({ _row: rowIndex, key, value: v, updated: now });
+    }
+  });
+  return Object.keys(values);
 }

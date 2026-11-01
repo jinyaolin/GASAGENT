@@ -24,7 +24,7 @@ const DB_SCHEMA = Object.freeze({
   UserProfile: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],
   Cron: ['id', 'name', 'schedule', 'next_run', 'prompt', 'skills', 'deliver_to', 'model_pin', 'enabled', 'last_run', 'last_status'],
   Queue: ['id', 'type', 'session_id', 'payload', 'state', 'attempts', 'started', 'finished', 'error'],
-  Approvals: ['id', 'job_id', 'tool', 'args', 'reason', 'state', 'decided_at'],
+  Approvals: ['id', 'job_id', 'tool', 'args', 'reason', 'state', 'decided_at', 'result'],
   AuditLog: ['ts', 'session_id', 'tool', 'args_preview', 'result_preview', 'ok', 'ms'],
   Usage: ['ts', 'provider', 'model', 'prompt_tokens', 'completion_tokens', 'cost_est', 'session_id', 'ms', 'ok'],
 });

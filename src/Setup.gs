@@ -7,7 +7,7 @@
 
 /**
  * 安裝或修復 agent。幂等：重跑不會重建 DB、不會重複裝 trigger。
- * @return {{owner: string, db: {id: string, url: string, created: boolean}, schema: Object, trigger: Object, version: string}}
+ * @return {{owner: string, db: {id: string, url: string, created: boolean}, schema: Object, trigger: Object, toolConfig: Object, version: string}}
  * @throws {Error} 目前帳號與既有 OWNER_EMAIL 不符
  */
 function installAgent() {
@@ -26,6 +26,8 @@ function installAgent() {
   const db = openOrCreateDb_();
   const schema = ensureDbSchema_(db.spreadsheet, db.created);
   const trigger = ensureQueueTrigger_();
+  // M2：每個 toolset 的 RBAC 開關、審批策略等預設值（只補缺的，不覆寫）。
+  const toolConfig = { addedKeys: ensureToolConfigDefaults_() };
 
   const summary = {
     version: APP_VERSION,
@@ -33,6 +35,7 @@ function installAgent() {
     db: { id: db.spreadsheet.getId(), url: db.spreadsheet.getUrl(), created: db.created },
     schema,
     trigger,
+    toolConfig,
   };
   console.log(JSON.stringify(summary, null, 2));
   return summary;

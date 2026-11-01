@@ -7,11 +7,11 @@
     { id: 'dashboard', label: '儀表板' },
     { id: 'chat', label: '聊天台' },
     { id: 'models', label: '模型' },
-    { id: 'tools', label: '工具', milestone: 'M2' },
+    { id: 'tools', label: '工具' },
     { id: 'memory', label: '記憶', milestone: 'M3' },
     { id: 'skills', label: '技能', milestone: 'M5' },
     { id: 'cron', label: '排程', milestone: 'M4' },
-    { id: 'logs', label: '紀錄', milestone: 'M4' },
+    { id: 'logs', label: '紀錄' },
     { id: 'settings', label: '設定', milestone: 'M3' },
     { id: 'doctor', label: 'Doctor' },
   ];
@@ -63,6 +63,14 @@
 
   function header(title, desc) {
     return [el('h1', { class: 'page-title' }, title), desc ? el('p', { class: 'page-desc' }, desc) : null];
+  }
+
+  function field(label, control, hint) {
+    return el('label', { class: 'field' }, [
+      el('span', { class: 'field-label' }, label),
+      control,
+      hint ? el('span', { class: 'field-hint' }, hint) : null,
+    ]);
   }
 
   function errorBox(err) {
@@ -440,17 +448,21 @@
     load();
   }
 
-  // ---- 聊天台 ------------------------------------------------------------------
+  // ---- 聊天台（M2：接工具迴圈）------------------------------------------------------
+
+  const STEP_STATUS_LABEL = { ok: '完成', error: '失敗', denied: 'RBAC 拒絕', invalid: '參數錯誤', pending_approval: '待審批' };
 
   async function renderChat(root) {
-    root.append(...header('聊天台', 'M1：單輪對話，沒有工具、不保存 session；每則訊息各自獨立送出。'));
+    root.append(...header('聊天台', '一輪可含多次工具呼叫（每步顯示在回覆上方）。對話歷史只保存在這個頁面，重新整理即清空；M3 才做 session 持久化。'));
 
     const $provider = el('select', { title: '選擇 provider' }, el('option', { value: '' }, '自動（main 備援鏈）'));
-    const $system = el('textarea', { rows: 2, placeholder: 'system prompt（選填）' });
-    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出' });
+    const $system = el('textarea', { rows: 2, placeholder: '額外 system 指示（選填；人格請到「工具」分頁設定）' });
+    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
     const $log = el('div', { class: 'chat-log' });
     const btnSend = el('button', { class: 'primary', onclick: send }, '送出');
-    const btnClear = el('button', { onclick: () => { $log.innerHTML = ''; } }, '清空畫面');
+    const btnClear = el('button', { onclick: () => { history.length = 0; $log.innerHTML = ''; } }, '新對話');
+    /** 送給後端的歷史（只含 user / assistant 文字）。 */
+    const history = [];
 
     $input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); send(); }
@@ -459,7 +471,7 @@
     root.append(
       el('div', { class: 'panel' }, [
         el('div', { class: 'toolbar' }, [el('span', { class: 'field-label' }, 'provider'), $provider, btnClear]),
-        el('details', { class: 'system-box' }, [el('summary', {}, 'system prompt'), $system]),
+        el('details', { class: 'system-box' }, [el('summary', {}, '額外 system 指示'), $system]),
         $log,
         el('div', { class: 'chat-input' }, [$input, btnSend]),
       ]),
@@ -484,21 +496,23 @@
       btnSend.disabled = true;
       $input.disabled = true;
       $log.append(bubble('user', message));
-      const $pending = bubble('assistant', '…', null, true);
+      const $pending = bubble('assistant', '思考與執行工具中…（含工具呼叫可能需要數十秒到數分鐘）', null, true);
       $log.append($pending);
       $pending.scrollIntoView({ block: 'end' });
       const t0 = Date.now();
       try {
-        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value });
+        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value, history: history.slice() });
         const meta = [
           `${r.provider} · ${r.model}`,
+          `LLM ${r.llmCalls} 次 · 工具 ${r.steps.length} 步`,
           `tokens ${r.usage.prompt} + ${r.usage.completion}`,
           `${r.ms} ms（含往返 ${Date.now() - t0} ms）`,
           r.costEst ? `≈ $${r.costEst}` : null,
-          r.stop !== 'end' ? `stop=${r.stop}` : null,
+          r.stopped ? `中止：${r.stopped}` : null,
         ].filter(Boolean).join(' · ');
         const fallbacks = (r.fallbacks || []).map((f) => `備援：${f.error}`).join('\n');
-        $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : '')));
+        $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : ''), false, r.steps));
+        history.push({ role: 'user', content: message }, { role: 'assistant', content: r.text || '' });
         $input.value = '';
       } catch (err) {
         $pending.replaceWith(el('div', { class: 'bubble assistant' }, errorBox(err)));
@@ -510,11 +524,207 @@
       }
     }
 
-    function bubble(role, text, meta, pending) {
+    function bubble(role, text, meta, pending, steps) {
       return el('div', { class: `bubble ${role}${pending ? ' pending' : ''}` }, [
+        steps && steps.length ? stepsList(steps) : null,
         el('div', { class: 'bubble-text' }, text),
         meta ? el('div', { class: 'meta' }, meta) : null,
       ]);
+    }
+
+    function stepsList(steps) {
+      return el('details', { class: 'steps', open: '' }, [
+        el('summary', {}, `工具呼叫 ${steps.length} 步`),
+        el('ol', { class: 'step-list' }, steps.map((s) => el('li', { class: 'step status-' + s.status }, [
+          el('div', { class: 'step-head' }, [
+            el('code', {}, s.tool),
+            el('span', { class: 'badge step-badge' }, STEP_STATUS_LABEL[s.status] || s.status),
+            el('span', { class: 'meta' }, `${s.ms} ms`),
+            s.approvalId ? el('a', { href: '#/logs', target: '_self', onclick: (ev) => { ev.preventDefault(); location.hash = '/logs'; } }, '到審批') : null,
+          ]),
+          el('div', { class: 'step-args' }, s.argsPreview),
+          el('div', { class: 'step-result' }, s.resultPreview),
+        ]))),
+      ]);
+    }
+  }
+
+  // ---- 工具（RBAC / 審批策略 / 白名單 / 人格）----------------------------------------------
+
+  const PERM_LABEL = { read: 'read（R 讀）', write: 'write（W 寫）', delete: 'delete（D 刪）', external: 'external（X 外發）' };
+  const POLICY_LABEL = { always: 'always — X 類工具一律送審批', autonomous_only: 'autonomous_only — 只有無人模式（排程）才送審批', never: 'never — 直接執行（不建議）' };
+
+  async function renderTools(root) {
+    root.append(...header('工具', '每個 toolset 四個 RBAC 開關；X 類（寄信 / 分享）另依審批策略送審。設定存在 DB 的 Config tab。'));
+    const $body = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    root.append($body);
+    let data;
+    try {
+      data = await call('adminGetToolSettings');
+    } catch (err) {
+      $body.innerHTML = '';
+      $body.append(errorBox(err));
+      return;
+    }
+    $body.innerHTML = '';
+
+    const checks = {};
+    const $rbac = el('div', { class: 'table-wrap' });
+    const thead = el('thead', {}, el('tr', {}, ['toolset'].concat(Object.keys(PERM_LABEL).map((p) => PERM_LABEL[p]), ['工具（風險）']).map((h) => el('th', {}, h))));
+    const tbody = el('tbody');
+    data.toolsets.forEach((ts) => {
+      checks[ts.name] = {};
+      const perms = ts.perms || data.default_perms;
+      tbody.append(el('tr', {}, [
+        el('td', {}, [el('code', {}, ts.name), ts.perms ? null : el('div', { class: 'warn-text' }, '尚未儲存（目前一律拒絕）')]),
+        ...Object.keys(PERM_LABEL).map((p) => {
+          const cb = el('input', { type: 'checkbox' });
+          cb.checked = !!perms[p];
+          checks[ts.name][p] = cb;
+          return el('td', {}, cb);
+        }),
+        el('td', { class: 'tool-names' }, ts.tools.map((t) => el('span', { class: 'tool-chip risk-' + t.risk, title: t.description }, `${t.name.slice(ts.name.length + 1)} ${t.risk}`))),
+      ]));
+    });
+    $rbac.append(el('table', { class: 'table' }, [thead, tbody]));
+
+    const $policy = el('select', {}, data.policies.map((p) => el('option', { value: p }, POLICY_LABEL[p] || p)));
+    $policy.value = data.approval_policy;
+    const $spill = el('input', { type: 'number', min: 1500, max: 200000 });
+    $spill.value = data.spill_threshold;
+    const $steps = el('input', { type: 'number', min: 1, max: 200 });
+    $steps.value = data.max_tool_steps;
+    const $domains = el('textarea', { rows: 5, placeholder: 'example.com\n*.wikipedia.org', spellcheck: 'false' });
+    $domains.value = data.web_allowed_domains;
+    const $persona = el('textarea', { rows: 5, placeholder: data.default_persona, style: 'font-family: inherit' });
+    $persona.value = data.persona;
+
+    const $msg = el('div');
+    const btnSave = el('button', { class: 'primary', onclick: save }, '儲存');
+    const btnReload = el('button', { onclick: () => { root.innerHTML = ''; renderTools(root); } }, '重新整理');
+
+    $body.append(
+      el('div', { class: 'panel' }, [el('h3', {}, 'RBAC：toolset 開關'), $rbac,
+        el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。M2 沒有 D 類工具（刻意不開放任何刪除）。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
+      el('div', { class: 'panel' }, [el('h3', {}, 'Agent 設定'), el('div', { class: 'form-grid' }, [
+        field('審批策略（X 類工具）', $policy, 'M2 只有互動模式；autonomous_only 要到 M4 排程才有差別'),
+        field('spill_threshold（字元）', $spill, '工具結果超過此長度就溢寫到 Drive「GAS Agent/spill」，context 只留前 1000 字'),
+        field('max_tool_steps', $steps, '單輪工具步數上限；另有 4.5 分鐘時間預算與同參數失敗 3 次熔斷'),
+      ])]),
+      el('div', { class: 'panel' }, [el('h3', {}, 'web_fetch 域名白名單'), field('一行一個；example.com 只允許該主機，*.example.com 含所有子網域。空白 = 全部拒絕。', $domains)]),
+      el('div', { class: 'panel' }, [el('h3', {}, '人格（persona）'), field('system prompt 開頭；留空用預設（灰字）', $persona)]),
+      el('div', { class: 'toolbar' }, [btnSave, btnReload, $msg]),
+    );
+
+    async function save() {
+      btnSave.disabled = true;
+      $msg.innerHTML = '';
+      const rbac = {};
+      Object.keys(checks).forEach((ts) => { rbac[ts] = {}; Object.keys(checks[ts]).forEach((p) => { rbac[ts][p] = checks[ts][p].checked; }); });
+      try {
+        await call('adminSaveToolSettings', {
+          rbac, approval_policy: $policy.value, spill_threshold: $spill.value, max_tool_steps: $steps.value,
+          web_allowed_domains: $domains.value, persona: $persona.value,
+        });
+        $msg.append(el('span', { class: 'summary ok' }, '已儲存'));
+        setTimeout(() => { root.innerHTML = ''; renderTools(root); }, 600);
+      } catch (err) {
+        $msg.append(errorBox(err));
+        btnSave.disabled = false;
+      }
+    }
+  }
+
+  // ---- 紀錄：審批 + AuditLog ---------------------------------------------------------------
+
+  async function renderLogs(root) {
+    root.append(...header('紀錄', '審批：X 類工具被攔下的動作，批准即立刻執行一次（不續跑原對話，M3/M4 再做）。AuditLog：每次工具執行一列。'));
+    const $approvals = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    const $audit = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+    const btnReload = el('button', { onclick: () => { loadApprovals(); loadAudit(); } }, '重新整理');
+    root.append(
+      el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, '審批'), btnReload]), $approvals]),
+      el('div', { class: 'panel' }, [el('h3', {}, 'AuditLog（最近 50 筆）'), $audit]),
+    );
+    loadApprovals();
+    loadAudit();
+
+    async function loadApprovals() {
+      $approvals.innerHTML = '';
+      $approvals.append(el('div', { class: 'loading' }, '載入中…'));
+      try {
+        const r = await call('adminListApprovals');
+        $approvals.innerHTML = '';
+        if (!r.pending.length) $approvals.append(el('div', { class: 'placeholder' }, '沒有待審批的動作。'));
+        r.pending.forEach((a) => $approvals.append(approvalCard(a, true)));
+        if (r.decided.length) {
+          $approvals.append(el('details', {}, [el('summary', { class: 'meta' }, `最近已處理 ${r.decided.length} 筆`), ...r.decided.map((a) => approvalCard(a, false))]));
+        }
+      } catch (err) {
+        $approvals.innerHTML = '';
+        $approvals.append(errorBox(err));
+      }
+    }
+
+    function approvalCard(a, pending) {
+      const $result = el('div');
+      const btnApprove = el('button', { class: 'primary small', onclick: () => decide(a, true, [btnApprove, btnDeny], $result) }, '批准並執行');
+      const btnDeny = el('button', { class: 'small danger', onclick: () => decide(a, false, [btnApprove, btnDeny], $result) }, '拒絕');
+      let args = a.args;
+      try { args = JSON.stringify(JSON.parse(a.args), null, 2); } catch (err) { /* 原樣 */ }
+      return el('div', { class: 'approval ' + (pending ? 'pending' : 'state-' + a.state) }, [
+        el('div', { class: 'step-head' }, [
+          el('code', {}, a.tool),
+          el('span', { class: 'badge' }, pending ? '待審批' : a.state === 'approved' ? '已批准' : '已拒絕'),
+          el('span', { class: 'meta' }, `${a.id} · ${a.created_at || ''}${a.decided_at ? ' → ' + a.decided_at : ''} · ${a.reason}`),
+        ]),
+        el('pre', { class: 'approval-args' }, args),
+        a.result ? el('div', { class: 'step-result' }, a.result) : null,
+        pending ? el('div', { class: 'toolbar' }, [btnApprove, btnDeny]) : null,
+        $result,
+      ]);
+    }
+
+    async function decide(a, approve, buttons, $result) {
+      if (approve && !confirm(`批准並立刻執行 ${a.tool}？\n\n${a.args}`)) return;
+      buttons.forEach((b) => { b.disabled = true; });
+      $result.innerHTML = '';
+      try {
+        const r = await call('adminDecideApproval', a.id, approve);
+        if (r.outcome) {
+          $result.append(el('div', { class: 'summary ' + (r.outcome.ok ? 'ok' : 'fail') }, r.outcome.ok ? `已執行（${r.outcome.ms} ms）` : `執行失敗：${r.outcome.status}`),
+            el('div', { class: 'step-result' }, r.outcome.content));
+        } else {
+          $result.append(el('div', { class: 'summary fail' }, '已拒絕'));
+        }
+        setTimeout(() => { loadApprovals(); loadAudit(); }, 800);
+      } catch (err) {
+        $result.append(errorBox(err));
+        buttons.forEach((b) => { b.disabled = false; });
+      }
+    }
+
+    async function loadAudit() {
+      $audit.innerHTML = '';
+      $audit.append(el('div', { class: 'loading' }, '載入中…'));
+      try {
+        const rows = await call('adminListAuditLog', 50);
+        $audit.innerHTML = '';
+        if (!rows.length) { $audit.append(el('div', { class: 'placeholder' }, '尚無紀錄。')); return; }
+        const thead = el('thead', {}, el('tr', {}, ['時間', 'session', '工具', '參數', '結果', 'ms'].map((h) => el('th', {}, h))));
+        const tbody = el('tbody', {}, rows.map((r) => el('tr', { class: r.ok ? '' : 'audit-fail' }, [
+          el('td', { class: 'nowrap' }, r.ts.replace('T', ' ').slice(0, 19)),
+          el('td', {}, r.session_id),
+          el('td', {}, el('code', {}, r.tool)),
+          el('td', { class: 'audit-cell' }, r.args_preview),
+          el('td', { class: 'audit-cell' }, r.result_preview),
+          el('td', {}, String(r.ms)),
+        ])));
+        $audit.append(el('table', { class: 'table audit' }, [thead, tbody]));
+      } catch (err) {
+        $audit.innerHTML = '';
+        $audit.append(errorBox(err));
+      }
     }
   }
 
@@ -530,7 +740,7 @@
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {
