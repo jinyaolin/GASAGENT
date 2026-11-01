@@ -4,7 +4,7 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M4 排程與非同步 Queue**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M4 完成並驗收，下一步 M5 技能**。
 
 ## 設計要點
 
