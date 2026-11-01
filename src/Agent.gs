@@ -227,7 +227,11 @@ function runTurn_(input, deps) {
     messages.push({
       role: 'assistant',
       content: last.text || null,
-      tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args || {}) } })),
+      tool_calls: toolCalls.map((tc) => {
+        const call = { id: tc.id, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args || {}) } };
+        if (tc.thoughtSignature) call.thought_signature = tc.thoughtSignature;
+        return call;
+      }),
     });
 
     for (let i = 0; i < toolCalls.length; i++) {

@@ -43,6 +43,7 @@ function smokeTestTable_() {
     ['adapter anthropic: 解析 content 區塊與 stop_reason', testAnthropicParseResponse_, 'pure'],
     ['adapter gemini: contents / functionDeclarations / functionCall / functionResponse', testGeminiBuildRequest_, 'pure'],
     ['adapter gemini: 解析 functionCall 與 usageMetadata', testGeminiParseResponse_, 'pure'],
+    ['adapter gemini: thoughtSignature 解析 → 中立格式 → 重放（缺簽章填假簽章）', testGeminiThoughtSignature_, 'pure'],
     ['providers: 第一個 provider 5xx 時自動換第二個（fetch stub）', testFallbackChain_, 'pure'],
     ['providers: 400 參數錯不 fallback；key 缺失會 fallback', testFallbackStopsOn4xx_, 'pure'],
     ['providers: 成本估算與 Usage 記錄呼叫', testCostEstimate_, 'pure'],
@@ -378,14 +379,42 @@ function testGeminiBuildRequest_() {
   }] }], 'functionDeclarations 並移除 additionalProperties');
   assertEqual_(r.body.contents.map((c) => c.role), ['user', 'model', 'user', 'model', 'user'], 'user/model 交替');
   assertEqual_(r.body.contents[1].parts, [
-    { functionCall: { name: 'get_weather', args: { city: 'Taipei' } } },
-    { functionCall: { name: 'get_time', args: {} } },
-  ], 'tool_calls → functionCall');
+    { functionCall: { name: 'get_weather', args: { city: 'Taipei' } }, thoughtSignature: GEMINI_DUMMY_THOUGHT_SIGNATURE },
+    { functionCall: { name: 'get_time', args: {} }, thoughtSignature: GEMINI_DUMMY_THOUGHT_SIGNATURE },
+  ], 'tool_calls → functionCall（無簽章填假簽章）');
   assertEqual_(r.body.contents[2].parts, [
     { functionResponse: { name: 'get_weather', response: { temp: 25 } } },
     { functionResponse: { name: 'get_time', response: { result: 'noon' } } },
   ], 'tool 訊息 → functionResponse，name 由前一則 assistant 的 tool_call_id 反查，非 object 內容包成 {result}');
   assertEqual_(r.body.contents[4].parts, [{ text: '謝謝' }], 'user 文字 part');
+}
+
+function testGeminiThoughtSignature_() {
+  const parsed = geminiParseResponse_({ candidates: [{ finishReason: 'STOP', content: { parts: [
+    { functionCall: { name: 'drive_search', args: { query: 'x' } }, thoughtSignature: 'sig-abc' },
+    { functionCall: { name: 'docs_read', args: {} } },
+  ] } }] });
+  assertEqual_(parsed.toolCalls[0].thoughtSignature, 'sig-abc', '解析保留 thoughtSignature');
+  assert_(!('thoughtSignature' in parsed.toolCalls[1]), '沒有簽章就不加欄位');
+  // 迴圈把簽章帶進中立格式
+  const fake = fakeChat_([{ toolCalls: parsed.toolCalls.map((tc, i) => Object.assign({ id: 'c' + i }, tc)), stop: 'tool_calls' }, { text: 'ok' }]);
+  const r = runTurn_({ message: 'go' }, fakeTurnDeps_(fake.chat));
+  const asst = fake.calls[1].messages.find((m) => m.role === 'assistant' && m.tool_calls);
+  assertEqual_(asst.tool_calls[0].thought_signature, 'sig-abc', '中立格式 tool_calls 帶 thought_signature');
+  assert_(!('thought_signature' in asst.tool_calls[1]), '沒簽章的不帶');
+  // 重建 Gemini 請求：有簽章原樣帶回，沒簽章填假簽章跳過驗證
+  const provider = validateProvider_(fakeProviderInput_({ protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com' }));
+  const req = geminiBuildRequest_(provider, { messages: fake.calls[1].messages.filter((m) => m.role !== 'system') }, 'k');
+  const modelParts = req.body.contents.find((c) => c.role === 'model').parts.filter((p) => p.functionCall);
+  assertEqual_(modelParts.map((p) => p.thoughtSignature), ['sig-abc', GEMINI_DUMMY_THOUGHT_SIGNATURE], 'functionCall parts 的 thoughtSignature');
+  // openai / anthropic adapter 不受影響（不會把 thought_signature 洩到請求裡）
+  const oa = openaiBuildRequest_(validateProvider_(fakeProviderInput_()), { messages: fake.calls[1].messages }, 'k');
+  assert_(JSON.stringify(oa.body).indexOf('thought_signature') === -1, 'openai 請求不含 thought_signature');
+  const an = anthropicBuildRequest_(validateProvider_(fakeProviderInput_({ protocol: 'anthropic', base_url: 'https://api.anthropic.com' })), { messages: fake.calls[1].messages }, 'k');
+  assert_(JSON.stringify(an.body).indexOf('thought_signature') === -1, 'anthropic 請求不含 thought_signature');
+  // 序列化來回保留
+  const m = { role: 'assistant', content: null, tool_calls: asst.tool_calls };
+  assertEqual_(deserializeMessage_('assistant', serializeMessage_(m)), m, 'Messages 存取保留簽章');
 }
 
 function testGeminiParseResponse_() {

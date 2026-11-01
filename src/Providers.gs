@@ -4,7 +4,7 @@
  *
  * 中立格式（neutral）採 OpenAI chat/completions 風格，Agent（M2）與 Messages sheet（M3）都存這個：
  *   messages: [{role: 'system'|'user'|'assistant'|'tool', content: string|null,
- *               tool_calls?: [{id, type: 'function', function: {name, arguments: string(JSON)}}],  // assistant
+ *               tool_calls?: [{id, type: 'function', function: {name, arguments: string(JSON)}, thought_signature?}],  // assistant（thought_signature 只有 Gemini 用）
  *               tool_call_id?: string, name?: string}]                                            // tool
  *   tools:    [{name, description, parameters: JSON Schema}]
  * 每個 adapter 只做兩件純函式：buildRequest(provider, req, apiKey) → {url, headers, body}
@@ -31,6 +31,12 @@ const ANTHROPIC_VERSION = '2023-06-01';
 
 /** Anthropic 的 max_tokens 是必填；provider 與請求都沒給時用這個。 */
 const DEFAULT_MAX_TOKENS = 1024;
+
+/**
+ * Gemini 3 要求重放歷史時 functionCall part 帶回原本的 thoughtSignature；歷史若來自其他模型（沒有簽章），
+ * 官方文件允許用這個假簽章跳過驗證（https://ai.google.dev/gemini-api/docs/thought-signatures）。
+ */
+const GEMINI_DUMMY_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 
 /**
  * @typedef {{
@@ -580,7 +586,10 @@ function geminiBuildRequest_(provider, req, apiKey) {
       const parts = [];
       const text = stringifyContent_(m.content);
       if (text) parts.push({ text });
-      (m.tool_calls || []).forEach((tc) => parts.push({ functionCall: { name: tc.function.name, args: parseJsonArgs_(tc.function.arguments) } }));
+      (m.tool_calls || []).forEach((tc) => parts.push({
+        functionCall: { name: tc.function.name, args: parseJsonArgs_(tc.function.arguments) },
+        thoughtSignature: tc.thought_signature || GEMINI_DUMMY_THOUGHT_SIGNATURE,
+      }));
       if (parts.length) pushParts_(contents, 'model', parts);
     } else {
       pushParts_(contents, 'user', [{ text: stringifyContent_(m.content) || ' ' }]);
@@ -669,11 +678,11 @@ function geminiCleanSchema_(schema) {
 function geminiParseResponse_(json) {
   const candidate = (json.candidates || [])[0] || {};
   const parts = (candidate.content && candidate.content.parts) || [];
-  const toolCalls = parts.filter((p) => p.functionCall).map((p, i) => ({
-    id: p.functionCall.id || ('fc_' + (i + 1)),
-    name: p.functionCall.name || '',
-    args: p.functionCall.args || {},
-  }));
+  const toolCalls = parts.filter((p) => p.functionCall).map((p, i) => {
+    const tc = { id: p.functionCall.id || ('fc_' + (i + 1)), name: p.functionCall.name || '', args: p.functionCall.args || {} };
+    if (p.thoughtSignature) tc.thoughtSignature = p.thoughtSignature; // Gemini 3：重放時要帶回
+    return tc;
+  });
   const usage = json.usageMetadata || {};
   const blocked = !json.candidates && json.promptFeedback && json.promptFeedback.blockReason;
   return {
