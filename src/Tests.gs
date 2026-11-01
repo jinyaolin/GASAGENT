@@ -556,6 +556,15 @@ function testRegistryValid_() {
   const r = geminiBuildRequest_(p, { messages: [{ role: 'user', content: 'hi' }], tools: neutral }, 'k');
   assertEqual_(r.body.tools[0].functionDeclarations.length, neutral.length, 'gemini functionDeclarations 數');
   assert_(JSON.stringify(r.body).indexOf('additionalProperties') === -1, 'gemini 不可含 additionalProperties');
+  // Gemini 的 type 必須是單一字串：registry 裡有 ["string","array"]（slides body）、["string","number","boolean"]（sheets 格）
+  const walkSchema = (schema, path) => {
+    if (!schema || typeof schema !== 'object') return;
+    if (schema.type !== undefined) assert_(typeof schema.type === 'string', `gemini schema type 必須是字串：${path} = ${JSON.stringify(schema.type)}`);
+    if (schema.items) walkSchema(schema.items, path + '.items');
+    Object.keys(schema.properties || {}).forEach((k) => walkSchema(schema.properties[k], path + '.' + k));
+  };
+  r.body.tools[0].functionDeclarations.forEach((d) => walkSchema(d.parameters, d.name));
+  assertEqual_(geminiCleanSchema_({ type: ['string', 'array'], items: { type: ['number', 'null'] } }), { type: 'string', items: { type: 'number' } }, 'type 陣列收斂（有 string 取 string，否則第一個非 null）');
 }
 
 function testRegistryRejectsBad_() {

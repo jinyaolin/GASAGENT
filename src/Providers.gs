@@ -639,6 +639,12 @@ function geminiCleanSchema_(schema) {
   const out = {};
   Object.keys(schema).forEach((k) => {
     if (drop.indexOf(k) !== -1) return;
+    if (k === 'type' && Array.isArray(schema[k])) {
+      // Gemini 的 type 是單一 enum，不接受 ["string","array"] 這種聯集；有 string 就收成 string（最寬容），否則取第一個。
+      const types = schema[k].filter((t) => t !== 'null');
+      out[k] = types.indexOf('string') !== -1 ? 'string' : (types[0] || 'string');
+      return;
+    }
     out[k] = geminiCleanSchema_(schema[k]);
   });
   return out;
