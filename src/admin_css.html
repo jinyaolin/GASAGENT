@@ -159,6 +159,18 @@
   .audit-fail td { background: var(--fail-soft); }
   .nowrap { white-space: nowrap; }
 
+  /* M3：記憶、session */
+  .capacity { height: 6px; background: var(--bg); border-radius: 3px; margin: 0 0 12px; overflow: hidden; }
+  .capacity-bar { height: 100%; background: var(--accent); }
+  .capacity-bar.warn { background: var(--warn); }
+  .memory-row { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; padding: 8px 0; border-top: 1px solid var(--border); align-items: start; }
+  .memory-row:first-child { border-top: 0; }
+  .memory-row textarea { font-family: inherit; font-size: 14px; }
+  .memory-row-side { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .memory-row .meta { grid-column: 1 / -1; }
+  .summary-box { white-space: pre-wrap; font-size: 13px; padding: 10px 14px; margin-bottom: 8px; }
+  .bubble.tool-msg { font-size: 12px; color: var(--muted); }
+
   @media (max-width: 720px) {
     .app { flex-direction: column; }
     .sidebar { width: auto; flex: none; height: auto; position: static; }

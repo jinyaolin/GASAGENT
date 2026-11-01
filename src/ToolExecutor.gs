@@ -111,6 +111,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.MAX_TOOL_STEPS in map)) missing[TOOL_CONFIG_KEYS.MAX_TOOL_STEPS] = DEFAULT_MAX_TOOL_STEPS;
   if (!(TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS in map)) missing[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = '';
   if (!(TOOL_CONFIG_KEYS.PERSONA in map)) missing[TOOL_CONFIG_KEYS.PERSONA] = '';
+  Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
   if (keys.length) setConfigValues_(missing);
   return keys;
@@ -147,6 +148,31 @@ function saveToolConfig_(input) {
   values[TOOL_CONFIG_KEYS.PERSONA] = String(input.persona || '').trim();
   setConfigValues_(values);
   return getToolConfig_();
+}
+
+/**
+ * 管理頁「設定」分頁儲存 Agent 層設定（記憶上限、context 壓縮、curation、session 閒置）。
+ * @param {!Object} input key 同 AGENT_CONFIG_DEFAULTS
+ * @return {AgentConfig}
+ */
+function saveAgentConfig_(input) {
+  input = input || {};
+  const values = {};
+  Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => {
+    if (input[k] === undefined) return;
+    values[k] = typeof AGENT_CONFIG_DEFAULTS[k] === 'boolean' ? toBoolean_(input[k]) : toNumber_(input[k], AGENT_CONFIG_DEFAULTS[k]);
+  });
+  const parsed = parseAgentConfig_(Object.assign({}, getConfigMap_(), values));
+  // 用 parse 後（已夾限）的值寫回，避免 sheet 裡留下超出範圖的數字。
+  const normalized = {
+    memory_max_chars: parsed.memoryMaxChars, profile_max_chars: parsed.profileMaxChars, context_max_tokens: parsed.contextMaxTokens,
+    keep_recent_turns: parsed.keepRecentTurns, curation_every_turns: parsed.curationEveryTurns, curation_auto_apply: parsed.curationAutoApply,
+    session_idle_hours: parsed.sessionIdleHours, session_embeddings: parsed.sessionEmbeddings,
+  };
+  const out = {};
+  Object.keys(values).forEach((k) => { out[k] = normalized[k]; });
+  if (Object.keys(out).length) setConfigValues_(out);
+  return getAgentConfig_();
 }
 
 // ---- 驗證 -------------------------------------------------------------------------
@@ -429,9 +455,12 @@ function executeTool_(name, args, ctx, deps) {
     }), { approvalId });
   }
 
+  // deps 裡除了 executor 自己用的四個，其餘（memoryStore / sessionStore / agentConfig / embed…）都透給 handler，測試可注入假 store。
+  const extras = {};
+  Object.keys(deps).forEach((k) => { if (['registry', 'config', 'sink', 'spill'].indexOf(k) === -1) extras[k] = deps[k]; });
   let result;
   try {
-    result = tool.handler(normalizedArgs, Object.assign({}, ctx, { mode, config, spill: deps.spill || null, registry }));
+    result = tool.handler(normalizedArgs, Object.assign({}, ctx, extras, { mode, config, spill: deps.spill || null, registry }));
   } catch (err) {
     const message = String(err && err.message || err);
     return finish('error', toolErrorText_('tool_error', message), { error: message });

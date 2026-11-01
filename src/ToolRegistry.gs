@@ -51,6 +51,7 @@ function allToolDeclarations_() {
     calendarTools_(),
     webTools_(),
     sessionTools_(),
+    memoryTools_(),
   );
 }
 

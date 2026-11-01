@@ -8,11 +8,11 @@
     { id: 'chat', label: '聊天台' },
     { id: 'models', label: '模型' },
     { id: 'tools', label: '工具' },
-    { id: 'memory', label: '記憶', milestone: 'M3' },
+    { id: 'memory', label: '記憶' },
     { id: 'skills', label: '技能', milestone: 'M5' },
     { id: 'cron', label: '排程', milestone: 'M4' },
     { id: 'logs', label: '紀錄' },
-    { id: 'settings', label: '設定', milestone: 'M3' },
+    { id: 'settings', label: '設定' },
     { id: 'doctor', label: 'Doctor' },
   ];
 
@@ -453,24 +453,26 @@
   const STEP_STATUS_LABEL = { ok: '完成', error: '失敗', denied: 'RBAC 拒絕', invalid: '參數錯誤', pending_approval: '待審批' };
 
   async function renderChat(root) {
-    root.append(...header('聊天台', '一輪可含多次工具呼叫（每步顯示在回覆上方）。對話歷史只保存在這個頁面，重新整理即清空；M3 才做 session 持久化。'));
+    root.append(...header('聊天台', 'Session 持久化在 DB 的 Sessions / Messages。輸入 /new 開新 session、/status 看目前 session；閒置超過設定小時會自動開新的。'));
 
     const $provider = el('select', { title: '選擇 provider' }, el('option', { value: '' }, '自動（main 備援鏈）'));
+    const $session = el('select', { title: '切換 session' }, el('option', { value: '' }, '— 新 session —'));
     const $system = el('textarea', { rows: 2, placeholder: '額外 system 指示（選填；人格請到「工具」分頁設定）' });
-    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
+    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。/new 開新 session。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
     const $log = el('div', { class: 'chat-log' });
+    const $sessInfo = el('span', { class: 'hint' });
     const btnSend = el('button', { class: 'primary', onclick: send }, '送出');
-    const btnClear = el('button', { onclick: () => { history.length = 0; $log.innerHTML = ''; } }, '新對話');
-    /** 送給後端的歷史（只含 user / assistant 文字）。 */
-    const history = [];
+    const btnNew = el('button', { onclick: () => { $input.value = '/new'; send(); } }, '/new');
+    let sessionId = '';
 
     $input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); send(); }
     });
+    $session.addEventListener('change', () => { sessionId = $session.value; $log.innerHTML = ''; if (sessionId) loadHistory(sessionId); });
 
     root.append(
       el('div', { class: 'panel' }, [
-        el('div', { class: 'toolbar' }, [el('span', { class: 'field-label' }, 'provider'), $provider, btnClear]),
+        el('div', { class: 'toolbar' }, [el('span', { class: 'field-label' }, 'provider'), $provider, el('span', { class: 'field-label' }, 'session'), $session, btnNew, $sessInfo]),
         el('details', { class: 'system-box' }, [el('summary', {}, '額外 system 指示'), $system]),
         $log,
         el('div', { class: 'chat-input' }, [$input, btnSend]),
@@ -478,7 +480,7 @@
     );
 
     try {
-      const providers = await call('adminListProviders');
+      const [providers, sessions] = await Promise.all([call('adminListProviders'), call('adminListSessions', 20)]);
       providers
         .filter((p) => p.enabled && p.role !== 'embed')
         .sort((a, b) => (a.role < b.role ? -1 : 1) || (a.priority - b.priority))
@@ -486,8 +488,35 @@
       if (!providers.some((p) => p.enabled && p.role === 'main')) {
         $log.append(el('div', { class: 'placeholder' }, '還沒有啟用的 main provider，請先到「模型」分頁新增。'));
       }
+      sessions.forEach((sx) => $session.append(sessionOption(sx)));
+      const active = sessions.find((sx) => sx.status === 'active' && sx.channel === 'admin');
+      if (active) { sessionId = active.id; $session.value = active.id; await loadHistory(active.id); }
     } catch (err) {
       $log.append(errorBox(err));
+    }
+
+    function sessionOption(sx) {
+      return el('option', { value: sx.id }, `${sx.status === 'active' ? '● ' : '○ '}${sx.title || '（無標題）'} · ${sx.turns} 輪 · ${(sx.last_active || '').slice(0, 16).replace('T', ' ')}`);
+    }
+
+    async function loadHistory(id) {
+      $log.innerHTML = '';
+      $log.append(el('div', { class: 'loading' }, '載入對話…'));
+      try {
+        const r = await call('adminGetSessionMessages', id, 40);
+        $log.innerHTML = '';
+        if (r.session && r.session.summary) $log.append(el('div', { class: 'placeholder summary-box' }, '較早內容已壓縮成摘要：\n' + r.session.summary));
+        r.messages.forEach((m) => {
+          if (m.role === 'tool') return;
+          if (m.role === 'assistant' && m.text.indexOf('[呼叫工具]') === 0) return;
+          $log.append(bubble(m.role, m.text));
+        });
+        if (r.session) $sessInfo.textContent = `${r.session.id} · ${r.session.turns} 輪 · ≈${r.session.token_est} tokens`;
+        if ($log.lastChild) $log.lastChild.scrollIntoView({ block: 'end' });
+      } catch (err) {
+        $log.innerHTML = '';
+        $log.append(errorBox(err));
+      }
     }
 
     async function send() {
@@ -501,18 +530,31 @@
       $pending.scrollIntoView({ block: 'end' });
       const t0 = Date.now();
       try {
-        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value, history: history.slice() });
+        const r = await call('adminChat', { providerId: $provider.value, message, system: $system.value, sessionId });
         const meta = [
-          `${r.provider} · ${r.model}`,
-          `LLM ${r.llmCalls} 次 · 工具 ${r.steps.length} 步`,
-          `tokens ${r.usage.prompt} + ${r.usage.completion}`,
+          r.provider ? `${r.provider} · ${r.model}` : null,
+          r.llmCalls ? `LLM ${r.llmCalls} 次 · 工具 ${r.steps.length} 步` : null,
+          r.usage && (r.usage.prompt || r.usage.completion) ? `tokens ${r.usage.prompt} + ${r.usage.completion}` : null,
           `${r.ms} ms（含往返 ${Date.now() - t0} ms）`,
           r.costEst ? `≈ $${r.costEst}` : null,
           r.stopped ? `中止：${r.stopped}` : null,
+          r.compacted ? '本輪前已壓縮較早對話' : null,
+          r.curation ? `記憶整理：${r.curation}` : null,
+          r.sessionReason || null,
         ].filter(Boolean).join(' · ');
         const fallbacks = (r.fallbacks || []).map((f) => `備援：${f.error}`).join('\n');
         $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : ''), false, r.steps));
-        history.push({ role: 'user', content: message }, { role: 'assistant', content: r.text || '' });
+        if (r.sessionId && r.sessionId !== sessionId) {
+          sessionId = r.sessionId;
+          if (r.command === 'new') $log.innerHTML = '';
+          const sessions = await call('adminListSessions', 20);
+          $session.innerHTML = '';
+          $session.append(el('option', { value: '' }, '— 新 session —'));
+          sessions.forEach((sx) => $session.append(sessionOption(sx)));
+          $session.value = sessionId;
+          if (r.command === 'new') $log.append(bubble('assistant', r.text, meta));
+        }
+        $sessInfo.textContent = sessionId ? `${sessionId} · ${r.turns} 輪` : '';
         $input.value = '';
       } catch (err) {
         $pending.replaceWith(el('div', { class: 'bubble assistant' }, errorBox(err)));
@@ -520,7 +562,7 @@
         btnSend.disabled = false;
         $input.disabled = false;
         $input.focus();
-        $log.lastChild.scrollIntoView({ block: 'end' });
+        if ($log.lastChild) $log.lastChild.scrollIntoView({ block: 'end' });
       }
     }
 
@@ -546,6 +588,209 @@
           el('div', { class: 'step-result' }, s.resultPreview),
         ]))),
       ]);
+    }
+  }
+
+  // ---- 記憶（Memory / UserProfile / Sessions）----------------------------------------------
+
+  async function renderMemory(root) {
+    root.append(...header('記憶', 'Memory 放專案脈絡與工作方式，UserProfile 放關於你的偏好與事實；agent 用 memory_manage 增修，鎖定（pinned）的條目 agent 不能動。下方是 session 清單與 curation。'));
+    const $body = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    root.append($body);
+    let data;
+    try {
+      data = await call('adminGetMemory');
+    } catch (err) {
+      $body.innerHTML = '';
+      $body.append(errorBox(err));
+      return;
+    }
+    $body.innerHTML = '';
+    ['user', 'memory'].forEach((target) => $body.append(memoryPanel(target, data[target])));
+    $body.append(await sessionsPanel());
+
+    function memoryPanel(target, t) {
+      const pct = Math.min(100, Math.round((t.used / t.limit) * 100));
+      const $msg = el('div');
+      const $list = el('div');
+      const panel = el('div', { class: 'panel' }, [
+        el('div', { class: 'toolbar' }, [
+          el('h3', { style: 'margin:0' }, t.label),
+          el('span', { class: 'hint' }, `${t.used} / ${t.limit} 字元（${pct}%）· ${t.hint}`),
+        ]),
+        el('div', { class: 'capacity' }, el('div', { class: 'capacity-bar' + (pct > 85 ? ' warn' : ''), style: `width:${pct}%` })),
+        $list,
+        $msg,
+      ]);
+      t.entries.forEach((e) => $list.append(entryRow(e)));
+      $list.append(entryRow(null));
+
+      function entryRow(e) {
+        const $content = el('textarea', { rows: 2, style: 'font-family: inherit', placeholder: e ? '' : '新增條目…' });
+        $content.value = e ? e.content : '';
+        const $cat = el('input', { type: 'text', placeholder: '分類', style: 'width:120px' });
+        $cat.value = e ? e.category : '';
+        const $pin = el('input', { type: 'checkbox', title: '鎖定：agent 不能改或刪' });
+        $pin.checked = e ? e.pinned : false;
+        const btnSave = el('button', { class: 'small primary', onclick: () => save(e ? 'update' : 'add') }, e ? '儲存' : '新增');
+        const btnDel = e ? el('button', { class: 'small danger', onclick: () => { if (confirm('刪除這條記憶？')) save('delete'); } }, '刪除') : null;
+        const meta = e ? el('div', { class: 'meta' }, `${e.id} · 來源 ${e.source_session || '-'} · 更新 ${(e.updated || '').slice(0, 16).replace('T', ' ')}`) : null;
+        const row = el('div', { class: 'memory-row' }, [
+          $content,
+          el('div', { class: 'memory-row-side' }, [$cat, el('label', { class: 'checkbox' }, [$pin, ' 鎖定']), btnSave, btnDel]),
+          meta,
+        ]);
+        return row;
+        async function save(action) {
+          btnSave.disabled = true;
+          $msg.innerHTML = '';
+          try {
+            await call('adminSaveMemoryEntry', { target, action, id: e ? e.id : '', content: $content.value, category: $cat.value, pinned: $pin.checked });
+            root.innerHTML = '';
+            renderMemory(root);
+          } catch (err) {
+            $msg.append(errorBox(err));
+            btnSave.disabled = false;
+          }
+        }
+      }
+      return panel;
+    }
+
+    async function sessionsPanel() {
+      const $table = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+      const $detail = el('div');
+      const $msg = el('div');
+      const panel = el('div', { class: 'panel' }, [el('h3', {}, 'Sessions（最近 30 個）'), $table, $detail, $msg]);
+      try {
+        const sessions = await call('adminListSessions', 30);
+        $table.innerHTML = '';
+        if (!sessions.length) { $table.append(el('div', { class: 'placeholder' }, '尚無 session。到聊天台送出第一則訊息。')); return panel; }
+        const thead = el('thead', {}, el('tr', {}, ['', '標題', '輪', 'tokens', '最後活動', 'curation', ''].map((h) => el('th', {}, h))));
+        const tbody = el('tbody', {}, sessions.map((sx) => {
+          const btnView = el('button', { class: 'small', onclick: () => view(sx) }, '訊息');
+          const btnCurate = el('button', { class: 'small', onclick: () => act('adminRunCuration', sx, btnCurate) }, '整理記憶');
+          const btnClose = sx.status === 'active' ? el('button', { class: 'small', onclick: () => act('adminCloseSession', sx, btnClose) }, '關閉') : null;
+          return el('tr', { class: sx.status === 'active' ? '' : 'disabled-row' }, [
+            el('td', {}, el('span', { class: 'dot ' + (sx.status === 'active' ? 'on' : 'off'), title: sx.status })),
+            el('td', {}, [el('div', {}, sx.title || '（無標題）'), el('div', { class: 'meta' }, sx.id + (sx.summary ? ' · 有摘要' : '') + (sx.has_embedding ? ' · 有向量' : ''))]),
+            el('td', {}, String(sx.turns)),
+            el('td', {}, String(sx.token_est)),
+            el('td', { class: 'nowrap' }, (sx.last_active || '').slice(0, 16).replace('T', ' ')),
+            el('td', {}, `到第 ${sx.last_curated_turn} 輪`),
+            el('td', { class: 'actions' }, [btnView, btnCurate, btnClose]),
+          ]);
+        }));
+        $table.append(el('table', { class: 'table' }, [thead, tbody]));
+      } catch (err) {
+        $table.innerHTML = '';
+        $table.append(errorBox(err));
+      }
+      return panel;
+
+      async function view(sx) {
+        $detail.innerHTML = '';
+        $detail.append(el('div', { class: 'loading' }, '載入訊息…'));
+        try {
+          const r = await call('adminGetSessionMessages', sx.id, 80);
+          $detail.innerHTML = '';
+          $detail.append(el('h3', {}, `${sx.title || sx.id} 的訊息（最後 ${r.messages.length} 則）`));
+          if (r.session.summary) $detail.append(el('div', { class: 'placeholder summary-box' }, '摘要：\n' + r.session.summary));
+          const log = el('div', { class: 'chat-log' });
+          r.messages.forEach((m) => log.append(el('div', { class: 'bubble ' + (m.role === 'user' ? 'user' : 'assistant') + (m.role === 'tool' ? ' tool-msg' : '') }, [
+            el('div', { class: 'bubble-text' }, (m.role === 'tool' ? `[${m.name}] ` : '') + m.text),
+            el('div', { class: 'meta' }, `#${m.seq} ${m.role}`),
+          ])));
+          $detail.append(log);
+        } catch (err) {
+          $detail.innerHTML = '';
+          $detail.append(errorBox(err));
+        }
+      }
+
+      async function act(fn, sx, btn) {
+        btn.disabled = true;
+        $msg.innerHTML = '';
+        try {
+          const r = await call(fn, sx.id);
+          $msg.append(el('span', { class: 'summary ok' }, `${fn === 'adminCloseSession' ? '已關閉' : '已整理'}：${r.curation || '-'}`));
+          setTimeout(() => { root.innerHTML = ''; renderMemory(root); }, 1200);
+        } catch (err) {
+          $msg.append(errorBox(err));
+          btn.disabled = false;
+        }
+      }
+    }
+  }
+
+  // ---- 設定（Agent 層）-----------------------------------------------------------------------
+
+  const AGENT_SETTING_FIELDS = [
+    { key: 'memory_max_chars', label: 'Memory 容量（字元）', hint: 'hermes 預設 2200；滿了 agent 會被要求先整併' },
+    { key: 'profile_max_chars', label: 'UserProfile 容量（字元）', hint: 'hermes 預設 1375' },
+    { key: 'context_max_tokens', label: 'context 壓縮門檻（估算 tokens）', hint: '摘要 + 活訊息超過就用 fast 模型壓縮較早輪次' },
+    { key: 'keep_recent_turns', label: '壓縮時保留最近幾輪', hint: '一輪 = 一則 user 訊息到下一則 user 之前' },
+    { key: 'curation_every_turns', label: '每幾輪跑一次 curation', hint: '0 = 關閉；/new 與「關閉 session」也會跑' },
+    { key: 'curation_auto_apply', label: 'curation 直接套用', type: 'checkbox', hint: '關閉時提議進「紀錄 → 審批」由你批准（建議）' },
+    { key: 'session_idle_hours', label: 'session 閒置幾小時自動切新', hint: '0 = 不自動切' },
+    { key: 'session_embeddings', label: 'session 向量搜尋', type: 'checkbox', hint: '需要一個 role=embed 的 provider（openai / gemini）；在 curation 時為 session 摘要算向量' },
+  ];
+
+  async function renderSettings(root) {
+    root.append(...header('設定', 'Agent 層設定，存在 DB 的 Config tab。工具 RBAC、審批策略與人格在「工具」分頁。'));
+    const $body = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    root.append($body);
+    let data;
+    try {
+      data = await call('adminGetAgentSettings');
+    } catch (err) {
+      $body.innerHTML = '';
+      $body.append(errorBox(err));
+      return;
+    }
+    $body.innerHTML = '';
+    const camel = (k) => k.replace(/_([a-z])/g, (m, c) => c.toUpperCase());
+    const inputs = {};
+    const grid = el('div', { class: 'form-grid' });
+    AGENT_SETTING_FIELDS.forEach((f) => {
+      const current = data.config[camel(f.key)];
+      let input;
+      if (f.type === 'checkbox') {
+        input = el('input', { type: 'checkbox' });
+        input.checked = !!current;
+        grid.append(field(f.label, el('label', { class: 'checkbox' }, [input, ' 啟用']), f.hint + `（預設 ${data.defaults[f.key] ? '開' : '關'}）`));
+      } else {
+        input = el('input', { type: 'number' });
+        input.value = current;
+        grid.append(field(f.label, input, f.hint + `（預設 ${data.defaults[f.key]}）`));
+      }
+      inputs[f.key] = input;
+    });
+    const $msg = el('div');
+    const btnSave = el('button', { class: 'primary', onclick: save }, '儲存');
+    $body.append(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'toolbar' }, [
+          el('span', { class: data.hasFast ? 'summary ok' : 'summary fail' }, data.hasFast ? '有 fast provider（壓縮 / curation 用）' : '沒有 fast provider：壓縮與 curation 會用 main 模型'),
+          el('span', { class: data.hasEmbed ? 'summary ok' : 'badge' }, data.hasEmbed ? '有 embed provider' : '沒有 embed provider（向量搜尋不可用）'),
+        ]),
+        grid,
+        el('div', { class: 'toolbar' }, [btnSave, $msg]),
+      ]),
+    );
+    async function save() {
+      btnSave.disabled = true;
+      $msg.innerHTML = '';
+      const payload = {};
+      AGENT_SETTING_FIELDS.forEach((f) => { payload[f.key] = f.type === 'checkbox' ? inputs[f.key].checked : inputs[f.key].value; });
+      try {
+        await call('adminSaveAgentSettings', payload);
+        $msg.append(el('span', { class: 'summary ok' }, '已儲存'));
+        setTimeout(() => { root.innerHTML = ''; renderSettings(root); }, 600);
+      } catch (err) {
+        $msg.append(errorBox(err));
+        btnSave.disabled = false;
+      }
     }
   }
 
@@ -740,7 +985,7 @@
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {

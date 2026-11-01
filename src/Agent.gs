@@ -48,9 +48,10 @@ const DEFAULT_PERSONA = [
  * @param {ToolConfig} config
  * @param {ToolRegistry} registry
  * @param {string=} extra 使用者在聊天台額外給的 system 指示
+ * @param {!Array<string>=} contextBlocks M3：記憶快照、先前對話摘要、session 資訊等附加區塊
  * @return {string}
  */
-function buildSystemPrompt_(config, registry, extra) {
+function buildSystemPrompt_(config, registry, extra, contextBlocks) {
   const persona = config.persona || DEFAULT_PERSONA;
   const disabled = describeDisabledTools_(config, registry);
   let now = '';
@@ -71,9 +72,16 @@ function buildSystemPrompt_(config, registry, extra) {
     '- 工具結果若標示已溢寫（file_id），只在需要完整內容時用 session_spill_read 分頁讀。',
     '- 完成後用繁體中文回覆：做了什麼、產出的檔案連結、尚未完成或需要 owner 決定的事。',
   ];
+  if (registry.byName.memory_manage) {
+    parts.push('', '## 記憶',
+      '- 快照裡是你對 owner 的長期記憶。當使用者說出長期偏好、關於自己的事實、專案脈絡或工作方式，用 memory_manage 記下來（user 放關於使用者的，memory 放專案與工作方式）；一次性任務細節與工具輸出不要記。',
+      '- 容量滿了先 replace 合併相近條目或 remove 過時條目，再 add。owner 鎖定的條目不要動。',
+      '- 被問「之前聊過什麼」時用 session_search 查過去的 session。');
+  }
   if (disabled.length) {
     parts.push('', '## 目前未開放（owner 可在管理頁「工具」分頁開啟）', ...disabled.map((d) => `- ${d}`));
   }
+  (contextBlocks || []).forEach((block) => { if (block) parts.push('', block); });
   parts.push('', `現在時間：${now}。owner：${owner || '（未知）'}。`);
   if (extra && String(extra).trim()) parts.push('', '## 本次額外指示', String(extra).trim());
   return parts.join('\n');
@@ -160,8 +168,9 @@ function stopMessage_(stopped, detail, steps) {
 /**
  * 跑一輪。
  * @param {{message: string, history: (!Array<!Object>|undefined), providerId: (string|undefined),
- *   sessionId: (string|undefined), mode: (string|undefined), systemExtra: (string|undefined)}} input
- *   history：先前的 user / assistant 文字訊息（中立格式），不含工具細節
+ *   sessionId: (string|undefined), mode: (string|undefined), systemExtra: (string|undefined),
+ *   contextBlocks: (!Array<string>|undefined)}} input
+ *   history：先前的訊息（中立格式，可含 assistant tool_calls 與 tool 訊息）；contextBlocks：附加到 system prompt 的區塊
  * @param {{chat: (Function|undefined), execute: (Function|undefined), registry: (ToolRegistry|undefined),
  *   config: (ToolConfig|undefined), executeDeps: (Object|undefined), now: (Function|undefined),
  *   budgetMs: (number|undefined), maxSteps: (number|undefined)}=} deps 測試注入
@@ -183,9 +192,9 @@ function runTurn_(input, deps) {
   if (!message) throw new Error('訊息不可為空。');
 
   const tools = listToolsForProvider_(registry, config.rbac);
-  const messages = [{ role: 'system', content: buildSystemPrompt_(config, registry, input.systemExtra) }]
-    .concat((input.history || []).filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
-      .map((m) => ({ role: m.role, content: String(m.content) })))
+  const messages = [{ role: 'system', content: buildSystemPrompt_(config, registry, input.systemExtra, input.contextBlocks) }]
+    .concat((input.history || []).filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool'))
+      .filter((m) => m.role !== 'assistant' || m.content || (m.tool_calls && m.tool_calls.length)))
     .concat([{ role: 'user', content: message }]);
 
   /** @type {!Array<TurnStep>} */
@@ -268,6 +277,8 @@ function runTurn_(input, deps) {
     const lastText = last && last.text ? String(last.text).trim() : '';
     text = (lastText ? lastText + '\n\n' : '') + stopMessage_(stopped, stoppedDetail, steps);
   }
+  // 最後的文字回覆也進 messages，Sessions（M3）才能把整輪完整存下來。
+  if (text) messages.push({ role: 'assistant', content: text });
 
   return {
     text,

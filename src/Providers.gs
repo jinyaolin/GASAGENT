@@ -890,6 +890,126 @@ function chatWithChain_(chain, req, deps) {
   throw new Error('unreachable');
 }
 
+// ---- Embedding（M3；embed 角色）---------------------------------------------------------
+
+/**
+ * @param {Provider} provider
+ * @param {!Array<string>} texts
+ * @param {string} apiKey
+ * @return {{url: string, headers: !Object, body: !Object}}
+ */
+function openaiEmbedRequest_(provider, texts, apiKey) {
+  const body = applyExtraBody_({ model: provider.model, input: texts }, provider.extra_body);
+  return { url: joinUrl_(provider.base_url, '/embeddings'), headers: Object.assign({ Authorization: 'Bearer ' + apiKey }, provider.extra_headers), body };
+}
+
+/**
+ * @param {!Object} json
+ * @return {!Array<!Array<number>>} 依 index 排序的向量
+ */
+function openaiEmbedParse_(json) {
+  return (json.data || []).slice().sort((a, b) => (a.index || 0) - (b.index || 0)).map((d) => d.embedding || []);
+}
+
+/**
+ * @param {Provider} provider
+ * @param {!Array<string>} texts
+ * @param {string} apiKey
+ * @return {{url: string, headers: !Object, body: !Object}}
+ */
+function geminiEmbedRequest_(provider, texts, apiKey) {
+  const model = provider.model.indexOf('models/') === 0 ? provider.model : 'models/' + provider.model;
+  const body = { requests: texts.map((t) => ({ model, content: { parts: [{ text: t }] } })) };
+  return {
+    url: joinUrl_(provider.base_url.replace(/\/v1(beta)?\/?$/, ''), `/v1beta/${model}:batchEmbedContents`),
+    headers: Object.assign({ 'x-goog-api-key': apiKey }, provider.extra_headers),
+    body,
+  };
+}
+
+/**
+ * @param {!Object} json
+ * @return {!Array<!Array<number>>}
+ */
+function geminiEmbedParse_(json) {
+  return (json.embeddings || []).map((e) => e.values || []);
+}
+
+/** @type {!Object<string, {buildRequest: Function, parseResponse: Function}>} */
+const EMBED_ADAPTERS_ = Object.freeze({
+  openai: { buildRequest: openaiEmbedRequest_, parseResponse: openaiEmbedParse_ },
+  gemini: { buildRequest: geminiEmbedRequest_, parseResponse: geminiEmbedParse_ },
+});
+
+/**
+ * 嵌入一批文字（單一 provider、不備援）。
+ * @param {Provider} provider
+ * @param {!Array<string>} texts
+ * @param {{fetch: (Function|undefined), keyFor: (Function|undefined)}=} deps
+ * @return {!Array<!Array<number>>}
+ * @throws {Error}
+ */
+function embedTexts_(provider, texts, deps) {
+  deps = deps || {};
+  const adapter = EMBED_ADAPTERS_[provider.protocol];
+  if (!adapter) throw providerError_(provider, 0, `protocol ${provider.protocol} 不支援嵌入（只有 openai / gemini）。`);
+  const apiKey = deps.keyFor ? deps.keyFor(provider.id) : getProviderKey_(provider.id);
+  if (!apiKey) throw providerError_(provider, 0, `API key 未設定（Script Property ${providerKeyProp_(provider.id)}）。`);
+  const prepared = adapter.buildRequest(provider, texts, apiKey);
+  const t0 = Date.now();
+  let res;
+  try {
+    res = (deps.fetch || defaultProviderFetch_)(prepared.url, { method: 'post', contentType: 'application/json', headers: prepared.headers, payload: JSON.stringify(prepared.body), muteHttpExceptions: true });
+  } catch (err) {
+    throw providerError_(provider, 0, `fetch 失敗：${err && err.message || err}`, Date.now() - t0);
+  }
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+  let json = null;
+  try { json = JSON.parse(text); } catch (err) { json = null; }
+  if (code < 200 || code >= 300) throw providerError_(provider, code, extractApiError_(json, text), Date.now() - t0);
+  const vectors = adapter.parseResponse(json || {});
+  if (vectors.length !== texts.length) throw providerError_(provider, code, `嵌入數量不符：要 ${texts.length} 回 ${vectors.length}`, Date.now() - t0);
+  return vectors;
+}
+
+/**
+ * 走 embed 角色的備援鏈。
+ * @param {!Array<string>} texts
+ * @param {{fetch: (Function|undefined), keyFor: (Function|undefined), providers: (Array|undefined)}=} deps
+ * @return {{vectors: !Array<!Array<number>>, provider: string}}
+ * @throws {Error} 沒有 embed provider 或全部失敗
+ */
+function embedWithChain_(texts, deps) {
+  deps = deps || {};
+  const chain = providerChain_('embed', deps.providers || listProviders_());
+  if (!chain.length) throw new Error('沒有啟用的 embed provider（role=embed）。');
+  const errors = [];
+  for (let i = 0; i < chain.length; i++) {
+    try {
+      return { vectors: embedTexts_(chain[i], texts, deps), provider: chain[i].id };
+    } catch (err) {
+      errors.push(err.message);
+      if (!isFallbackableError_(err)) throw err;
+    }
+  }
+  throw new Error('embed 備援鏈全部失敗：\n' + errors.map((e) => '- ' + e).join('\n'));
+}
+
+/**
+ * @param {!Array<number>} a
+ * @param {!Array<number>} b
+ * @return {number} cosine 相似度；長度不符或零向量回 0
+ */
+function cosine_(a, b) {
+  if (!a || !b || a.length !== b.length || !a.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+}
+
 /**
  * 單輪對話入口。M1 由管理頁聊天台以 google.script.run 同步呼叫；M4 改走 Queue 時 UI 不用改，
  * 只要 job runner 呼叫同一個函式。

@@ -178,43 +178,213 @@ function adminTestProvider(id) {
   return testProvider_(id);
 }
 
-// ---- M2：聊天台（接工具迴圈）------------------------------------------------------
+// ---- M3：聊天台（session 持久化）------------------------------------------------------
 
 /**
- * 聊天台：一輪含工具呼叫的對話。M2 仍是同步 google.script.run（上限 6 分鐘；迴圈自己在 4.5 分鐘停）。
- * history 由前端保存（只含 user / assistant 文字），M3 才做 server 端 session。
- * @param {{providerId: (string|undefined), message: string, system: (string|undefined),
- *   history: (!Array<{role: string, content: string}>|undefined)}} input
- * @return {!Object} runTurn_ 的結果去掉 messages（可能很大）
+ * 聊天台：一輪含工具呼叫與 session 持久化。sessionId 空 = 沿用最近的 active admin session（閒置過久會自動開新的）。
+ * 輸入 `/new` 關閉目前 session 並開新的；`/status` 看目前 session。同步 google.script.run（上限 6 分鐘；迴圈 4.5 分鐘停）。
+ * @param {{providerId: (string|undefined), message: string, system: (string|undefined), sessionId: (string|undefined)}} input
+ * @return {!Object} runSessionTurn_ 的結果去掉 messages
  */
 function adminChat(input) {
   assertOwner();
   input = input || {};
   ensureToolConfigDefaults_(); // 新 toolset 沒有 rbac 列會被一律拒絕；這裡幂等補預設值
-  const r = runTurn_({
+  const r = runSessionTurn_({
     message: String(input.message || ''),
-    history: Array.isArray(input.history) ? input.history.slice(-20) : [],
+    sessionId: String(input.sessionId || ''),
+    channel: 'admin',
     providerId: input.providerId || '',
     systemExtra: input.system || '',
-    sessionId: 'admin-chat',
     mode: 'interactive',
   });
   return {
     text: r.text,
-    steps: r.steps.map((s) => ({
+    steps: (r.steps || []).map((s) => ({
       tool: s.tool, argsPreview: s.argsPreview, resultPreview: s.resultPreview, status: s.status, ok: s.ok, ms: s.ms,
       approvalId: s.approvalId, spillFileId: s.spillFileId,
     })),
-    stopped: r.stopped,
-    stoppedDetail: r.stoppedDetail,
-    provider: r.provider,
-    model: r.model,
+    stopped: r.stopped || '',
+    stoppedDetail: r.stoppedDetail || '',
+    provider: r.provider || '',
+    model: r.model || '',
     usage: r.usage,
-    costEst: r.costEst,
+    costEst: r.costEst || 0,
     ms: r.ms,
-    llmCalls: r.llmCalls,
+    llmCalls: r.llmCalls || 0,
     fallbacks: r.fallbacks || [],
+    sessionId: r.sessionId,
+    sessionCreated: !!r.sessionCreated,
+    sessionReason: r.sessionReason || '',
+    turns: r.turns || 0,
+    compacted: !!r.compacted,
+    curation: r.curation ? describeCuration_(r.curation) : '',
+    command: r.command || '',
   };
+}
+
+/**
+ * 聊天台 / 記憶分頁：最近的 session。
+ * @param {number=} limit
+ * @return {!Array<!Object>}
+ */
+function adminListSessions(limit) {
+  assertOwner();
+  return sheetSessionStore_().listRecent(clampInt_(limit, 20, 1, 200)).map(publicSession_);
+}
+
+/**
+ * @param {SessionRow} s
+ * @return {!Object}
+ */
+function publicSession_(s) {
+  return {
+    id: s.id, channel: s.channel, title: s.title, summary: s.summary, status: s.status, turns: s.turns, token_est: s.token_est,
+    compact_seq: s.compact_seq, last_curated_turn: s.last_curated_turn, has_embedding: !!s.embedding,
+    created: fmtDate_(s.created), last_active: fmtDate_(s.last_active),
+  };
+}
+
+/**
+ * 記憶分頁：某 session 的訊息（活訊息 + 壓縮前的也給，供檢視）。
+ * @param {string} sessionId
+ * @param {number=} limit 最後幾則，預設 60
+ * @return {{session: ?Object, messages: !Array<!Object>}}
+ */
+function adminGetSessionMessages(sessionId, limit) {
+  assertOwner();
+  const store = sheetSessionStore_();
+  const s = store.get(String(sessionId || ''));
+  if (!s) return { session: null, messages: [] };
+  const all = store.loadMessages(s.id, 0);
+  const n = clampInt_(limit, 60, 1, 500);
+  return {
+    session: publicSession_(s),
+    messages: all.slice(Math.max(0, all.length - n)).map((m) => ({
+      seq: m.seq, role: m.role,
+      text: m.role === 'tool' ? truncateText_(stringifyContent_(m.content), 600).text
+        : (m.tool_calls && m.tool_calls.length ? `[呼叫工具] ${m.tool_calls.map((tc) => tc.function.name).join(', ')}` + (m.content ? '\n' + m.content : '') : truncateText_(stringifyContent_(m.content), 4000).text),
+      name: m.name || '',
+    })),
+  };
+}
+
+/**
+ * 記憶分頁：關閉 session（跑 curation）。
+ * @param {string} sessionId
+ * @return {{closed: boolean, curation: string}}
+ */
+function adminCloseSession(sessionId) {
+  assertOwner();
+  const store = sheetSessionStore_();
+  const s = store.get(String(sessionId || ''));
+  if (!s) throw new Error(`找不到 session ${sessionId}`);
+  if (s.status !== 'active') return { closed: false, curation: '已經是 ' + s.status };
+  const r = closeSession_(s, { store, cfg: getAgentConfig_() });
+  return { closed: true, curation: describeCuration_(r.curation) };
+}
+
+/**
+ * 記憶分頁：對某 session 立刻跑一次 curation（提議進 Approvals，或依設定自動套用）。
+ * @param {string} sessionId
+ * @return {{curation: string, ops: !Array<!Object>}}
+ */
+function adminRunCuration(sessionId) {
+  assertOwner();
+  const store = sheetSessionStore_();
+  const s = store.get(String(sessionId || ''));
+  if (!s) throw new Error(`找不到 session ${sessionId}`);
+  if (!s.turns) throw new Error('這個 session 還沒有任何輪次。');
+  const r = curateSession_(s, { store, cfg: getAgentConfig_() });
+  return { curation: describeCuration_(r), ops: r.ops };
+}
+
+// ---- M3：記憶分頁 -----------------------------------------------------------------------
+
+/**
+ * 記憶分頁：兩表全部條目與容量。
+ * @return {{memory: !Object, user: !Object}}
+ */
+function adminGetMemory() {
+  assertOwner();
+  const store = sheetMemoryStore_();
+  const cfg = getAgentConfig_();
+  const out = {};
+  Object.keys(MEMORY_TARGETS).forEach((target) => {
+    const entries = store.list(target).map((e) => ({
+      id: e.id, content: e.content, category: e.category, pinned: e.pinned, source_session: e.source_session,
+      created: fmtDate_(e.created), updated: fmtDate_(e.updated),
+    }));
+    out[target] = { label: MEMORY_TARGETS[target].label, hint: MEMORY_TARGETS[target].hint, used: memoryUsedChars_(store.list(target)), limit: memoryLimit_(target, cfg), entries };
+  });
+  return out;
+}
+
+/**
+ * 記憶分頁：owner 直接新增 / 編輯 / 刪除條目（不受 agent 的 pinned 限制，但仍受容量上限）。
+ * @param {{target: string, action: string, id: (string|undefined), content: (string|undefined), category: (string|undefined), pinned: (boolean|undefined)}} input
+ * @return {!Object} adminGetMemory()
+ */
+function adminSaveMemoryEntry(input) {
+  assertOwner();
+  input = input || {};
+  const store = sheetMemoryStore_();
+  const cfg = getAgentConfig_();
+  const target = String(input.target || '');
+  if (!MEMORY_TARGETS[target]) throw new Error('target 必須是 memory 或 user。');
+  const entries = store.list(target);
+  const limit = memoryLimit_(target, cfg);
+  const content = String(input.content || '').trim().replace(/\s+/g, ' ');
+  if (input.action === 'add') {
+    if (!content) throw new Error('內容不可為空。');
+    if (memoryUsedChars_(entries) + content.length > limit) throw new Error(`超過容量：${memoryUsedChars_(entries)} + ${content.length} > ${limit}`);
+    store.add(target, { content, category: String(input.category || '').trim(), pinned: !!input.pinned, source_session: 'owner' });
+  } else {
+    const e = entries.find((x) => x.id === String(input.id || ''));
+    if (!e) throw new Error(`找不到條目 ${input.id}`);
+    if (input.action === 'delete') {
+      store.remove(target, e);
+    } else if (input.action === 'update') {
+      if (!content) throw new Error('內容不可為空。');
+      if (memoryUsedChars_(entries) - e.content.length + content.length > limit) throw new Error('超過容量。');
+      e.content = content;
+      e.category = String(input.category === undefined ? e.category : input.category).trim();
+      if (input.pinned !== undefined) e.pinned = !!input.pinned;
+      store.update(target, e);
+    } else {
+      throw new Error('action 必須是 add / update / delete。');
+    }
+  }
+  return adminGetMemory();
+}
+
+// ---- M3：設定分頁 -----------------------------------------------------------------------
+
+/**
+ * 設定分頁：Agent 層設定 + 預設值 + 是否有 fast / embed provider。
+ * @return {!Object}
+ */
+function adminGetAgentSettings() {
+  assertOwner();
+  ensureToolConfigDefaults_();
+  const providers = listProviders_();
+  return {
+    config: getAgentConfig_(),
+    defaults: AGENT_CONFIG_DEFAULTS,
+    hasFast: providerChain_('fast', providers).length > 0,
+    hasEmbed: providerChain_('embed', providers).length > 0,
+  };
+}
+
+/**
+ * 設定分頁：儲存。
+ * @param {!Object} input key 同 AGENT_CONFIG_DEFAULTS
+ * @return {!Object} adminGetAgentSettings()
+ */
+function adminSaveAgentSettings(input) {
+  assertOwner();
+  saveAgentConfig_(input || {});
+  return adminGetAgentSettings();
 }
 
 // ---- M2：工具分頁 -----------------------------------------------------------------

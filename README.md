@@ -4,7 +4,7 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M2 工具與 RBAC**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M3 記憶**。
 
 ## 設計要點
 
@@ -26,12 +26,14 @@ src/
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
   Tools_Gmail.gs  Tools_Calendar.gs  Tools_Web.gs  Tools_Session.gs   # M2：八個 toolset 的 handler
   Agent.gs          # M2：runTurn_() 工具呼叫迴圈、system prompt、步數 / 時間 / 熔斷
+  Sessions.gs       # M3：Sessions / Messages 持久化、CacheService 熱快取、context 壓縮、/new、runSessionTurn_()
+  Memory.gs         # M3：Memory / UserProfile 上限與快照、memory_manage、session_search、curation
   Queue.gs          # queueTick() 空殼（M4 放 job 狀態機）
   Setup.gs          # installAgent()：寫 OWNER_EMAIL、建 DB、裝每分鐘 trigger、補工具設定預設值（可重跑）
   Admin.gs          # doGet 路由 + admin* 後端入口
   AdminPage.html / admin_js.html / admin_css.html   # 管理頁 SPA（檔名避開與 Admin.gs 撞名）
-  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 registry 與 RBAC 健檢
-  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項；標 'pure' 的可在本機跑
+  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session 健檢
+  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 .clasp.json.example # clasp 綁定範本（.clasp.json 本身不進 git）
 ```
@@ -188,7 +190,8 @@ clasp deploy -i <deploymentId> -d "說明"
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_label`(W) `gmail_archive`(W) —— **沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) |
-| session | `session_spill_read`(R，分頁讀溢寫檔) |
+| session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
+| memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 
 M2 沒有任何 D 類工具（刻意不開放刪除）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
 
@@ -244,11 +247,66 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 
 ### M2 驗收步驟（請在瀏覽器操作）
 
-1. Doctor → 「重新安裝」（`Approvals` 多了 `result` 欄、`Config` 要補 RBAC 預設值）→ Doctor 全綠（含新的三項）→ 「跑 smoke tests」35 項全過。
+1. Doctor → 「重新安裝」（`Approvals` 多了 `result` 欄、`Config` 要補 RBAC 預設值）→ Doctor 全綠（含新的三項）→ 「跑 smoke tests」全過。
 2. 「工具」分頁確認八個 toolset 都有開關；要測寄信審批就把 **gmail 的 external 打開**，儲存。
 3. 「聊天台」輸入：`找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信`（X 換成真實主題）。預期回覆上方顯示 `gmail_search` → `gmail_read_thread` → `docs_create` → `gmail_create_draft` 等步驟，回覆附 Doc 連結與草稿摘要。
 4. 接著輸入 `把那封回信寄出`。預期出現 `gmail_send` 步驟標「待審批」，回覆說明已送審。到「紀錄」分頁看到 pending 卡片；按「拒絕」（或「批准並執行」真的寄出）。
 5. 「紀錄」的 AuditLog 應有上述每一步。
+
+## 記憶與 session（M3）
+
+### Session
+
+聊天台每則訊息屬於一個 **session**（DB `Sessions` 一列、`Messages` 每則訊息一列，中立格式：user / assistant / assistant+tool_calls / tool 全存）。`runSessionTurn_()`（[Sessions.gs](src/Sessions.gs)）是聊天台與日後 Queue runner 的共同入口：
+
+1. 載入或建立 session。閒置超過 `session_idle_hours`（預設 6）自動關掉舊的開新的。
+2. **Context 壓縮**：summary + 活訊息的估算 tokens 超過 `context_max_tokens`（預設 24000）時，用 **fast** 模型（沒有就 main）把較早的輪次併進 `Sessions.summary`，只保留最近 `keep_recent_turns`（預設 4）輪；`compact_seq` 之前的訊息不再進 context，但仍留在 Sheet 供搜尋。
+3. 把記憶快照、先前對話摘要、session 資訊附進 system prompt，跑 M2 的 `runTurn_()`。
+4. 這輪新增的訊息批次寫入 `Messages`，更新 session 的 turns / token_est / title，CacheService 快取最近訊息（真相仍在 Sheet）。
+5. **Curation nudge**：每 `curation_every_turns`（預設 10）輪、或 `/new` 關閉 session 時，跑一次記憶整理（見下）。
+
+聊天指令：`/new`（關閉目前 session 並開新的；後面可直接接訊息）、`/status`。聊天台的 session 下拉可切回舊 session 繼續聊。
+
+### Memory / UserProfile
+
+沿 hermes 的設計：**兩表、字元上限、快照注入、工具沒有 read**。
+
+| 表 | 放什麼 | 上限（Config） |
+|---|---|---|
+| `UserProfile` | 關於你：身分、偏好、溝通風格、慣用工具 | `profile_max_chars` 1375 |
+| `Memory` | 專案脈絡、決定、工作方式、重要事實 | `memory_max_chars` 2200 |
+
+- 每輪開始把兩表快照（含容量）放進 system prompt，模型自然看得到，所以工具只有寫入。
+- `memory_manage(target, action, content, old_content, category)`：`add` / `replace` / `remove`。replace / remove 用 `old_content` 比對既有條目，需**唯一命中**；單條 ≤ 500 字；容量不足回錯誤要模型先整併。
+- 管理頁「記憶」分頁可直接增修刪兩表，並可把條目**鎖定（pinned）**：agent 不能改或刪，只有你能。
+- `session_search(query, limit)`：關鍵字 AND 搜 session 標題、摘要與訊息，回 session 與片段；排除目前 session。開 `session_embeddings` 且有 `role=embed` 的 provider（openai / gemini）時，curation 會為 session 摘要算向量，搜尋加上 cosine 相似度。
+
+### Curation
+
+用 fast 模型讀最近的對話與目前快照，輸出 JSON 提議（add / replace / remove）。**預設不直接套用**：每筆提議寫成一列 `Approvals`（tool=`memory_manage`），到「紀錄 → 審批」批准才寫入；Config `curation_auto_apply` 開了才直接套用。「記憶」分頁每個 session 有「整理記憶」「關閉」按鈕可手動觸發。
+
+### 管理頁「設定」分頁
+
+| 項目 | Config key | 預設 |
+|---|---|---|
+| Memory / UserProfile 容量 | `memory_max_chars` / `profile_max_chars` | 2200 / 1375 |
+| context 壓縮門檻（估算 tokens） | `context_max_tokens` | 24000 |
+| 壓縮時保留最近幾輪 | `keep_recent_turns` | 4 |
+| 每幾輪 curation（0 關） | `curation_every_turns` | 10 |
+| curation 直接套用 | `curation_auto_apply` | 關 |
+| session 閒置幾小時自動切新（0 關） | `session_idle_hours` | 6 |
+| session 向量搜尋 | `session_embeddings` | 關 |
+
+token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何時壓縮。Doctor 加：兩表容量、Sessions 可讀、有 fast provider（沒有只是提醒）、開了向量搜尋就要有 embed provider。
+
+### M3 驗收步驟（請在瀏覽器操作）
+
+1. Doctor → 「重新安裝」（`Sessions` 多 4 欄、Config 補 M3 設定）→ 全綠 → 「跑 smoke tests」44 項全過。
+2. 「模型」分頁建議加一個 `role=fast` 的便宜模型（例如 GLM 的 flash 或 gemini-2.5-flash）；沒有也能跑，壓縮與 curation 會用 main。
+3. 聊天台（session A）：「我偏好繁體中文，程式註解用英文」→ 預期出現 `memory_manage` 步驟（target=user）。到「記憶」分頁看到該條目。
+4. 聊天台輸入 `/new` → 回「已開新 session」；再問「我的偏好是什麼？」→ 應直接從快照回答，不需查詢。
+5. 問「上個月我們聊過哪個專案？」→ 預期 `session_search` 步驟並列出先前 session。
+6. 「記憶」分頁對 session A 按「整理記憶」→ 「紀錄」分頁出現 `memory_manage` 的待審批（或回「沒有需要更新的記憶」）。
 
 ## 開發流程
 
@@ -290,13 +348,18 @@ node scripts/local-tests.js
 | 聊天台跑了很久才回「系統中止：已達單輪時間預算」 | 一輪工具太多或某個工具（PDF OCR、大試算表）太慢。拆成幾則訊息下指令，或調低讀取類工具的 max_* 參數 |
 | 回覆說「同一工具以相同參數連續失敗 3 次，已熔斷」 | 看回覆上方該步的結果摘要（通常是參數錯或找不到 id），修正後重下 |
 | 升到 M2 後 Doctor 說 `Approvals` 缺欄位 / 缺 rbac | 按「重新安裝」補 `result` 欄與 RBAC 預設值 |
+| 升到 M3 後 Doctor 說 `Sessions` 缺欄位 | 按「重新安裝」補 `compact_seq` / `turns` / `last_curated_turn` / `embedding` |
+| agent 說「容量不足」不肯記 | 到「記憶」分頁整併或刪舊條目，或在「設定」調高上限 |
+| `memory_manage` 回「命中 N 條」 | 模型給的 old_content 太短；通常會自己重試，否則在「記憶」分頁手動改 |
+| 聊天台回「前一個 session 閒置超過 N 小時」 | 正常：超過 `session_idle_hours` 自動開新 session；要延長到「設定」調 |
+| 壓縮 / curation 很慢或很貴 | 加一個 `role=fast` 的便宜 provider；沒有 fast 會用 main |
 
 ## 里程碑
 
 - [x] M0 骨架：repo + clasp、scopes、`installAgent()`、管理頁空殼、Doctor、smoke tests
 - [x] M1 多 provider（OpenAI 相容 / Anthropic / Gemini）、備援鏈、Usage、模型分頁、聊天台（單輪、同步）
 - [x] M2 工具與 RBAC（八個 toolset、registry / executor、審批、溢寫、工具迴圈、工具 / 紀錄分頁）—— 批准後續跑對話留到 M3/M4
-- [ ] M3 記憶（Memory / UserProfile、context 壓縮、session_search）
+- [x] M3 記憶：Sessions / Messages 持久化、context 壓縮、Memory / UserProfile 上限與快照、memory_manage、session_search（可選向量）、curation 進審批、記憶 / 設定分頁
 - [ ] M4 排程與非同步 Queue
 - [ ] M5 技能（Drive `skills/`）
 - [ ] M6 通道（Telegram webhook 部署 B、Email 指令信）

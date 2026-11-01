@@ -1,5 +1,5 @@
 /**
- * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）。
+ * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）。
  *
  * 回傳純 JSON，管理頁 Doctor 分頁以綠 / 紅 / 黃清單顯示。
  * status：'ok' 通過、'fail' 失敗（整體 ok=false）、'warn' 提醒（不影響整體）。
@@ -137,6 +137,35 @@ function runDoctor() {
     }
   } else if (registry) {
     push('tools_rbac', '每個 toolset 都有 RBAC 設定（Config rbac.<toolset>）', 'fail', 'DB 無法開啟。');
+  }
+
+  // 9. 記憶與 session（M3）
+  if (ss) {
+    try {
+      const cfg = getAgentConfig_();
+      const store = sheetMemoryStore_();
+      Object.keys(MEMORY_TARGETS).forEach((target) => {
+        const used = memoryUsedChars_(store.list(target));
+        const limit = memoryLimit_(target, cfg);
+        const pct = Math.round((used / limit) * 100);
+        push(`memory_${target}`, `${MEMORY_TARGETS[target].label} 容量在上限內`, used > limit ? 'fail' : pct > 85 ? 'warn' : 'ok',
+          `${used} / ${limit} 字元（${pct}%）${used > limit ? '，超過上限：請到「記憶」分頁整併' : pct > 85 ? '，快滿了' : ''}`);
+      });
+      const sessions = sheetSessionStore_().listRecent(10000);
+      const active = sessions.filter((x) => x.status === 'active').length;
+      push('sessions', 'Sessions / Messages 可讀', 'ok', `${sessions.length} 個 session（${active} 個 active）；壓縮門檻 ${cfg.contextMaxTokens} tokens、curation 每 ${cfg.curationEveryTurns || '（關）'} 輪`);
+      const providers = listProviders_();
+      const fast = providerChain_('fast', providers);
+      push('provider_fast', '有 fast provider（壓縮 / curation 用）', fast.length ? 'ok' : 'warn',
+        fast.length ? fast.map((p) => p.id).join(' → ') : '沒有 role=fast 的 provider，壓縮與 curation 會改用 main 模型（較貴、較慢）。');
+      if (cfg.sessionEmbeddings) {
+        const embed = providerChain_('embed', providers);
+        push('provider_embed', 'session 向量搜尋已開且有 embed provider', embed.length ? 'ok' : 'fail',
+          embed.length ? embed.map((p) => p.id).join(' → ') : '設定開了 session_embeddings 但沒有 role=embed 的 provider。');
+      }
+    } catch (err) {
+      push('memory', '記憶 / session 健檢', 'fail', String(err && err.message || err));
+    }
   }
 
   const ok = checks.every((c) => c.status !== 'fail');

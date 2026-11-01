@@ -61,6 +61,16 @@ function smokeTestTable_() {
     ['config: parseToolConfig_ 預設值與 rbac.<toolset> 解析', testToolConfigParse_, 'pure'],
     ['web: 域名白名單（exact / *.wildcard / 空 = 全拒）與 HTML 轉文字', testWebHelpers_, 'pure'],
     ['docs/slides: 輕量 markdown 解析、deck spec 驗證（>40 頁、未知 type）', testDocsSlidesSpecs_, 'pure'],
+    // M3
+    ['config: parseAgentConfig_ 預設值與夾限', testAgentConfigParse_, 'pure'],
+    ['memory: add / replace / remove、容量上限、pinned、唯一命中（memory_manage 經 executor）', testMemoryManage_, 'pure'],
+    ['memory: 快照區塊含兩表、容量與鎖定標記', testMemorySnapshot_, 'pure'],
+    ['session: 訊息序列化來回、token 估算、壓縮切分與門檻判斷', testSessionSerialization_, 'pure'],
+    ['session: runSessionTurn_ 建 session、寫訊息、第二輪帶歷史與快照、/status、/new 關閉並 curation', testRunSessionTurn_, 'pure'],
+    ['session: 超過 context 門檻時用 fast 摘要壓縮、compact_seq 前移；閒置自動切新 session', testSessionCompaction_, 'pure'],
+    ['search: searchSessions_ 依 AND 關鍵字計分、片段、排除目前 session；session_search 工具', testSessionSearch_, 'pure'],
+    ['curation: JSON 解析成 memory_manage 操作；預設寫 Approvals、auto_apply 直接套用', testCuration_, 'pure'],
+    ['embed: openai / gemini 嵌入請求與解析、cosine、備援鏈無 provider 報錯', testEmbeddings_, 'pure'],
   ];
 }
 
@@ -541,7 +551,7 @@ function execFake_(name, args, ctx, cfg, registry) {
 function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
   assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
-  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session'], 'toolset 順序');
+  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory'], 'toolset 順序');
   assertEqual_(registry.list.filter((t) => t.risk === 'D').length, 0, 'M2 不應有 D 類工具');
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_send'], 'X 類只有 share / send');
   registry.list.forEach((t) => {
@@ -772,7 +782,7 @@ function testRunTurnHappyPath_() {
   assertEqual_(first.messages.map((m) => m.role), ['system', 'user', 'assistant', 'user'], '首輪訊息順序');
   assert_(/untrusted/.test(first.messages[0].content) && /無效/.test(first.messages[0].content), 'system prompt 含資料區塊規則');
   assert_(first.messages[0].content.indexOf(DEFAULT_PERSONA) === 0, '空 persona 用預設');
-  assertEqual_(first.tools.map((t) => t.name), ['fake_echo', 'fake_write', 'fake_boom', 'fake_send', 'fake_big', 'session_spill_read'], 'tools 清單');
+  assertEqual_(first.tools.map((t) => t.name), ['fake_echo', 'fake_write', 'fake_boom', 'fake_send', 'fake_big', 'session_spill_read', 'session_search'], 'tools 清單');
   assertEqual_(first.sessionId, 'sx', 'sessionId 帶入');
   // 第二次請求：多了 assistant(tool_calls) + tool
   const second = fake.calls[1];
@@ -925,4 +935,396 @@ function testDocsSlidesSpecs_() {
   assertThrows_(() => validateDeckSpec_([{ type: 'quote' }]), 'quote 缺文字');
   assertThrows_(() => validateDeckSpec_(['content']), '非 object');
   assertEqual_(SLIDE_TYPES.slice(), ['title', 'section', 'content', 'two_column', 'quote', 'closing'], '六種類型');
+}
+
+// ---- M3：memory / session / curation / embed ----------------------------------------------------
+
+/** @return {{store: Object, data: Object}} 記憶體版記憶 store */
+function memoryMemoryStore_() {
+  const data = { memory: [], user: [] };
+  let n = 0;
+  return {
+    data,
+    store: {
+      list: (t) => data[t].map((e) => Object.assign({}, e)),
+      add: (t, e) => { const x = Object.assign({ id: 'm' + (++n), category: '', created: new Date(), updated: new Date(), source_session: '', pinned: false }, e); data[t].push(x); return x; },
+      update: (t, e) => { const i = data[t].findIndex((x) => x.id === e.id); data[t][i] = Object.assign({}, e, { updated: new Date() }); return data[t][i]; },
+      remove: (t, e) => { data[t] = data[t].filter((x) => x.id !== e.id); },
+    },
+  };
+}
+
+/** @return {{store: Object, sessions: !Array, messages: !Array}} 記憶體版 session store */
+function memorySessionStore_() {
+  const sessions = [];
+  const messages = [];
+  let n = 0;
+  return {
+    sessions, messages,
+    store: {
+      get: (id) => { const s = sessions.find((x) => x.id === id); return s ? Object.assign({}, s) : null; },
+      create: (fields) => {
+        const now = new Date();
+        const s = Object.assign({ id: 's' + (++n), channel: 'admin', external_id: '', title: '', summary: '', model_override: '', token_est: 0, created: now, last_active: now, status: 'active', compact_seq: 0, turns: 0, last_curated_turn: 0, embedding: null }, fields || {});
+        sessions.push(s);
+        return Object.assign({}, s);
+      },
+      update: (s) => { const i = sessions.findIndex((x) => x.id === s.id); if (i === -1) throw new Error('no session ' + s.id); sessions[i] = Object.assign({}, s); },
+      listRecent: (k, channel) => sessions.filter((s) => !channel || s.channel === channel).slice().sort((a, b) => b.last_active - a.last_active).slice(0, k).map((s) => Object.assign({}, s)),
+      appendMessages: (sid, fromSeq, msgs) => msgs.forEach((m, i) => messages.push(Object.assign({ session_id: sid, seq: fromSeq + i, ts: new Date() }, JSON.parse(JSON.stringify(m))))),
+      loadMessages: (sid, fromSeq) => messages.filter((m) => m.session_id === sid && m.seq > fromSeq).map((m) => { const o = Object.assign({}, m); delete o.session_id; delete o.ts; return o; }),
+      scanMessages: () => messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ session_id: m.session_id, seq: m.seq, role: m.role, text: stringifyContent_(m.content), ts: m.ts })),
+    },
+  };
+}
+
+/** @return {AgentConfig} */
+function fakeAgentConfig_(overrides) {
+  return Object.assign(parseAgentConfig_({}), { curationEveryTurns: 0 }, overrides || {});
+}
+
+/** registry：假工具 + session + memory */
+function fakeM3Registry_() {
+  return buildToolRegistry_(fakeToolDecls_().concat(sessionTools_(), memoryTools_()));
+}
+
+/** rbac：fake / session / memory 全開 */
+function fakeM3ToolConfig_(overrides) {
+  return fakeToolConfig_(Object.assign({ rbac: Object.assign(fakeRbac_(), { memory: { read: true, write: true, delete: false, external: false }, session: { read: true, write: false, delete: false, external: false } }) }, overrides || {}));
+}
+
+function testAgentConfigParse_() {
+  const d = parseAgentConfig_({});
+  assertEqual_([d.memoryMaxChars, d.profileMaxChars, d.contextMaxTokens, d.keepRecentTurns, d.curationEveryTurns, d.curationAutoApply, d.sessionIdleHours, d.sessionEmbeddings],
+    [2200, 1375, 24000, 4, 10, false, 6, false], '預設');
+  const c = parseAgentConfig_({ memory_max_chars: '50', profile_max_chars: '99999', context_max_tokens: '5000', keep_recent_turns: '0', curation_every_turns: '3', curation_auto_apply: 'TRUE', session_idle_hours: '0', session_embeddings: 'yes' });
+  assertEqual_([c.memoryMaxChars, c.profileMaxChars, c.contextMaxTokens, c.keepRecentTurns, c.curationEveryTurns, c.curationAutoApply, c.sessionIdleHours, c.sessionEmbeddings],
+    [200, 20000, 5000, 1, 3, true, 0, true], '夾限與布林');
+  Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => assert_(k in parseAgentConfig_({}) || true, k));
+}
+
+function testMemoryManage_() {
+  const mem = memoryMemoryStore_();
+  const cfg = fakeAgentConfig_({ memoryMaxChars: 200, profileMaxChars: 300 });
+  const registry = fakeM3Registry_();
+  const sink = memorySink_();
+  const run = (args, ctx) => executeTool_('memory_manage', args, Object.assign({ sessionId: 'sA' }, ctx || {}), { registry, config: fakeM3ToolConfig_(), sink: sink.sink, spill: memorySpill_().store, memoryStore: mem.store, agentConfig: cfg });
+  let r = run({ target: 'user', action: 'add', content: '偏好繁體中文，程式註解用英文', category: 'preference' });
+  assertEqual_(r.status, 'ok', 'add ok：' + r.content);
+  assertEqual_(JSON.parse(r.content).usage, { used: 14, limit: 300, free: 286 }, 'usage');
+  assertEqual_(mem.data.user[0].source_session, 'sA', 'source_session 來自 ctx');
+  r = run({ target: 'user', action: 'add', content: '偏好繁體中文，程式註解用英文' });
+  assertEqual_(JSON.parse(r.content).skipped, 'duplicate', '重複不加');
+  assertEqual_(mem.data.user.length, 1, '仍一條');
+  // 容量
+  r = run({ target: 'memory', action: 'add', content: 'x'.repeat(201) });
+  assert_(/容量不足/.test(r.content), '超過容量：' + r.content);
+  r = run({ target: 'memory', action: 'add', content: 'y'.repeat(501) });
+  assert_(/單條目上限/.test(r.content), '單條上限');
+  run({ target: 'memory', action: 'add', content: 'GAS Agent 專案在 ~/gas-agent，用 clasp 部署', category: 'project' });
+  run({ target: 'memory', action: 'add', content: 'telegram-assistant 專案靠 launchd 跑' });
+  // replace：唯一命中、子字串
+  r = run({ target: 'memory', action: 'replace', old_content: 'clasp 部署', content: 'GAS Agent 專案在 ~/gas-agent，clasp deploy -i 更新既有部署' });
+  assertEqual_(r.status, 'ok', 'replace ok：' + r.content);
+  assert_(/deploy -i/.test(mem.data.memory[0].content), '內容已換');
+  r = run({ target: 'memory', action: 'replace', old_content: '專案', content: 'z' });
+  assert_(/命中 2 條/.test(r.content), '多重命中拒絕：' + r.content);
+  r = run({ target: 'memory', action: 'remove', old_content: '不存在的東西' });
+  assert_(/找不到/.test(r.content), '找不到');
+  // pinned
+  mem.data.memory[1].pinned = true;
+  r = run({ target: 'memory', action: 'remove', old_content: 'telegram-assistant' });
+  assert_(/鎖定/.test(r.content), 'pinned 不可刪');
+  r = run({ target: 'memory', action: 'replace', old_content: 'telegram-assistant', content: 'x' });
+  assert_(/鎖定/.test(r.content), 'pinned 不可改');
+  mem.data.memory[1].pinned = false;
+  r = run({ target: 'memory', action: 'remove', old_content: 'telegram-assistant' });
+  assertEqual_([r.status, mem.data.memory.length], ['ok', 1], 'remove ok');
+  // 參數驗證
+  assertEqual_(run({ target: 'brain', action: 'add', content: 'x' }).status, 'invalid', 'target enum');
+  assertEqual_(run({ target: 'memory', action: 'add' }).status, 'error', 'add 無 content');
+  assertEqual_(run({ target: 'memory', action: 'replace', content: 'x' }).status, 'error', 'replace 無 old_content');
+  // RBAC：memory write 關 → denied
+  const denied = executeTool_('memory_manage', { target: 'memory', action: 'add', content: 'x' }, {}, { registry, config: fakeM3ToolConfig_({ rbac: Object.assign(fakeRbac_(), { memory: { read: true, write: false, delete: false, external: false } }) }), sink: sink.sink, spill: memorySpill_().store, memoryStore: mem.store, agentConfig: cfg });
+  assertEqual_(denied.status, 'denied', 'RBAC');
+  assertEqual_(sink.audits.length >= 10, true, '每次都寫 AuditLog');
+}
+
+function testMemorySnapshot_() {
+  const mem = memoryMemoryStore_();
+  const cfg = fakeAgentConfig_();
+  const empty = buildMemorySnapshot_(mem.store, cfg);
+  assert_(/長期記憶快照/.test(empty) && /關於使用者（UserProfile） — 0 \/ 1375/.test(empty) && /長期記憶（Memory） — 0 \/ 2200/.test(empty), '空快照含兩表與容量：' + empty);
+  assertEqual_((empty.match(/（尚無條目）/g) || []).length, 2, '兩表皆標尚無');
+  mem.store.add('user', { content: '偏好繁中', category: 'preference' });
+  mem.store.add('memory', { content: '專案 A 用 clasp', pinned: true });
+  const snap = buildMemorySnapshot_(mem.store, cfg);
+  assert_(/- \[preference\] 偏好繁中/.test(snap), '分類前綴');
+  assert_(/- 專案 A 用 clasp（owner 鎖定）/.test(snap), '鎖定標記');
+  assert_(/UserProfile） — 4 \/ 1375/.test(snap) && /Memory） — 12 \/ 2200/.test(snap), '容量更新：' + snap);
+  assert_(snap.indexOf('UserProfile') < snap.indexOf('長期記憶（Memory）'), '使用者檔案在前');
+  // 進 system prompt
+  const prompt = buildSystemPrompt_(fakeM3ToolConfig_(), fakeM3Registry_(), '', [snap, '## 先前對話摘要\n略']);
+  assert_(prompt.indexOf('## 記憶') !== -1 && /memory_manage/.test(prompt), 'prompt 含記憶規則');
+  assert_(prompt.indexOf(snap) !== -1 && prompt.indexOf('## 先前對話摘要') > prompt.indexOf(snap), 'contextBlocks 依序附在最後');
+  const noMem = buildSystemPrompt_(fakeToolConfig_(), buildToolRegistry_(fakeToolDecls_()), '');
+  assert_(noMem.indexOf('## 記憶') === -1, '沒有 memory_manage 就不放記憶規則');
+}
+
+function testSessionSerialization_() {
+  const asst = { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'fake_echo', arguments: '{"text":"a"}' } }] };
+  const tool = { role: 'tool', content: '<<tool_result …>>', tool_call_id: 'c1', name: 'fake_echo' };
+  const user = { role: 'user', content: '{"看起來像 JSON 的使用者訊息": 1}' };
+  const plain = { role: 'assistant', content: '{"tool_calls": "但其實是純文字"}' };
+  assertEqual_(deserializeMessage_('assistant', serializeMessage_(asst)), asst, 'assistant tool_calls 來回');
+  assertEqual_(deserializeMessage_('tool', serializeMessage_(tool)), tool, 'tool 來回');
+  assertEqual_(deserializeMessage_('user', serializeMessage_(user)), user, 'user JSON 樣字串保持純文字');
+  assertEqual_(serializeMessage_(user), user.content, 'user 存純文字');
+  assertEqual_(deserializeMessage_('assistant', serializeMessage_(plain)).content, plain.content, 'assistant 純文字即使像 JSON 也原樣');
+  assert_(serializeMessage_({ role: 'user', content: 'x'.repeat(50000) }).length < 46000, '超長截斷');
+  // token 估算
+  assertEqual_(estimateTokens_('abcdefgh'), 2, 'ASCII 4 字 1 token');
+  assertEqual_(estimateTokens_('中文四個字'), 5, 'CJK 每字 1');
+  assertEqual_(estimateTokens_(''), 0, '空');
+  assert_(estimateMessageTokens_(asst) > 10, 'tool_calls 也算');
+  // 切分
+  const msgs = [
+    { seq: 1, role: 'user', content: 'u1' }, { seq: 2, role: 'assistant', content: 'a1' },
+    { seq: 3, role: 'user', content: 'u2' }, { seq: 4, role: 'assistant', content: null, tool_calls: asst.tool_calls }, { seq: 5, role: 'tool', tool_call_id: 'c1', name: 'fake_echo', content: 'r' }, { seq: 6, role: 'assistant', content: 'a2' },
+    { seq: 7, role: 'user', content: 'u3' }, { seq: 8, role: 'assistant', content: 'a3' },
+  ];
+  const split = splitForCompaction_(msgs, 1);
+  assertEqual_([split.old.map((m) => m.seq), split.recent.map((m) => m.seq)], [[1, 2, 3, 4, 5, 6], [7, 8]], '保留最後 1 輪');
+  assertEqual_(splitForCompaction_(msgs, 2).old.map((m) => m.seq), [1, 2], '保留最後 2 輪');
+  assertEqual_(splitForCompaction_(msgs, 3).old, [], '輪數不足不切');
+  const cfg = fakeAgentConfig_({ contextMaxTokens: 2000, keepRecentTurns: 1 });
+  assertEqual_(needsCompaction_('', msgs, cfg), false, '未超門檻');
+  const big = msgs.map((m) => Object.assign({}, m, { content: m.content ? m.content + 'x'.repeat(2000) : m.content }));
+  assertEqual_(needsCompaction_('', big, cfg), true, '超門檻且可切');
+  assertEqual_(needsCompaction_('', big.slice(6), cfg), false, '超門檻但只剩 1 輪不可切');
+  assertEqual_(parseSlashCommand_('/new'), { command: 'new', rest: '' }, '/new');
+  assertEqual_(parseSlashCommand_('/NEW  繼續聊'), { command: 'new', rest: '繼續聊' }, '/new 帶訊息');
+  assertEqual_(parseSlashCommand_('/status'), { command: 'status', rest: '' }, '/status');
+  assertEqual_(parseSlashCommand_('/newer stuff'), { command: '', rest: '/newer stuff' }, '非指令');
+  assertEqual_(transcriptForSummary_(msgs.slice(3, 6)), '[assistant 呼叫工具] fake_echo({"text":"a"})\n[工具 fake_echo 結果] r\n[assistant] a2', 'transcript');
+}
+
+/** runSessionTurn_ 的假依賴組 */
+function fakeSessionDeps_(chat, overrides) {
+  const ss = memorySessionStore_();
+  const mem = memoryMemoryStore_();
+  const sink = memorySink_();
+  const registry = fakeM3Registry_();
+  const toolConfig = fakeM3ToolConfig_();
+  const cfg = fakeAgentConfig_();
+  return Object.assign({
+    store: ss.store, cfg, toolConfig, registry, memoryStore: mem.store, chat,
+    turnDeps: { executeDeps: { sink: sink.sink, spill: memorySpill_().store } },
+    _ss: ss, _mem: mem, _sink: sink,
+  }, overrides || {});
+}
+
+function testRunSessionTurn_() {
+  const fake = fakeChat_([
+    { toolCalls: [{ id: 'c1', name: 'memory_manage', args: { target: 'user', action: 'add', content: '偏好繁中、程式註解英文', category: 'preference' } }], stop: 'tool_calls' },
+    { text: '記下了。', stop: 'end' },
+    { text: '第二輪回覆', stop: 'end' },
+  ]);
+  const deps = fakeSessionDeps_(fake.chat);
+  // 第一輪：建 session、工具寫記憶、訊息入庫
+  const r1 = runSessionTurn_({ message: '我偏好繁中，程式註解用英文' }, deps);
+  assertEqual_([r1.sessionCreated, r1.turns, r1.text, r1.steps.length], [true, 1, '記下了。', 1], '第一輪');
+  const s1 = deps._ss.store.get(r1.sessionId);
+  assertEqual_([s1.title, s1.status, s1.compact_seq], ['我偏好繁中，程式註解用英文', 'active', 0], 'session 欄位');
+  assertEqual_(deps._ss.messages.map((m) => [m.seq, m.role]), [[1, 'user'], [2, 'assistant'], [3, 'tool'], [4, 'assistant']], '四則訊息入庫，seq 從 1');
+  assertEqual_(deps._mem.data.user.length, 1, '記憶已寫');
+  assertEqual_(deps._mem.data.user[0].source_session, r1.sessionId, '記憶來源 session');
+  const sys1 = fake.calls[0].messages[0].content;
+  assert_(/UserProfile） — 0 \/ 1375/.test(sys1) && /這是第 1 輪/.test(sys1), '第一輪快照為空、輪數 1');
+  // 第二輪：同 session，帶完整歷史與更新後的快照
+  const r2 = runSessionTurn_({ message: '剛剛說了什麼？', sessionId: r1.sessionId }, deps);
+  assertEqual_([r2.sessionCreated, r2.turns, r2.text], [false, 2, '第二輪回覆'], '第二輪');
+  const req2 = fake.calls[2];
+  assertEqual_(req2.messages.map((m) => m.role), ['system', 'user', 'assistant', 'tool', 'assistant', 'user'], '歷史含 tool 訊息');
+  assert_(/偏好繁中、程式註解英文/.test(req2.messages[0].content) && /這是第 2 輪/.test(req2.messages[0].content), '第二輪快照含新條目');
+  assertEqual_(deps._ss.messages.length, 6, '再入庫 2 則');
+  assertEqual_(deps._ss.messages[5].seq, 6, 'seq 連續');
+  // /status
+  const st = runSessionTurn_({ message: '/status', sessionId: r1.sessionId }, deps);
+  assert_(st.command === 'status' && /2 輪/.test(st.text), '/status：' + st.text);
+  assertEqual_(fake.calls.length, 3, '/status 不打模型');
+  // /new：關閉舊的、curation（有未整理輪次且 K>0）、開新的
+  let curated = null;
+  const depsNew = Object.assign({}, deps, { cfg: fakeAgentConfig_({ curationEveryTurns: 10 }), curate: (s) => { curated = s.id; return { proposed: 2, applied: 0, failed: 0, auto: false, ops: [] }; } });
+  const nw = runSessionTurn_({ message: '/new', sessionId: r1.sessionId }, depsNew);
+  assertEqual_([nw.command, nw.sessionCreated, nw.turns], ['new', true, 0], '/new');
+  assert_(nw.sessionId !== r1.sessionId, '新 id');
+  assertEqual_(deps._ss.store.get(r1.sessionId).status, 'closed', '舊 session 關閉');
+  assertEqual_(curated, r1.sessionId, '關閉時 curation');
+  assert_(/提議 2 筆/.test(nw.text), '/new 回覆含 curation 結果：' + nw.text);
+  // /new 帶訊息：在新 session 直接跑
+  const nw2 = runSessionTurn_({ message: '/new 哈囉', sessionId: nw.sessionId }, deps);
+  assertEqual_([nw2.command, nw2.turns, nw2.text], ['new', 1, '第二輪回覆'], '/new 帶訊息');
+  assert_(nw2.sessionId !== nw.sessionId, '又一個新 session');
+  // 每 K 輪 curation nudge
+  let nudged = 0;
+  const depsK = Object.assign({}, deps, { cfg: fakeAgentConfig_({ curationEveryTurns: 2 }), curate: (sx, d) => { nudged++; sx.last_curated_turn = sx.turns; d.store.update(sx); return { proposed: 0, applied: 0, failed: 0, auto: false, ops: [] }; } });
+  const k1 = runSessionTurn_({ message: 'a' }, depsK);
+  runSessionTurn_({ message: 'b', sessionId: k1.sessionId }, depsK);
+  assertEqual_(nudged, 1, '第 2 輪觸發 curation');
+  assertEqual_(runSessionTurn_({ message: 'c', sessionId: k1.sessionId }, depsK).curation, null, '第 3 輪不觸發');
+  assertThrows_(() => runSessionTurn_({ message: '' }, deps), '空訊息');
+}
+
+function testSessionCompaction_() {
+  const fake = fakeChat_([{ text: '好', stop: 'end' }]);
+  const deps = fakeSessionDeps_(fake.chat, { cfg: fakeAgentConfig_({ contextMaxTokens: 150, keepRecentTurns: 1 }) });
+  let summarized = null;
+  deps.summarize = (prev, old, d) => { summarized = { prev, oldSeqs: old.map((m) => m.seq), sessionId: d.sessionId }; return '摘要：前面聊了 ' + old.filter((m) => m.role === 'user').length + ' 輪'; };
+  const long = 'x'.repeat(400);
+  const r1 = runSessionTurn_({ message: long + ' 第一輪' }, deps);
+  const r2 = runSessionTurn_({ message: long + ' 第二輪', sessionId: r1.sessionId }, deps);
+  assertEqual_([r1.compacted, r2.compacted], [false, false], '前兩輪不壓（第二輪開始時只有 1 輪歷史，不可切）');
+  const r3 = runSessionTurn_({ message: '第三輪', sessionId: r1.sessionId }, deps);
+  assertEqual_(r3.compacted, true, '第三輪開始時超門檻且有 2 輪可切');
+  assertEqual_(summarized.oldSeqs, [1, 2], '壓第一輪（seq 1,2），保留最近 1 輪');
+  assertEqual_(summarized.sessionId, r1.sessionId, 'sessionId 帶入摘要器');
+  const s = deps._ss.store.get(r1.sessionId);
+  assertEqual_([s.compact_seq, s.summary], [2, '摘要：前面聊了 1 輪'], 'compact_seq 與 summary');
+  const req3 = fake.calls[2];
+  assertEqual_(req3.messages.map((m) => m.role), ['system', 'user', 'assistant', 'user'], '第三輪 context 只剩第二輪 + 新訊息');
+  assert_(/先前對話摘要/.test(req3.messages[0].content) && /摘要：前面聊了 1 輪/.test(req3.messages[0].content), '摘要進 system prompt');
+  assertEqual_(deps._ss.store.loadMessages(r1.sessionId, 0).length, 6, 'Sheet 仍保留全部 6 則');
+  // 真正的 summarizeMessages_ 用 fast 鏈
+  const sumChat = fakeChat_([{ text: '```\n- 重點\n```', stop: 'end' }]);
+  const out = summarizeMessages_('舊摘要', [{ role: 'user', content: 'hi' }], { chat: sumChat.chat, sessionId: 'sx' });
+  assertEqual_(out, '```\n- 重點\n```', '回模型文字');
+  assertEqual_(sumChat.calls[0].role, 'fast', 'role fast');
+  assert_(/舊摘要/.test(sumChat.calls[0].messages[0].content) && /\[user\] hi/.test(sumChat.calls[0].messages[0].content), 'prompt 含既有摘要與對話');
+  assertEqual_(summarizeMessages_('舊摘要', [], { chat: fakeChat_([{ text: '' }]).chat }), '舊摘要', '模型回空時保留舊摘要');
+  // 閒置自動切新 session
+  let t = Date.parse('2026-11-02T00:00:00Z');
+  const idleDeps = fakeSessionDeps_(fake.chat, { cfg: fakeAgentConfig_({ sessionIdleHours: 2 }), now: () => t });
+  const a = runSessionTurn_({ message: 'a' }, idleDeps);
+  idleDeps._ss.sessions[0].last_active = new Date(t);
+  t += 3 * 3600000;
+  const b = runSessionTurn_({ message: 'b', sessionId: a.sessionId }, idleDeps);
+  assert_(b.sessionId !== a.sessionId && b.sessionCreated && /閒置超過 2 小時/.test(b.sessionReason), '閒置切新：' + b.sessionReason);
+  assertEqual_(idleDeps._ss.store.get(a.sessionId).status, 'closed', '舊的關閉');
+  const c = runSessionTurn_({ message: 'c', sessionId: 'nope' }, idleDeps);
+  assert_(c.sessionCreated && /不存在或已關閉/.test(c.sessionReason), '不存在的 id 開新');
+}
+
+function testSessionSearch_() {
+  const d = (s) => new Date(s);
+  const sessions = [
+    { id: 'a', title: 'GAS agent M2 工具', summary: '做了 RBAC 與審批', status: 'closed', turns: 5, created: d('2026-10-01'), last_active: d('2026-10-02'), embedding: null },
+    { id: 'b', title: '週報', summary: '', status: 'closed', turns: 2, created: d('2026-10-05'), last_active: d('2026-10-05'), embedding: [1, 0] },
+    { id: 'cur', title: '目前', summary: 'RBAC', status: 'active', turns: 1, created: d('2026-11-01'), last_active: d('2026-11-01'), embedding: null },
+  ];
+  const messages = [
+    { session_id: 'a', seq: 1, role: 'user', text: '幫我設計 RBAC 四開關', ts: null },
+    { session_id: 'a', seq: 2, role: 'assistant', text: 'RBAC 設計如下…', ts: null },
+    { session_id: 'b', seq: 1, role: 'user', text: '週報裡提一下 RBAC 進度', ts: null },
+    { session_id: 'cur', seq: 1, role: 'user', text: 'RBAC', ts: null },
+  ];
+  const r = searchSessions_('rbac', sessions, messages, { limit: 5, excludeSessionId: 'cur', queryVector: null });
+  assertEqual_(r.map((x) => x.session_id), ['a', 'b'], '排除目前 session、a 分數高');
+  assertEqual_(r[0].score, 5, 'a：title/summary 3 + 2 則訊息');
+  assertEqual_(r[0].snippets.length, 3, 'a 三個片段');
+  assert_(/\[user\]/.test(r[0].snippets[1]), '訊息片段標 role');
+  assertEqual_(r[1].score, 1, 'b 只有訊息命中');
+  assertEqual_(searchSessions_('rbac 週報', sessions, messages, { limit: 5, excludeSessionId: '', queryVector: null }).map((x) => x.session_id), ['b'], 'AND');
+  assertEqual_(searchSessions_('沒有的詞', sessions, messages, { limit: 5, excludeSessionId: '', queryVector: null }), [], '無結果');
+  assertThrows_(() => searchSessions_('  ', sessions, messages, { limit: 5 }), '空 query');
+  const withVec = searchSessions_('rbac', sessions, messages, { limit: 5, excludeSessionId: 'cur', queryVector: [1, 0] });
+  assertEqual_(withVec[0].session_id, 'b', '向量相似把 b 推到前面');
+  assertEqual_(snippetAround_('0123456789abcdef', 'a', 3), '…789abcd…', 'snippet 前後 3 字');
+  // 工具版（經 executor，注入 store）
+  const ss = memorySessionStore_();
+  sessions.forEach((s) => ss.sessions.push(Object.assign({}, s)));
+  messages.forEach((m) => ss.messages.push({ session_id: m.session_id, seq: m.seq, role: m.role, content: m.text, ts: null }));
+  const sink = memorySink_();
+  const out = executeTool_('session_search', { query: 'RBAC', limit: 1 }, { sessionId: 'cur' }, { registry: fakeM3Registry_(), config: fakeM3ToolConfig_(), sink: sink.sink, spill: memorySpill_().store, sessionStore: ss.store, agentConfig: fakeAgentConfig_() });
+  assertEqual_(out.status, 'ok', 'session_search ok：' + out.content);
+  const body = JSON.parse(out.content);
+  assertEqual_([body.count, body.sessions[0].session_id, body.used_embeddings], [1, 'a', false], 'limit 1、排除 cur、未用向量');
+}
+
+function testCuration_() {
+  assertEqual_(extractJson_('```json\n{"a":1}\n```'), { a: 1 }, '圍欄');
+  assertEqual_(extractJson_('好的，結果：{"memory":{}} 以上'), { memory: {} }, '前後廢話');
+  assertEqual_(extractJson_('不是 JSON'), null, '無 JSON');
+  const ops = curationOps_({
+    memory: { add: ['GAS Agent 用 clasp deploy -i', { content: 'Z.ai 只能打 coding endpoint', category: 'tool' }], replace: [{ old: '舊', new: '新' }], remove: ['過時'] },
+    user: { add: [{ content: '偏好繁中' }], replace: [{ old: 'x' }] },
+    other: { add: ['忽略'] },
+  });
+  assertEqual_(ops, [
+    { target: 'user', action: 'add', content: '偏好繁中', category: '' },
+    { target: 'memory', action: 'add', content: 'GAS Agent 用 clasp deploy -i', category: '' },
+    { target: 'memory', action: 'add', content: 'Z.ai 只能打 coding endpoint', category: 'tool' },
+    { target: 'memory', action: 'replace', old_content: '舊', content: '新', category: '' },
+    { target: 'memory', action: 'remove', old_content: '過時' },
+  ], '操作轉換（user 在前；壞的 replace 與未知 target 忽略）');
+  assertEqual_(curationOps_(null), [], 'null');
+  assertEqual_(curationOps_({ memory: { add: new Array(20).fill('x') } }).length, CURATION_MAX_OPS, '上限');
+  // curateSession_：預設寫 Approvals
+  const ss = memorySessionStore_();
+  const mem = memoryMemoryStore_();
+  const sink = memorySink_();
+  const s = ss.store.create({});
+  ss.store.appendMessages(s.id, 1, [{ role: 'user', content: '我偏好繁中' }, { role: 'assistant', content: '好' }]);
+  s.turns = 1;
+  ss.store.update(s);
+  const chat = fakeChat_([{ text: '{"user":{"add":[{"content":"偏好繁體中文","category":"preference"}]},"memory":{"add":["專案 GAS Agent"]}}' }]);
+  const cfg = fakeAgentConfig_({ curationEveryTurns: 5 });
+  const r = curateSession_(ss.store.get(s.id), { store: ss.store, cfg, memoryStore: mem.store, chat: chat.chat, registry: fakeM3Registry_(), toolConfig: fakeM3ToolConfig_(), sink: sink.sink });
+  assertEqual_([r.proposed, r.applied, r.auto], [2, 0, false], '兩筆提議不套用');
+  assertEqual_(sink.approvals.length, 2, '寫兩列 Approvals');
+  assertEqual_([sink.approvals[0].tool, sink.approvals[0].state, JSON.parse(sink.approvals[0].args)], ['memory_manage', 'pending', { target: 'user', action: 'add', content: '偏好繁體中文', category: 'preference' }], 'Approvals 內容');
+  assert_(/curation 提議/.test(sink.approvals[0].reason), 'reason');
+  assertEqual_(mem.data.user.length, 0, '記憶未動');
+  assertEqual_(ss.store.get(s.id).last_curated_turn, 1, 'last_curated_turn 更新');
+  assertEqual_(chat.calls[0].role, 'fast', '用 fast');
+  assert_(/記憶整理員/.test(chat.calls[0].messages[0].content) && /\[user\] 我偏好繁中/.test(chat.calls[0].messages[0].content), 'prompt 含對話');
+  assertEqual_(describeCuration_(r), '提議 2 筆，待你在「紀錄 → 審批」批准', '描述');
+  // auto_apply
+  const chat2 = fakeChat_([{ text: '{"user":{"add":["偏好繁體中文"]},"memory":{"remove":["不存在"]}}' }]);
+  const r2 = curateSession_(ss.store.get(s.id), { store: ss.store, cfg: fakeAgentConfig_({ curationAutoApply: true }), memoryStore: mem.store, chat: chat2.chat, registry: fakeM3Registry_(), toolConfig: fakeM3ToolConfig_(), sink: sink.sink });
+  assertEqual_([r2.proposed, r2.applied, r2.failed, r2.auto], [2, 1, 1, true], '自動套用：1 成功 1 失敗');
+  assertEqual_(mem.data.user[0].content, '偏好繁體中文', '已寫入');
+  assertEqual_(sink.approvals.length, 2, '不再寫 Approvals');
+  assertEqual_(describeCuration_(r2), '自動套用 1 筆，1 筆失敗', '描述 auto');
+  assertEqual_(describeCuration_({ proposed: 0 }), '沒有需要更新的記憶', '描述空');
+  // 模型回垃圾
+  const r3 = curateSession_(ss.store.get(s.id), { store: ss.store, cfg, memoryStore: mem.store, chat: fakeChat_([{ text: '抱歉我不懂' }]).chat, registry: fakeM3Registry_(), toolConfig: fakeM3ToolConfig_(), sink: sink.sink });
+  assertEqual_(r3.proposed, 0, '非 JSON → 0 筆');
+}
+
+function testEmbeddings_() {
+  const oa = validateProvider_(fakeProviderInput_({ id: 'emb', role: 'embed', model: 'text-embedding-3-small', extra_body: '{"dimensions": 256}' }));
+  const req = openaiEmbedRequest_(oa, ['a', 'b'], 'k');
+  assertEqual_(req.url, 'https://example.com/v1/embeddings', 'openai url');
+  assertEqual_(req.body, { model: 'text-embedding-3-small', input: ['a', 'b'], dimensions: 256 }, 'openai body + extra_body');
+  assertEqual_(openaiEmbedParse_({ data: [{ index: 1, embedding: [3, 4] }, { index: 0, embedding: [1, 2] }] }), [[1, 2], [3, 4]], 'openai 依 index 排序');
+  const gm = validateProvider_(fakeProviderInput_({ id: 'gemb', role: 'embed', protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-embedding-001' }));
+  const greq = geminiEmbedRequest_(gm, ['x'], 'k');
+  assertEqual_(greq.url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents', 'gemini url');
+  assertEqual_(greq.body, { requests: [{ model: 'models/gemini-embedding-001', content: { parts: [{ text: 'x' }] } }] }, 'gemini body');
+  assertEqual_(greq.headers['x-goog-api-key'], 'k', 'gemini header');
+  assertEqual_(geminiEmbedParse_({ embeddings: [{ values: [0.1, 0.2] }] }), [[0.1, 0.2]], 'gemini parse');
+  assertEqual_(cosine_([1, 0], [1, 0]), 1, 'cosine 同向');
+  assertEqual_(cosine_([1, 0], [0, 1]), 0, 'cosine 正交');
+  assertEqual_(cosine_([1, 0], [1]), 0, '長度不符');
+  // embedTexts_ 經 fetch stub；embedWithChain_
+  const stub = fetchStub_([fakeResponse_(200, { data: [{ index: 0, embedding: [1, 1] }] })]);
+  assertEqual_(embedTexts_(oa, ['hi'], { fetch: stub.fetch, keyFor: () => 'k' }), [[1, 1]], 'embedTexts_');
+  assertEqual_(JSON.parse(stub.calls[0].options.payload).input, ['hi'], 'payload');
+  assertThrows_(() => embedTexts_(oa, ['a', 'b'], { fetch: fetchStub_([fakeResponse_(200, { data: [{ index: 0, embedding: [1] }] })]).fetch, keyFor: () => 'k' }), '數量不符');
+  assertThrows_(() => embedTexts_(validateProvider_(fakeProviderInput_({ protocol: 'anthropic', base_url: 'https://api.anthropic.com' })), ['a'], { keyFor: () => 'k' }), 'anthropic 不支援嵌入');
+  const chainStub = fetchStub_([fakeResponse_(503, 'busy'), fakeResponse_(200, { embeddings: [{ values: [2, 2] }] })]);
+  const r = embedWithChain_(['q'], { fetch: chainStub.fetch, keyFor: () => 'k', providers: [oa, Object.assign({}, gm, { priority: 20 })] });
+  assertEqual_([r.provider, r.vectors], ['gemb', [[2, 2]]], '503 換下一個');
+  assertThrows_(() => embedWithChain_(['q'], { providers: [] }), '沒有 embed provider');
 }
