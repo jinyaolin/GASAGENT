@@ -559,12 +559,19 @@ function testRegistryValid_() {
   // Gemini 的 type 必須是單一字串：registry 裡有 ["string","array"]（slides body）、["string","number","boolean"]（sheets 格）
   const walkSchema = (schema, path) => {
     if (!schema || typeof schema !== 'object') return;
-    if (schema.type !== undefined) assert_(typeof schema.type === 'string', `gemini schema type 必須是字串：${path} = ${JSON.stringify(schema.type)}`);
+    assert_(typeof schema.type === 'string', `gemini schema type 必須是字串：${path} = ${JSON.stringify(schema.type)}`);
+    if (schema.type !== 'array') assert_(!('items' in schema), `${path} 非 array 不可有 items`);
+    if (schema.type !== 'object') assert_(!('properties' in schema) && !('required' in schema), `${path} 非 object 不可有 properties / required`);
+    (schema.required || []).forEach((name) => assert_(schema.properties && schema.properties[name], `${path}.required 的 ${name} 不在 properties`));
     if (schema.items) walkSchema(schema.items, path + '.items');
     Object.keys(schema.properties || {}).forEach((k) => walkSchema(schema.properties[k], path + '.' + k));
   };
   r.body.tools[0].functionDeclarations.forEach((d) => walkSchema(d.parameters, d.name));
-  assertEqual_(geminiCleanSchema_({ type: ['string', 'array'], items: { type: ['number', 'null'] } }), { type: 'string', items: { type: 'number' } }, 'type 陣列收斂（有 string 取 string，否則第一個非 null）');
+  const docsCreate = r.body.tools[0].functionDeclarations.find((d) => d.name === 'docs_create');
+  assertEqual_(Object.keys(docsCreate.parameters.properties), ['title', 'content', 'folder_id'], '屬性名 title 不可被當關鍵字刪掉');
+  assertEqual_(docsCreate.parameters.required, ['title'], 'required 保留');
+  assertEqual_(geminiCleanSchema_({ type: ['string', 'array'], items: { type: ['number', 'null'] }, title: 'x', default: 1 }), { type: 'string' }, 'type 陣列收斂成 string 並去掉 items / title / default');
+  assertEqual_(geminiCleanSchema_({ type: ['array', 'null'], items: { type: 'integer', title: 'n' } }), { type: 'array', items: { type: 'integer' } }, '無 string 取第一個非 null，items 保留');
 }
 
 function testRegistryRejectsBad_() {

@@ -628,25 +628,37 @@ function pushParts_(contents, role, parts) {
 }
 
 /**
- * Gemini 的 schema 是 OpenAPI 子集：遞迴移除它不認的 JSON Schema 關鍵字。
+ * Gemini 的 schema 是 OpenAPI 子集，比 JSON Schema 嚴：
+ * - 不認 additionalProperties / $schema / default / title 等關鍵字（只在 schema 層級移除；`properties` 底下的 key 是參數名，不能動）
+ * - `type` 必須是單一字串：["string","array"] 這種聯集收斂成一個（有 string 取 string）
+ * - type 不是 array 就不能有 items；不是 object 就不能有 properties / required
+ * - required 只能列 properties 裡有的
  * @param {*} schema
  * @return {*}
  */
 function geminiCleanSchema_(schema) {
-  if (Array.isArray(schema)) return schema.map(geminiCleanSchema_);
-  if (!schema || typeof schema !== 'object') return schema;
-  const drop = ['additionalProperties', '$schema', '$id', 'examples', 'default', 'title'];
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return schema;
+  const drop = ['additionalProperties', '$schema', '$id', 'examples', 'default', 'title', 'format'];
   const out = {};
   Object.keys(schema).forEach((k) => {
     if (drop.indexOf(k) !== -1) return;
-    if (k === 'type' && Array.isArray(schema[k])) {
-      // Gemini 的 type 是單一 enum，不接受 ["string","array"] 這種聯集；有 string 就收成 string（最寬容），否則取第一個。
-      const types = schema[k].filter((t) => t !== 'null');
-      out[k] = types.indexOf('string') !== -1 ? 'string' : (types[0] || 'string');
-      return;
+    const v = schema[k];
+    if (k === 'properties' && v && typeof v === 'object') {
+      out.properties = {};
+      Object.keys(v).forEach((name) => { out.properties[name] = geminiCleanSchema_(v[name]); });
+    } else if (k === 'items') {
+      out.items = geminiCleanSchema_(v);
+    } else if (k === 'type' && Array.isArray(v)) {
+      const types = v.filter((t) => t !== 'null');
+      out.type = types.indexOf('string') !== -1 ? 'string' : (types[0] || 'string');
+    } else {
+      out[k] = v;
     }
-    out[k] = geminiCleanSchema_(schema[k]);
   });
+  if (out.type && out.type !== 'array') delete out.items;
+  if (out.type && out.type !== 'object') { delete out.properties; delete out.required; }
+  if (out.required && out.properties) out.required = out.required.filter((name) => out.properties[name]);
+  if (out.required && !out.required.length) delete out.required;
   return out;
 }
 
