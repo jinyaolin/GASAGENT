@@ -7,7 +7,8 @@
  * Telegram 會一直重送）。doPost 只做：驗證 → 指令或排 Queue job → 立刻回「收到」。agent 由 queueTick 跑，
  * 結果經 deliverTurnToTelegram_ 送回；待審批的動作附「批准 / 拒絕」按鈕，按下走 callback_query → decideApproval_。
  *
- * 指令：/new（新 session）/status /model [provider id] /skills /help；其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
+ * 指令：/new（新 session）/status /model [provider id] /skills /white [list|add|delete <email>]（M7 寄信白名單）/help；
+ * 其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
  * 群組：只在「@bot 提到它」「回覆它的訊息」或「/指令」時反應（私聊不變）。白名單成員在群組裡用 /group 切模式：
  *   /group on    群聊模式（Config telegram_open_groups）：全群共用一個 session，非白名單成員 @bot 也能用工具，但那一輪
  *                是 principal group_member（M7-A）：只能用 Config telegram_member_toolsets（預設 web / skill / session）的 R 工具、
@@ -41,7 +42,7 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white']);
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
 const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
 /** setWebhook 要收的 update 類型。 */
@@ -470,7 +471,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -504,6 +505,10 @@ function handleTelegramUpdate_(rawUpdate, deps) {
       report.action = 'group';
     }
     send(report.text); return report;
+  }
+  if (cmd.command === 'white') {
+    report.text = telegramWhitelistCommand_(cmd.rest, u, deps);
+    send(report.text); report.action = 'white'; return report;
   }
   if (cmd.command === 'skills') {
     let names = [];
@@ -561,6 +566,43 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 }
 
 /**
+ * /white 指令（M7 寄信白名單）：list / add <email…> / delete <email…>。只有白名單成員會走到這裡（成員 / 訪客的指令已被忽略）。
+ * 讀 deps.toolCfg.gmailSendWhitelist、寫 deps.setConfig({gmail_send_whitelist})、記 AuditLog security:whitelist:<sub>（deps.audit 可注入）。純邏輯，回覆文字。
+ * @param {string} rest 指令後面的文字
+ * @param {TelegramUpdate} u
+ * @param {!Object} deps
+ * @return {string}
+ */
+function telegramWhitelistCommand_(rest, u, deps) {
+  const parts = String(rest || '').trim().split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || 'list').toLowerCase();
+  const current = (deps.toolCfg && Array.isArray(deps.toolCfg.gmailSendWhitelist)) ? deps.toolCfg.gmailSendWhitelist.slice() : [];
+  const usage = '/white list — 看目前名單\n/white add a@b.com [c@d.com …] — 加入（*@domain.com 代表整個網域）\n/white delete a@b.com — 移除\n收件人（含 cc / bcc）全部在名單內的 gmail_send / gmail_forward 會直接寄出、不送審批。';
+  if (sub === 'list' || sub === 'ls') {
+    return current.length ? `寄信白名單（${current.length} 筆，收件人全在名單內的信免審批）：\n${current.map((e) => '• ' + e).join('\n')}\n\n${usage}` : `寄信白名單目前是空的：所有外寄都要審批。\n\n${usage}`;
+  }
+  const isAdd = sub === 'add';
+  const isDel = sub === 'delete' || sub === 'del' || sub === 'remove' || sub === 'rm';
+  if (!isAdd && !isDel) return `不認得「${sub}」。\n${usage}`;
+  const entries = parseEmailWhitelist_(parts.slice(1).join(' '));
+  if (!entries.length) return `請給合法的 email（可多個，用空格或逗號分隔；*@domain.com 代表整個網域）。\n${usage}`;
+  let next;
+  let changed;
+  if (isAdd) {
+    changed = entries.filter((e) => current.indexOf(e) === -1);
+    next = current.concat(changed);
+  } else {
+    changed = entries.filter((e) => current.indexOf(e) !== -1);
+    next = current.filter((e) => entries.indexOf(e) === -1);
+  }
+  if (!changed.length) return isAdd ? `已經在名單內：${entries.join(', ')}（共 ${current.length} 筆）。` : `名單裡沒有：${entries.join(', ')}（共 ${current.length} 筆）。`;
+  if (deps.setConfig) deps.setConfig({ [TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST]: next.join('\n') });
+  if (deps.toolCfg) deps.toolCfg.gmailSendWhitelist = next;
+  securityAudit_('whitelist:' + (isAdd ? 'add' : 'delete'), `寄信白名單${isAdd ? '加入' : '移除'} ${changed.join(', ')}（Telegram user ${u.userId}${u.username ? ' @' + u.username : ''}）→ 共 ${next.length} 筆`, deps.audit);
+  return `${isAdd ? '已加入' : '已移除'}：${changed.join(', ')}\n目前名單（${next.length} 筆）：${next.join(', ') || '（空）'}`;
+}
+
+/**
  * Telegram 來的 turn job payload。
  * @param {string} message
  * @param {TelegramUpdate} u
@@ -601,6 +643,7 @@ function telegramWebhook_(e) {
       providers: listProviders_(),
       skills: () => enabledSkills_(getSkillIndex_()),
       setConfig: (values) => setConfigValues_(values),
+      toolCfg: getToolConfig_(),
     });
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };

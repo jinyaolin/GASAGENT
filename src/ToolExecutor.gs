@@ -12,6 +12,9 @@
  * - `persona`：system prompt 開頭的人格描述。
  * - `slides_template_id`：slides_create_deck 預設複製的範本簡報（Drive file id 或網址）；空 = Google 預設主題。
  * - `skills_folder_id`（M5）：技能資料夾的 Drive id；空 = 自動建 `GAS Agent/skills`。
+ * - `gmail_send_whitelist`（M7）：寄信白名單（一行一個 email 或 `*@domain`）。gmail_send / gmail_forward 的收件人（to / cc / bcc）
+ *   **全部**在名單內時，owner 觸發的那次免審批直接寄；任何一個不在、收件人不明（寄草稿 / 回覆討論串）、或由群組成員觸發，仍走審批。
+ *   管理頁「工具」分頁與 Telegram `/white list|add|delete <email>` 都能改；異動記 AuditLog `security:whitelist:*`。
  *
  * 全部外部依賴（registry、config、記錄寫入、溢寫儲存）都可由 deps 注入，測試不碰 Drive / Sheet。
  */
@@ -25,6 +28,7 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   PERSONA: 'persona',
   SLIDES_TEMPLATE_ID: 'slides_template_id',
   SKILLS_FOLDER_ID: 'skills_folder_id',
+  GMAIL_SEND_WHITELIST: 'gmail_send_whitelist',
 });
 
 /** RBAC 設定 key 前綴：rbac.<toolset>。 */
@@ -70,7 +74,8 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  * @typedef {{
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
- *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string
+ *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string,
+ *   gmailSendWhitelist: !Array<string>
  * }} ToolConfig
  */
 
@@ -111,7 +116,67 @@ function parseToolConfig_(map) {
     persona: String(map[TOOL_CONFIG_KEYS.PERSONA] || '').trim(),
     slidesTemplateId: String(map[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] || '').trim(),
     skillsFolderId: String(map[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] || '').trim(),
+    gmailSendWhitelist: parseEmailWhitelist_(map[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST]),
   };
+}
+
+// ---- 寄信白名單（M7）---------------------------------------------------------------
+
+/** email 格式（寬鬆）。 */
+const EMAIL_RE = /^[^\s@<>,;"']+@[^\s@<>,;"']+\.[^\s@<>,;"']+$/;
+
+/**
+ * 白名單文字 → 正規化陣列：小寫、去重、丟掉不合法；`@domain.com` / `*@domain.com` 都存成 `*@domain.com`（整個網域）。純函式。
+ * @param {*} text 換行 / 逗號 / 分號 / 空白分隔，或陣列
+ * @return {!Array<string>}
+ */
+function parseEmailWhitelist_(text) {
+  const out = [];
+  const list = Array.isArray(text) ? text : String(text === null || text === undefined ? '' : text).split(/[\s,;]+/);
+  list.forEach((raw) => {
+    let s = String(raw || '').trim().toLowerCase().replace(/^<|>$/g, '');
+    if (!s) return;
+    if (/^@[^@\s]+\.[^@\s]+$/.test(s)) s = '*' + s;
+    if (!(EMAIL_RE.test(s) || /^\*@[^@\s*]+\.[^@\s*]+$/.test(s))) return;
+    if (out.indexOf(s) === -1) out.push(s);
+  });
+  return out;
+}
+
+/**
+ * 從收件人字串（「名字 <a@b.c>, d@e.f」）抽出 email（小寫、去重）。純函式。
+ * @param {*} text 字串或字串陣列
+ * @return {!Array<string>}
+ */
+function extractEmails_(text) {
+  const s = (Array.isArray(text) ? text : [text]).map((x) => (x === null || x === undefined ? '' : String(x))).join(',');
+  const out = [];
+  (s.match(/[^\s@<>,;"']+@[^\s@<>,;"']+\.[^\s@<>,;"']+/g) || []).forEach((e) => { const l = e.toLowerCase(); if (out.indexOf(l) === -1) out.push(l); });
+  return out;
+}
+
+/**
+ * 單一 email 是否在白名單（精確或 `*@domain`）。純函式。
+ * @param {string} email
+ * @param {!Array<string>} whitelist parseEmailWhitelist_ 的結果
+ * @return {boolean}
+ */
+function isEmailWhitelisted_(email, whitelist) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e || !whitelist || !whitelist.length) return false;
+  const domain = e.slice(e.lastIndexOf('@'));
+  return whitelist.some((w) => w === e || (w.indexOf('*@') === 0 && w.slice(1) === domain));
+}
+
+/**
+ * 全部收件人都在白名單才算（空清單 = 不算）。純函式。
+ * @param {?Array<string>} recipients null = 收件人不明
+ * @param {!Array<string>} whitelist
+ * @return {boolean}
+ */
+function recipientsWhitelisted_(recipients, whitelist) {
+  if (!Array.isArray(recipients) || !recipients.length) return false;
+  return recipients.every((r) => isEmailWhitelisted_(r, whitelist));
 }
 
 /** @return {ToolConfig} 目前 Config sheet 的工具設定 */
@@ -136,6 +201,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.PERSONA in map)) missing[TOOL_CONFIG_KEYS.PERSONA] = '';
   if (!(TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID in map)) missing[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = '';
   if (!(TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID in map)) missing[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = '';
+  if (!(TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST in map)) missing[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = '';
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   Object.keys(CHANNEL_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = CHANNEL_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
@@ -175,6 +241,13 @@ function saveToolConfig_(input) {
   values[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = parseDriveId_(input.slides_template_id);
   // skills_folder_id 由「技能」分頁管理；工具分頁沒送就不動。
   if (input.skills_folder_id !== undefined) values[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = parseDriveId_(input.skills_folder_id);
+  // 寄信白名單：沒送就不動（Telegram /white 也會改它）；有變動記 AuditLog（記 email，不是秘密）。
+  if (input.gmail_send_whitelist !== undefined) {
+    const next = parseEmailWhitelist_(input.gmail_send_whitelist);
+    const prev = getToolConfig_().gmailSendWhitelist;
+    values[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = next.join('\n');
+    if (next.join(',') !== prev.join(',')) securityAudit_('whitelist:set', `寄信白名單由管理頁改為 ${next.length} 筆：${next.join(', ') || '（空）'}`);
+  }
   setConfigValues_(values);
   return getToolConfig_();
 }
@@ -495,7 +568,7 @@ function executeTool_(name, args, ctx, deps) {
    */
   const finish = (status, content, extra) => {
     const outcome = Object.assign({
-      name, status, ok: status === 'ok', content, result: null, ms: Date.now() - t0, approvalId: '', spill: null, error: '',
+      name, status, ok: status === 'ok', content, result: null, ms: Date.now() - t0, approvalId: '', spill: null, error: '', whitelisted: false,
     }, extra || {});
     try {
       sink.audit({
@@ -503,7 +576,7 @@ function executeTool_(name, args, ctx, deps) {
         session_id: ctx.sessionId || '',
         tool: name,
         args_preview: truncateText_(stringifyToolResult_(normalizedArgs), AUDIT_PREVIEW_CHARS).text,
-        result_preview: truncateText_((status === 'ok' ? '' : `[${status}] `) + content, AUDIT_PREVIEW_CHARS).text,
+        result_preview: truncateText_((status === 'ok' ? (outcome.whitelisted ? '[白名單免審] ' : '') : `[${status}] `) + content, AUDIT_PREVIEW_CHARS).text,
         ok: status === 'ok',
         ms: outcome.ms,
         principal,
@@ -535,6 +608,14 @@ function executeTool_(name, args, ctx, deps) {
   Object.keys(deps).forEach((k) => { if (['registry', 'config', 'sink', 'spill'].indexOf(k) === -1) extras[k] = deps[k]; });
   const handlerCtx = Object.assign({}, ctx, extras, { mode, config, spill: deps.spill || null, registry });
 
+  // M7 寄信白名單：owner 觸發、工具有 recipients hook、收件人全在名單內 → X 類免審批（群組成員 / 收件人不明不適用）。
+  let whitelisted = false;
+  if (!ctx.approved && principal === 'owner' && tool.risk === 'X' && typeof tool.recipients === 'function') {
+    let rcpts = null;
+    try { rcpts = tool.recipients(normalizedArgs); } catch (err) { rcpts = null; }
+    whitelisted = recipientsWhitelisted_(rcpts, config.gmailSendWhitelist || []);
+  }
+
   // 提案型工具（M5 skill_manage）：未批准時不執行，先讓工具自己驗證並給 reason，再走與 X 類相同的審批路徑。
   let reason = '';
   if (!ctx.approved && typeof tool.proposal === 'function') {
@@ -543,7 +624,7 @@ function executeTool_(name, args, ctx, deps) {
     } catch (err) {
       return finish('invalid', toolErrorText_('invalid_proposal', String(err && err.message || err)));
     }
-  } else if (!ctx.approved && needsApproval_(tool, config.approvalPolicy, mode)) {
+  } else if (!ctx.approved && !whitelisted && needsApproval_(tool, config.approvalPolicy, mode)) {
     reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；審批策略 ${config.approvalPolicy}；模式 ${mode}`;
   } else if (!ctx.approved && approveWrites && tool.risk !== 'R') {
     reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；由群組成員（非 owner）觸發，寫入類動作一律送審`;
@@ -598,7 +679,7 @@ function executeTool_(name, args, ctx, deps) {
       content = content.slice(0, config.spillThreshold) + `\n\n[結果過長已截斷；溢寫到 Drive 失敗：${err && err.message || err}]`;
     }
   }
-  return finish('ok', content, { result, spill: spillInfo });
+  return finish('ok', content, { result, spill: spillInfo, whitelisted });
 }
 
 // ---- 審批 -------------------------------------------------------------------------

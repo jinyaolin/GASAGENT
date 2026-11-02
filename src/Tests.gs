@@ -103,6 +103,9 @@ function smokeTestTable_() {
     ['injection: 群組成員 principal 下 Gmail / Drive / Calendar 讀取與 memory 寫入被拒、工具清單看不到、web_fetch 仍可用、AuditLog 記 group_member', testInjectionGroup_, 'pure'],
     ['secrets: 輪替 webhook secret（32 字元、重打 setWebhook、URL 遮 secret）；更換 token 先 getMe 驗證（格式錯 / 401 不寫）、成功才寫入並重登 webhook；AuditLog 不含 secret / token', testSecretRotation_, 'pure'],
     ['channels: telegram_member_toolsets 解析（預設 / 鎖定剔除 / 空 = 無）、儲存正規化、memberSystemExtra_ 列出清單、/group on 文字提到公開工具', testMemberToolsetsConfig_, 'pure'],
+    // M7 寄信白名單
+    ['whitelist: 白名單解析（*@domain / 不合法丟棄）、收件人抽取、比對；gmail_send / gmail_forward 收件人全在名單內 owner 免審直接寄（AuditLog 標白名單免審），部分不在 / 草稿 / 回覆 / 群組成員仍送審；system prompt 列名單', testGmailWhitelist_, 'pure'],
+    ['telegram: /white list / add / delete 讀寫 Config gmail_send_whitelist、重複與不合法處理、AuditLog 記事件；/help 有說明', testTelegramWhitelistCommand_, 'pure'],
   ];
 }
 
@@ -595,7 +598,7 @@ function fakeRbac_(perms) {
  * @return {ToolConfig}
  */
 function fakeToolConfig_(overrides) {
-  return Object.assign({ rbac: fakeRbac_(), approvalPolicy: 'always', spillThreshold: 2000, maxToolSteps: 25, webAllowedDomains: [], persona: '' }, overrides || {});
+  return Object.assign({ rbac: fakeRbac_(), approvalPolicy: 'always', spillThreshold: 2000, maxToolSteps: 25, webAllowedDomains: [], persona: '', gmailSendWhitelist: [] }, overrides || {});
 }
 
 /** @return {{sink: Object, audits: !Array, approvals: !Array}} 記憶體 sink */
@@ -2211,6 +2214,7 @@ function fakeTelegramDeps_(overrides) {
   const sent = [];
   const api = [];
   const decided = [];
+  const audits = [];
   const deps = Object.assign({
     key: 'secret-ok', secret: 'secret-ok',
     cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, 222' }),
@@ -2223,9 +2227,11 @@ function fakeTelegramDeps_(overrides) {
     skills: () => [{ name: 'weekly-report', description: '週報' }],
     setConfig: (v) => { deps._config.push(v); },
     rateExceeded: () => false,
+    toolCfg: fakeToolConfig_(),
+    audit: (e) => audits.push(e),
     _config: [],
   }, overrides || {});
-  return { deps, sent, api, jobs: q.jobs, decided, ss };
+  return { deps, sent, api, jobs: q.jobs, decided, ss, audits };
 }
 
 /** @return {!Object} Telegram 文字 update */
@@ -2845,4 +2851,87 @@ function testMemberToolsetsConfig_() {
   // Doctor 用的常數
   assertEqual_(WORKSPACE_TOOLSETS, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar'], 'Workspace toolsets');
   assertEqual_(PRINCIPAL_LOCKED_TOOLSETS.group_member, ['memory', 'cronjob'], '鎖定清單');
+}
+
+
+// ---- M7 寄信白名單 -----------------------------------------------------------------------------------
+
+function testGmailWhitelist_() {
+  // 解析 / 抽取 / 比對
+  assertEqual_(parseEmailWhitelist_('Me@Example.com, *@corp.tw\n@sub.corp.tw ; <x@y.io>\nnot-an-email  me@example.com'), ['me@example.com', '*@corp.tw', '*@sub.corp.tw', 'x@y.io'], '白名單解析：小寫、去重、@domain → *@domain、丟不合法');
+  assertEqual_(parseEmailWhitelist_(['a@b.co', '']), ['a@b.co'], '陣列輸入');
+  assertEqual_(parseEmailWhitelist_(undefined), [], '空');
+  assertEqual_(extractEmails_(['王小明 <Ming@Corp.tw>, bob@x.io', null, 'bob@x.io; carol@y.io']), ['ming@corp.tw', 'bob@x.io', 'carol@y.io'], '抽收件人');
+  const wl = parseEmailWhitelist_('me@example.com\n*@corp.tw');
+  assertEqual_([isEmailWhitelisted_('ME@example.com', wl), isEmailWhitelisted_('a@corp.tw', wl), isEmailWhitelisted_('a@sub.corp.tw', wl), isEmailWhitelisted_('a@evil.corp.tw.evil.com', wl), isEmailWhitelisted_('', wl)], [true, true, false, false, false], '比對：精確 / 網域（不含子網域）');
+  assertEqual_([recipientsWhitelisted_(['me@example.com', 'z@corp.tw'], wl), recipientsWhitelisted_(['me@example.com', 'z@other.io'], wl), recipientsWhitelisted_([], wl), recipientsWhitelisted_(null, wl), recipientsWhitelisted_(['me@example.com'], [])], [true, false, false, false, false], '全部收件人都要在名單');
+  // Config 解析
+  assertEqual_(parseToolConfig_({ gmail_send_whitelist: 'A@b.co\n*@c.io' }).gmailSendWhitelist, ['a@b.co', '*@c.io'], 'parseToolConfig_');
+  assertEqual_(parseToolConfig_({}).gmailSendWhitelist, [], '預設空');
+  // 真的 gmail 宣告的 recipients hook
+  const gmail = {};
+  gmailTools_().forEach((t) => { gmail[t.name] = t; });
+  assertEqual_(gmail.gmail_send.recipients({ to: 'A@b.co, c@d.io', cc: 'e@f.gg' }), ['a@b.co', 'c@d.io', 'e@f.gg'], 'gmail_send 收件人含 cc');
+  assertEqual_([gmail.gmail_send.recipients({ draft_id: 'd1' }), gmail.gmail_send.recipients({ reply_to_thread_id: 't1', body: 'x' })], [null, null], '草稿 / 回覆 → 收件人不明');
+  assertEqual_(gmail.gmail_forward.recipients({ thread_id: 't', to: 'a@b.co', bcc: 'z@q.io' }), ['a@b.co', 'z@q.io'], 'gmail_forward 含 bcc');
+  assert_(gmail.gmail_create_draft.recipients === undefined, 'W 類不用 hook');
+  // executor：用真 gmail 宣告但 handler 換掉
+  let sent = 0;
+  const decls = gmailTools_().map((t) => Object.assign({}, t, { handler: (args) => { sent++; return { sent: true, args }; } }));
+  const registry = buildToolRegistry_(decls);
+  const cfg = (wlText) => fakeToolConfig_({ rbac: { gmail: { read: true, write: true, delete: false, external: true } }, approvalPolicy: 'always', gmailSendWhitelist: parseEmailWhitelist_(wlText) });
+  const mem = memorySink_();
+  const run = (name, args, ctx, c) => executeTool_(name, args, ctx || {}, { registry, config: c, sink: mem.sink, spill: memorySpill_().store });
+  const ok = run('gmail_send', { to: 'Me@example.com', cc: 'x@corp.tw', subject: 's', body: 'b' }, { sessionId: 's1' }, cfg('me@example.com\n*@corp.tw'));
+  assertEqual_([ok.status, ok.whitelisted, sent, mem.approvals.length], ['ok', true, 1, 0], '全在名單 → 直接寄、不寫 Approvals');
+  assert_(/^\[白名單免審\] /.test(mem.audits[mem.audits.length - 1].result_preview), 'AuditLog 標白名單免審：' + mem.audits[mem.audits.length - 1].result_preview);
+  const partial = run('gmail_send', { to: 'me@example.com, stranger@other.io', subject: 's', body: 'b' }, {}, cfg('me@example.com'));
+  assertEqual_([partial.status, partial.whitelisted, sent, mem.approvals.length], ['pending_approval', false, 1, 1], '一個不在名單 → 送審');
+  assert_(/風險 X/.test(mem.approvals[0].reason), '審批理由照舊');
+  assertEqual_(run('gmail_send', { draft_id: 'd1' }, {}, cfg('*@example.com')).status, 'pending_approval', '寄草稿收件人不明 → 送審');
+  assertEqual_(run('gmail_send', { reply_to_thread_id: 't1', body: 'x' }, {}, cfg('*@example.com')).status, 'pending_approval', '回覆討論串 → 送審');
+  assertEqual_(run('gmail_send', { to: 'me@example.com', subject: 's', body: 'b' }, {}, cfg('')).status, 'pending_approval', '空名單 → 送審');
+  assertEqual_(run('gmail_send', { to: 'me@example.com', subject: 's', body: 'b' }, { principal: 'group_member', principalToolsets: ['gmail'] }, cfg('me@example.com')).status, 'pending_approval', '群組成員即使收件人在名單也送審');
+  assertEqual_(run('gmail_forward', { thread_id: 't', to: 'a@corp.tw' }, {}, cfg('*@corp.tw')).status, 'ok', 'gmail_forward 也適用');
+  assertEqual_(run('gmail_send', { to: 'me@example.com', subject: 's', body: 'b' }, { mode: 'autonomous' }, cfg('me@example.com')).status, 'ok', '排程（autonomous）的 owner 也免審');
+  assertEqual_(run('gmail_send', { to: 'me@example.com', subject: 's', body: 'b' }, {}, Object.assign(cfg('me@example.com'), { rbac: { gmail: { read: true, write: true, delete: false, external: false } } })).status, 'denied', 'RBAC external 關仍擋（白名單不繞 RBAC）');
+  const never = run('gmail_send', { to: 'nobody@other.io', subject: 's', body: 'b' }, {}, Object.assign(cfg('me@example.com'), { approvalPolicy: 'never' }));
+  assertEqual_([never.status, never.whitelisted], ['ok', false], 'never 策略照舊直接寄，但不標白名單');
+  // system prompt
+  const prompt = buildSystemPrompt_(cfg('me@example.com\n*@corp.tw'), registry, '');
+  assert_(/寄信白名單：.*me@example\.com、\*@corp\.tw/.test(prompt), 'system prompt 列名單：' + prompt.slice(0, 50));
+  assert_(!/寄信白名單/.test(buildSystemPrompt_(cfg(''), registry, '')), '空名單不出現');
+  // 宣告檢查：recipients 必須是函式
+  assertThrows_(() => buildToolRegistry_([Object.assign({}, decls[0], { recipients: 'x' })]), 'recipients 非函式');
+}
+
+function testTelegramWhitelistCommand_() {
+  const f = fakeTelegramDeps_();
+  f.deps.toolCfg = fakeToolConfig_({ gmailSendWhitelist: ['me@example.com'] });
+  f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '111' });
+  f.deps.setConfig = (v) => { f.deps._config.push(v); };
+  const t = (text) => handleTelegramUpdate_(tgMessage_(text, 111), f.deps);
+  let r = t('/white');
+  assert_(r.action === 'white' && /1 筆/.test(r.text) && /• me@example\.com/.test(r.text) && /\/white add/.test(r.text), '/white = list：' + r.text);
+  r = t('/white add Bob@Corp.tw, *@team.io me@example.com');
+  assertEqual_([f.deps._config.length, f.deps._config[0], f.deps.toolCfg.gmailSendWhitelist], [1, { gmail_send_whitelist: 'me@example.com\nbob@corp.tw\n*@team.io' }, ['me@example.com', 'bob@corp.tw', '*@team.io']], 'add：寫 Config、略過已存在的');
+  assert_(/已加入：bob@corp\.tw, \*@team\.io/.test(r.text) && /3 筆/.test(r.text), 'add 回覆：' + r.text);
+  const a = f.audits[f.audits.length - 1];
+  assert_(a.tool === 'security:whitelist:add' && /bob@corp\.tw/.test(a.args_preview) && /user 111/.test(a.args_preview), 'AuditLog：' + JSON.stringify(a));
+  r = t('/white add me@example.com');
+  assertEqual_([f.deps._config.length, /已經在名單內/.test(r.text)], [1, true], '重複 add 不寫');
+  r = t('/white add not-an-email');
+  assertEqual_([f.deps._config.length, /合法的 email/.test(r.text)], [1, true], '不合法不寫');
+  r = t('/white delete bob@corp.tw nobody@x.io');
+  assertEqual_([f.deps._config.length, f.deps._config[1], /已移除：bob@corp\.tw/.test(r.text)], [2, { gmail_send_whitelist: 'me@example.com\n*@team.io' }, true], 'delete：只移除存在的');
+  assertEqual_(f.audits[f.audits.length - 1].tool, 'security:whitelist:delete', 'AuditLog delete');
+  r = t('/white rm nobody@x.io');
+  assertEqual_([f.deps._config.length, /名單裡沒有/.test(r.text)], [2, true], '刪不存在的不寫');
+  assert_(/不認得「foo」/.test(t('/white foo').text), '未知子指令');
+  assert_(/\/white \[list/.test(t('/help').text), '/help 有說明');
+  // 群組成員 / 訪客的 /white 一律忽略（既有規則）
+  const g = fakeTelegramDeps_({ botUsername: 'MyAgentBot', botId: '999', cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_open_groups: '-100' }) });
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/white add evil@x.io', 555, -100), g.deps).reason, 'member_command', '群組成員不能改白名單');
+  assertEqual_(g.deps._config.length, 0, '沒寫 Config');
+  assertEqual_(parseTelegramCommand_('/white add a@b.co'), { command: 'white', rest: 'add a@b.co' }, '指令解析');
 }

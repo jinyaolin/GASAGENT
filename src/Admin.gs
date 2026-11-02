@@ -447,6 +447,7 @@ function adminGetToolSettings() {
     spill_threshold: config.spillThreshold,
     max_tool_steps: config.maxToolSteps,
     web_allowed_domains: config.webAllowedDomains.join('\n'),
+    gmail_send_whitelist: config.gmailSendWhitelist.join('\n'),
     persona: config.persona,
     default_persona: DEFAULT_PERSONA,
     slides_template_id: config.slidesTemplateId,

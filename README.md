@@ -257,6 +257,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | spill_threshold | 工具結果溢寫門檻（字元） | 8000 |
 | max_tool_steps | 單輪工具步數上限 | 25 |
 | web_fetch 域名白名單 | 一行一個。`example.com` 只允許該主機；`*.example.com` 含所有子網域與本身。**空 = 全部拒絕** | 空 |
+| 寄信白名單（`gmail_send_whitelist`） | 一行一個 email，`*@domain.com` 代表整個網域。`gmail_send` / `gmail_forward` 的收件人（含 cc / bcc）**全部**在名單內時 owner 觸發的那次直接寄出、不送審批；任何一個不在、寄草稿 / 回覆討論串（收件人不明）、或由群組成員觸發，仍走審批。RBAC external 仍要開。Telegram `/white list \| add \| delete <email>` 也能改；異動記 AuditLog `security:whitelist:*`，免審寄出的 AuditLog 標「[白名單免審]」 | 空（全部要審） |
 | 人格（persona） | system prompt 開頭；留空用程式預設的一段繁中 | 空 |
 | 簡報範本 | `slides_template_id`：一份設好主題 / 配色 / 字型的 Google Slides（id 或網址），`slides_create_deck` 會複製它再填內容 | 空（Google 預設白底） |
 
@@ -274,6 +275,8 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 **M4 起批准 / 拒絕後會續跑原對話**：若 `Approvals.job_id`（存 session id）對應的 session 仍 active，會排一個 `continuation` job，以 user 訊息「（系統）先前待審批的 X 已由 owner 批准並執行，結果：…」（拒絕則「已由 owner 拒絕，未執行」）接回該 session，由 trigger 一分鐘內跑完；到聊天台切到該 session 就看得到 agent 的後續回覆。curation 提議（`memory_manage`）批准只套用、不續跑。同一輪裡模型若重複要求同一個被攔的動作，不會再寫第二筆。
 
 「紀錄」分頁下方同時列最近 50 筆 `AuditLog`（每次工具執行一列，失敗列紅底）。
+
+**寄信白名單（M7）**：Config `gmail_send_whitelist`（「工具」分頁或 Telegram `/white`）。X 類工具可宣告 `recipients(args)` hook 回傳這次的收件人；executor 在審批判斷前比對，owner 觸發且收件人全在名單內就跳過審批直接執行（AuditLog 標「[白名單免審]」）。目前 `gmail_send`（寄草稿 / 回覆討論串回 null = 不明 → 照常送審）與 `gmail_forward` 有 hook；`drive_share` 沒有。群組成員（principal `group_member`）不適用。
 
 **提案型工具（M5）**：工具宣告可帶 `proposal(args, ctx)` hook（目前只有 `skill_manage`）。未批准時 executor 不執行 handler，改呼叫 hook 驗證參數並取得 reason（以「技能提案」開頭），寫一列 `Approvals` 後回 `pending_approval`；批准時才以 `approved=true` 執行 handler。與 X 類共用同一條路（去重、`needs_approval` job 狀態、AuditLog），但不看 `approval_policy`，而且批准後**不續跑**原對話（與 curation 相同）。「紀錄」的審批卡片對 `skill_manage` 顯示 diff 預覽：create 顯示全文、patch 顯示「找到 → 取代成」。
 
@@ -477,7 +480,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 群組 | **先關 bot 的隱私模式**：Telegram 預設的隱私模式下，群組裡 `@bot …` 的一般訊息**根本不會送到 bot**（只有 /指令、回覆 bot 的訊息會到），所以 @bot 沒反應。到 **@BotFather → `/setprivacy` → 選 bot → Disable**，然後把 bot 退出群組再加回來（或把 bot 設成群組管理員，管理員永遠收得到全部訊息）。`/group` 指令與 Doctor（`tg_privacy`）會用 `getMe` 的 `can_read_all_group_messages` 檢查並提醒。<br>把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 幫忙；但**非白名單成員觸發的那一輪**是 principal `group_member`（M7-A，見「安全」）：只能用 Config `telegram_member_toolsets`（預設 `web` / `skill` / `session`）的讀取工具，owner 的 Gmail / Drive / Docs / Sheets / Slides / Calendar **一律不可讀**（連工具清單都看不到；被擋時回覆末尾附一句中性說明），`memory` / `cronjob` 永遠不開放；R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive。owner 可在管理頁「通道」逐 toolset 放寬（Doctor 會提醒放寬了 Workspace）<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
-| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單，只有白名單成員能用）、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼；「更換 token」先 getMe 驗證才寫入）、白名單 user id、部署 B 網址、secret（儲存時自動產生；「重新產生 secret」會自動重登 webhook）、群聊模式成員可用的 toolset、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
 ### Email 指令信
@@ -581,7 +584,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（62 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（64 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。

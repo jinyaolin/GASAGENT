@@ -27,8 +27,10 @@ const TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
  * @typedef {{
  *   name: string, toolset: string, description: string, parameters: !Object, risk: string,
  *   handler: function(!Object, !Object): *, noSpill: (boolean|undefined),
- *   proposal: (function(!Object, !Object): {reason: string}|undefined)
+ *   proposal: (function(!Object, !Object): {reason: string}|undefined),
+ *   recipients: (function(!Object): ?Array<string>|undefined)
  * }} ToolDecl
+ * recipients（M7）：X 類工具回傳這次的收件人 email（null = 不明）；executor 用它比對 Config gmail_send_whitelist 決定是否免審批。
  * proposal（M5）：有此 hook 的工具在未批准時不執行 handler，executor 改呼叫它驗證並取得 reason，寫 Approvals 後回 pending_approval；
  * owner 批准後才以 approved=true 執行 handler（skill_manage 用）。
  */
@@ -120,6 +122,7 @@ function validateToolDeclaration_(tool) {
   if (!RISK_PERMISSION[tool.risk]) throw new Error(`${where} risk 必須是 R / W / D / X`);
   if (typeof tool.handler !== 'function') throw new Error(`${where} handler 必須是函式`);
   if (tool.proposal !== undefined && typeof tool.proposal !== 'function') throw new Error(`${where} proposal 必須是函式`);
+  if (tool.recipients !== undefined && typeof tool.recipients !== 'function') throw new Error(`${where} recipients 必須是函式`);
   const schema = tool.parameters;
   if (!schema || typeof schema !== 'object' || schema.type !== 'object') throw new Error(`${where} parameters 必須是 type=object 的 JSON Schema`);
   const props = schema.properties || {};

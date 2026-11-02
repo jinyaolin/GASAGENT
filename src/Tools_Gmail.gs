@@ -91,7 +91,7 @@ function gmailTools_() {
     },
     {
       name: 'gmail_send', toolset: 'gmail', risk: 'X',
-      description: '寄出郵件（外發動作，依審批策略通常需 owner 批准）。三種用法：draft_id 寄出既有草稿；reply_to_thread_id + body 回覆討論串；to + subject + body 寄新信。後兩種可用 attachment_file_ids 附 Drive 檔案。',
+      description: '寄出郵件（外發動作：收件人全部在 owner 的寄信白名單內會直接寄出，否則依審批策略送 owner 批准）。三種用法：draft_id 寄出既有草稿；reply_to_thread_id + body 回覆討論串；to + subject + body 寄新信。後兩種可用 attachment_file_ids 附 Drive 檔案。',
       parameters: {
         type: 'object',
         properties: {
@@ -108,10 +108,12 @@ function gmailTools_() {
         additionalProperties: false,
       },
       handler: gmailSend_,
+      // 寄草稿 / 回覆討論串時收件人不在參數裡 → null（不明）→ 一律走審批
+      recipients: (args) => (args.draft_id || args.reply_to_thread_id ? null : extractEmails_([args.to, args.cc, args.bcc])),
     },
     {
       name: 'gmail_forward', toolset: 'gmail', risk: 'X',
-      description: '轉寄討論串裡的一封信給新收件人，原信的附件全部帶上（外發動作，依審批策略通常需 owner 批准）。預設轉寄最後一封；body 是放在原信前面的說明文字。',
+      description: '轉寄討論串裡的一封信給新收件人，原信的附件全部帶上（外發動作：收件人全部在 owner 的寄信白名單內會直接寄出，否則依審批策略送 owner 批准）。預設轉寄最後一封；body 是放在原信前面的說明文字。',
       parameters: {
         type: 'object',
         properties: {
@@ -126,6 +128,7 @@ function gmailTools_() {
         required: ['thread_id', 'to'], additionalProperties: false,
       },
       handler: gmailForward_,
+      recipients: (args) => extractEmails_([args.to, args.cc, args.bcc]),
     },
     {
       name: 'gmail_label', toolset: 'gmail', risk: 'W',

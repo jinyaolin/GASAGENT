@@ -932,6 +932,8 @@
     $steps.value = data.max_tool_steps;
     const $domains = el('textarea', { rows: 5, placeholder: 'example.com\n*.wikipedia.org', spellcheck: 'false' });
     $domains.value = data.web_allowed_domains;
+    const $whitelist = el('textarea', { rows: 5, placeholder: 'me@example.com\n*@mycompany.com', spellcheck: 'false' });
+    $whitelist.value = data.gmail_send_whitelist || '';
     const $persona = el('textarea', { rows: 5, placeholder: data.default_persona, style: 'font-family: inherit' });
     $persona.value = data.persona;
     const $slidesTpl = el('input', { type: 'text', placeholder: '範本簡報的 Drive id 或網址（選填）' });
@@ -951,6 +953,7 @@
         field('簡報範本（slides_template_id）', $slidesTpl, '在 Drive 準備一份設好主題 / 配色 / 字型的 Google Slides，slides_create_deck 會複製它再填內容；空 = Google 預設白底主題'),
       ])]),
       el('div', { class: 'panel' }, [el('h3', {}, 'web_fetch 域名白名單'), field('一行一個；example.com 只允許該主機，*.example.com 含所有子網域。空白 = 全部拒絕。', $domains)]),
+      el('div', { class: 'panel' }, [el('h3', {}, '寄信白名單（免審批）'), field('一行一個 email；*@domain.com 代表整個網域。gmail_send / gmail_forward 的收件人（含 cc / bcc）全部在名單內時直接寄出、不送審批；任何一個不在、寄草稿或回覆討論串（收件人不明）、或由群組成員觸發，仍走審批。Telegram 也可用 /white list | add | delete <email> 修改；異動記 AuditLog。空白 = 全部要審批。', $whitelist)]),
       el('div', { class: 'panel' }, [el('h3', {}, '人格（persona）'), field('system prompt 開頭；留空用預設（灰字）', $persona)]),
       el('div', { class: 'toolbar' }, [btnSave, btnReload, $msg]),
     );
@@ -963,7 +966,7 @@
       try {
         await call('adminSaveToolSettings', {
           rbac, approval_policy: $policy.value, spill_threshold: $spill.value, max_tool_steps: $steps.value,
-          web_allowed_domains: $domains.value, persona: $persona.value, slides_template_id: $slidesTpl.value,
+          web_allowed_domains: $domains.value, gmail_send_whitelist: $whitelist.value, persona: $persona.value, slides_template_id: $slidesTpl.value,
         });
         $msg.append(el('span', { class: 'summary ok' }, '已儲存'));
         setTimeout(() => { root.innerHTML = ''; renderTools(root); }, 600);
