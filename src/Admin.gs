@@ -150,6 +150,13 @@ function adminSaveProvider(input) {
     throw new Error(`provider id「${input.id}」已存在。同一協定要加第二組請換一個 id（例如 ${input.id}-2）；要修改既有的請用該列的「編輯」。`);
   }
   const p = saveProvider_(input);
+  // M7 chatgpt：貼上 scripts/siwc-login.js 的憑證 JSON（驗證 scope / 欄位後存 PROVIDER_OAUTH_<id>；只記事件不記值）
+  if (p.protocol === 'chatgpt' && input && typeof input.oauthCredentials === 'string' && input.oauthCredentials.trim()) {
+    const creds = parseChatGptCredentials_(input.oauthCredentials);
+    const had = !!getProviderOAuth_(p.id);
+    setProviderOAuth_(p.id, creds);
+    securityAudit_('provider:oauth_set', `provider ${p.id} 的 ChatGPT 憑證已${had ? '更換' : '設定'}（${creds.email || creds.subject || '?'}）`);
+  }
   if (input && typeof input.apiKey === 'string' && input.apiKey.trim()) {
     // M7-A：setProperty 直接覆寫，舊 key 立即失效（每次呼叫都即時讀 Script Properties，沒有快取）。只記事件不記值。
     const had = !!getProviderKey_(p.id);
@@ -182,9 +189,27 @@ function adminClearProviderKey(id) {
   assertOwner();
   const p = getProvider_(id);
   if (!p) throw new Error(`找不到 provider「${id}」。`);
+  if (p.protocol === 'chatgpt') {
+    const r = chatgptRevoke_(p);
+    securityAudit_('provider:oauth_cleared', `provider ${id} 的 ChatGPT 憑證已清除（撤銷 ${r.revoked ? '成功' : '失敗：' + r.error}）`);
+    return publicProvider_(p);
+  }
   setProviderKey_(id, '');
   securityAudit_('provider:key_cleared', `provider ${id} 的 API key 已清除`);
   return publicProvider_(p);
+}
+
+/**
+ * 模型分頁（M7 chatgpt）：這個 ChatGPT 帳號可用的模型清單（需先貼憑證）。
+ * @param {string} id
+ * @return {!Array<{slug: string, display_name: string}>}
+ */
+function adminListProviderModels(id) {
+  assertOwner();
+  const p = getProvider_(id);
+  if (!p) throw new Error(`找不到 provider「${id}」。`);
+  if (p.protocol !== 'chatgpt') throw new Error('只有 chatgpt 協定支援列模型。');
+  return chatgptListModels_(p);
 }
 
 /**

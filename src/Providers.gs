@@ -14,8 +14,8 @@
  * 絕不寫進 sheet、不回傳前端（只回末 4 碼）。
  */
 
-/** 支援的協定。 */
-const PROVIDER_PROTOCOLS = Object.freeze(['openai', 'anthropic', 'gemini']);
+/** 支援的協定。chatgpt（M7）= Sign in with ChatGPT 方案額度打 Responses API，見 Providers_ChatGPT.gs。 */
+const PROVIDER_PROTOCOLS = Object.freeze(['openai', 'anthropic', 'gemini', 'chatgpt']);
 
 /** 模型角色：main 主模型、fast 快模型（摘要 / curation）、embed 嵌入（M3）。 */
 const PROVIDER_ROLES = Object.freeze(['main', 'fast', 'embed']);
@@ -137,6 +137,10 @@ function validateProvider_(input) {
   delete p._row;
   if (!PROVIDER_ID_RE.test(p.id)) throw new Error('id 只能用小寫字母、數字、_ 與 -，最長 32 字元。');
   if (PROVIDER_PROTOCOLS.indexOf(p.protocol) === -1) throw new Error(`protocol 必須是 ${PROVIDER_PROTOCOLS.join(' / ')}。`);
+  if (p.protocol === 'chatgpt') {
+    if (!p.base_url) p.base_url = CHATGPT_DEFAULT_BASE_URL;
+    if (p.role === 'embed') throw new Error('chatgpt 協定沒有嵌入 API，role 不能是 embed。');
+  }
   if (PROVIDER_ROLES.indexOf(p.role) === -1) throw new Error(`role 必須是 ${PROVIDER_ROLES.join(' / ')}。`);
   if (!/^https:\/\/[^\s/]+/.test(p.base_url)) throw new Error('base_url 必須是 https:// 開頭的網址。');
   if (!p.model) throw new Error('model 不可為空。');
@@ -195,6 +199,7 @@ function saveProvider_(input) {
 function deleteProvider_(id) {
   const existing = getProvider_(id);
   setProviderKey_(id, '');
+  try { setProviderOAuth_(id, null); } catch (err) { /* id 不合法就沒有憑證 */ }
   if (!existing) return false;
   deleteTableRow_('Providers', existing._row);
   return true;
@@ -240,9 +245,19 @@ function providerChain_(role, providers) {
  * @return {!Object}
  */
 function publicProvider_(p) {
-  const key = getProviderKey_(p.id);
-  const out = Object.assign({}, p, { hasKey: !!key, keyHint: keyHint_(key) });
+  const out = Object.assign({}, p);
   delete out._row;
+  if (p.protocol === 'chatgpt') {
+    const creds = getProviderOAuth_(p.id);
+    const summary = chatgptCredentialSummary_(creds);
+    out.hasKey = !!(creds && !creds.invalid);
+    out.keyHint = creds ? (creds.invalid ? `失效（${creds.invalid}）` : (creds.email || 'ChatGPT')) : '';
+    out.oauth = summary;
+    return out;
+  }
+  const key = getProviderKey_(p.id);
+  out.hasKey = !!key;
+  out.keyHint = keyHint_(key);
   return out;
 }
 
@@ -697,11 +712,15 @@ function geminiParseResponse_(json) {
   };
 }
 
-/** @type {!Object<string, {buildRequest: Function, parseResponse: Function}>} */
+/**
+ * @type {!Object<string, {buildRequest: Function, parseResponse: Function, finalize: (Function|undefined)}>}
+ * finalize（M7 chatgpt）：回應是 SSE 文字，先由它取出最終 JSON（失敗 throw，帶 status / code）再交給 parseResponse。
+ */
 const PROVIDER_ADAPTERS_ = Object.freeze({
   openai: { buildRequest: openaiBuildRequest_, parseResponse: openaiParseResponse_ },
   anthropic: { buildRequest: anthropicBuildRequest_, parseResponse: anthropicParseResponse_ },
   gemini: { buildRequest: geminiBuildRequest_, parseResponse: geminiParseResponse_ },
+  chatgpt: { buildRequest: chatgptBuildRequest_, parseResponse: chatgptParseResponse_, finalize: chatgptFinalFromSse_ },
 });
 
 /**
@@ -743,6 +762,8 @@ function extractApiError_(json, text) {
     if (typeof json.error === 'string') return json.error;
     if (json.error.message) return String(json.error.message);
   }
+  if (json && json.detail) return typeof json.detail === 'string' ? json.detail : JSON.stringify(json.detail).slice(0, 300);
+  if (json && json.error_description) return String(json.error_description);
   return String(text || '').slice(0, 300) || '（空回應）';
 }
 
@@ -780,7 +801,8 @@ function defaultProviderFetch_(url, options) {
 function callProvider_(provider, req, deps) {
   deps = deps || {};
   const fetchFn = deps.fetch || defaultProviderFetch_;
-  const apiKey = deps.keyFor ? deps.keyFor(provider.id) : getProviderKey_(provider.id);
+  // chatgpt 協定的「key」是會自動 refresh 的 OAuth access token（chatgptAccessToken_ 失敗會自己 throw providerError_）
+  const apiKey = deps.keyFor ? deps.keyFor(provider.id) : provider.protocol === 'chatgpt' ? chatgptAccessToken_(provider, { fetch: deps.fetch }) : getProviderKey_(provider.id);
   if (!apiKey) throw providerError_(provider, 0, `API key 未設定（Script Property ${providerKeyProp_(provider.id)}），請到管理頁「模型」填入。`);
 
   const adapter = getAdapter_(provider.protocol);
@@ -804,6 +826,10 @@ function callProvider_(provider, req, deps) {
   let json = null;
   try { json = JSON.parse(text); } catch (err) { json = null; }
   if (code < 200 || code >= 300) throw providerError_(provider, code, extractApiError_(json, text), ms);
+  if (adapter.finalize) {
+    // SSE：整段回完才拿到；finalize 取最終物件，response.failed 轉成帶 status 的錯誤（429 額度用完等會照 isFallbackableError_ 換下一個）
+    try { json = adapter.finalize(text); } catch (err) { throw providerError_(provider, err.status || code, err.message, ms); }
+  }
   if (!json) throw providerError_(provider, code, `回應不是 JSON：${String(text).slice(0, 200)}`, ms);
 
   const result = adapter.parseResponse(json);
@@ -1028,16 +1054,7 @@ function cosine_(a, b) {
  * @return {!Object} chatWithChain_ 的結果
  */
 function runChatTurn_(input) {
-  const providers = listProviders_();
-  let chain;
-  if (input.providerId) {
-    const p = providers.find((x) => x.id === input.providerId);
-    if (!p) throw new Error(`找不到 provider「${input.providerId}」。`);
-    if (p.role === 'embed') throw new Error('embed 角色的 provider 不能聊天（M3 才接嵌入 API）。');
-    chain = [p];
-  } else {
-    chain = providerChain_(input.role || 'main', providers);
-  }
+  const chain = chainForRequest_(listProviders_(), input);
   return chatWithChain_(chain, {
     messages: input.messages,
     tools: input.tools || [],
@@ -1045,6 +1062,28 @@ function runChatTurn_(input) {
     temperature: input.temperature,
     sessionId: input.sessionId || '',
   });
+}
+
+/**
+ * 這次請求要用的備援鏈：指定 providerId 就只用它，否則依 role。純函式。
+ * M7：protocol=chatgpt 只服務 principal=owner（SIWC 條款：請求必須為已驗證的使用者本人）——群組成員 / 訪客那一輪從鏈裡剔除；
+ * 明確指定 chatgpt provider 又不是 owner 就直接報錯。
+ * @param {!Array<Provider>} providers
+ * @param {{providerId: (string|undefined), role: (string|undefined), principal: (string|undefined)}} input
+ * @return {!Array<Provider>}
+ * @throws {Error}
+ */
+function chainForRequest_(providers, input) {
+  const principal = normalizePrincipal_(input.principal);
+  if (input.providerId) {
+    const p = providers.find((x) => x.id === input.providerId);
+    if (!p) throw new Error(`找不到 provider「${input.providerId}」。`);
+    if (p.role === 'embed') throw new Error('embed 角色的 provider 不能聊天（M3 才接嵌入 API）。');
+    if (p.protocol === 'chatgpt' && principal !== 'owner') throw new Error(`provider「${p.id}」用 owner 的 ChatGPT 方案，只服務 owner 本人，群組成員 / 訪客不能指定它。`);
+    return [p];
+  }
+  const chain = providerChain_(input.role || 'main', providers);
+  return principal === 'owner' ? chain : chain.filter((p) => p.protocol !== 'chatgpt');
 }
 
 /**

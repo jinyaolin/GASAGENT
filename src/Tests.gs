@@ -50,6 +50,10 @@ function smokeTestTable_() {
     ['providers: 第一個 provider 5xx 時自動換第二個（fetch stub）', testFallbackChain_, 'pure'],
     ['providers: 400 參數錯不 fallback；key 缺失會 fallback', testFallbackStopsOn4xx_, 'pure'],
     ['providers: 成本估算與 Usage 記錄呼叫', testCostEstimate_, 'pure'],
+    // M7 chatgpt（Sign in with ChatGPT）
+    ['chatgpt: 憑證解析（必要欄位、scope、expires_at 三種來源、JWT exp）、refresh 判斷 / 請求 / 套用滾動 token、摘要', testChatgptCredentials_, 'pure'],
+    ['chatgpt: Responses 請求（instructions / input 項目 / tools / store:false stream:true / 拿掉不支援欄位）、SSE 解析、response.completed → ChatResult、response.failed → 帶 status 的錯誤、模型清單解析', testChatgptAdapter_, 'pure'],
+    ['chatgpt: callProvider_ 走 SSE finalize 與備援（429 額度用完換下一個）；chatgptAccessToken_ 到期自動 refresh（鎖、滾動 token 寫回）、終端錯誤標 invalid 並通知；chainForRequest_ 非 owner 剔除 chatgpt', testChatgptFlow_, 'pure'],
     // M2
     ['registry: 全部工具無重名、schema 合法、名稱以 toolset 開頭', testRegistryValid_, 'pure'],
     ['registry: 重名 / 壞 schema 的宣告被拒；listToolsForProvider_ 依 RBAC 過濾', testRegistryRejectsBad_, 'pure'],
@@ -2946,4 +2950,165 @@ function testTelegramWhitelistCommand_() {
   assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/web add evil.example', 555, -100), g.deps).reason, 'member_command', '群組成員不能改域名白名單');
   assertEqual_(g.deps._config.length, 0, '沒寫 Config');
   assertEqual_(parseTelegramCommand_('/white add a@b.co'), { command: 'white', rest: 'add a@b.co' }, '指令解析');
+}
+
+
+// ---- M7 chatgpt（Sign in with ChatGPT）----------------------------------------------------------
+
+/** 假 JWT（不簽章；只有 payload 會被讀）。 */
+function fakeJwt_(payload) {
+  const enc = (o) => Utilities.base64EncodeWebSafe(Utilities.newBlob(JSON.stringify(o)).getBytes()).replace(/=+$/, '');
+  return `${enc({ alg: 'RS256', kid: 'k' })}.${enc(payload)}.sig`;
+}
+
+/** @return {!Object} 合法憑證（siwc-login.js 的輸出） */
+function fakeSiwcCreds_(overrides) {
+  return Object.assign({
+    client_id: 'oaiapp_abc', access_token: fakeJwt_({ sub: 'u1', exp: 2000000000, client_id: 'oaiapp_abc' }), refresh_token: 'rt_1',
+    id_token: fakeJwt_({ sub: 'u1', email: 'me@example.com' }), expires_at: 1900000000000, scopes: ['openid', 'profile', 'email', 'offline_access', 'resource.invoke', 'chatgpt.tokens.use.direct'],
+    email: 'me@example.com', ext_agent_host_id: 'urn:uuid:11111111-1111-4111-8111-111111111111', saved_at: '2026-11-03T00:00:00.000Z',
+  }, overrides || {});
+}
+
+function testChatgptCredentials_() {
+  const now = 1800000000000;
+  const c = parseChatGptCredentials_(JSON.stringify(fakeSiwcCreds_()), now);
+  assertEqual_([c.client_id, c.refresh_token, c.expires_at, c.email, c.subject, c.invalid, c.scopes.indexOf('chatgpt.tokens.use.direct') !== -1], ['oaiapp_abc', 'rt_1', 1900000000000, 'me@example.com', 'u1', '', true], '字串輸入解析');
+  assertEqual_(parseChatGptCredentials_(fakeSiwcCreds_({ expires_at: undefined, expires_in: 3600, saved_at: '2026-11-03T00:00:00.000Z' }), now).expires_at, new Date('2026-11-03T00:00:00.000Z').getTime() + 3600000, 'expires_at 由 saved_at + expires_in');
+  assertEqual_(parseChatGptCredentials_(fakeSiwcCreds_({ expires_at: undefined, saved_at: undefined }), now).expires_at, 2000000000 * 1000, 'expires_at 退回 JWT exp');
+  assertEqual_(parseChatGptCredentials_(fakeSiwcCreds_({ scopes: undefined, scope: 'openid chatgpt.tokens.use.direct' }), now).scopes, ['openid', 'chatgpt.tokens.use.direct'], 'scope 字串');
+  assertEqual_(parseChatGptCredentials_(fakeSiwcCreds_({ email: undefined }), now).email, 'me@example.com', 'email 從 id_token');
+  assertThrows_(() => parseChatGptCredentials_('not json'), '非 JSON');
+  assertThrows_(() => parseChatGptCredentials_(fakeSiwcCreds_({ client_id: 'dynamic_agent_client' })), '動態註冊未完成');
+  assertThrows_(() => parseChatGptCredentials_(fakeSiwcCreds_({ refresh_token: '' })), '缺 refresh');
+  assert_(/chatgpt\.tokens\.use\.direct/.test(assertThrows_(() => parseChatGptCredentials_(fakeSiwcCreds_({ scopes: ['openid'] })), '缺 scope').message), '缺 scope 訊息');
+  assertEqual_(decodeJwtPayload_('garbage'), null, '壞 JWT');
+  // refresh 判斷 / 請求 / 套用
+  assertEqual_([chatgptNeedsRefresh_({ expires_at: now + 10 * 60000 }, now), chatgptNeedsRefresh_({ expires_at: now + 4 * 60000 }, now), chatgptNeedsRefresh_({ expires_at: 0 }, now)], [false, true, true], '5 分鐘內要 refresh');
+  const req = chatgptRefreshRequest_(c);
+  assertEqual_([req.url, req.payload], [CHATGPT_TOKEN_URL, 'grant_type=refresh_token&client_id=oaiapp_abc&refresh_token=rt_1&resource=' + encodeURIComponent('https://api.openai.com/v1')], 'refresh 請求 form');
+  const next = chatgptApplyTokenResponse_(c, { access_token: fakeJwt_({ exp: 1 }), refresh_token: 'rt_2', expires_in: 3600, scope: 'openid chatgpt.tokens.use.direct', id_token: 'id2' }, now);
+  assertEqual_([next.refresh_token, next.expires_at, next.scopes, next.id_token, next.refreshed_at, next.invalid, c.refresh_token], ['rt_2', now + 3600000, ['openid', 'chatgpt.tokens.use.direct'], 'id2', new Date(now).toISOString(), '', 'rt_1'], '套用滾動 token（不改原物件）');
+  assertEqual_(chatgptApplyTokenResponse_(c, { access_token: 'x' }, now).refresh_token, 'rt_1', '回應沒 refresh_token 就保留');
+  assertThrows_(() => chatgptApplyTokenResponse_(c, {}, now), '缺 access_token');
+  assertEqual_([chatgptErrorCode_({ error: 'invalid_grant' }), chatgptErrorCode_({ error: { code: 'x' } }), chatgptErrorCode_(null)], ['invalid_grant', 'x', ''], 'error code');
+  const sum = chatgptCredentialSummary_(Object.assign({}, c, { refreshed_at: new Date(now - 26 * 86400000).toISOString() }), now);
+  assertEqual_([sum.email, sum.refreshAgeDays, sum.scopesOk, sum.invalid, sum.expiresInMin > 0], ['me@example.com', 26, true, '', true], '摘要');
+  assertEqual_(chatgptCredentialSummary_(null), null, '沒憑證');
+  // validateProvider_：chatgpt 預設 base_url、不能 embed
+  const p = validateProvider_(fakeProviderInput_({ id: 'gpt', protocol: 'chatgpt', base_url: '' }));
+  assertEqual_(p.base_url, CHATGPT_DEFAULT_BASE_URL, '預設 base_url');
+  assertThrows_(() => validateProvider_(fakeProviderInput_({ protocol: 'chatgpt', role: 'embed' })), 'chatgpt 不能 embed');
+}
+
+function testChatgptAdapter_() {
+  const provider = validateProvider_(fakeProviderInput_({ id: 'gpt', protocol: 'chatgpt', base_url: '', model: 'gpt-5', max_tokens: 100, extra_body: '{"temperature":0.2,"reasoning":{"effort":"low"}}' }));
+  const r = chatgptBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7 }, 'TOKEN');
+  assertEqual_(r.url, 'https://api.openai.com/v1/responses', 'url');
+  assertEqual_([r.headers.Authorization, r.headers.Accept], ['Bearer TOKEN', 'text/event-stream'], 'headers');
+  assertEqual_([r.body.store, r.body.stream, r.body.model, r.body.max_output_tokens, r.body.temperature, r.body.max_tokens, r.body.reasoning], [false, true, 'gpt-5', undefined, undefined, undefined, { effort: 'low' }], 'store/stream 固定、不支援欄位拿掉、其他 extra_body 保留');
+  assert_(r.body.instructions && r.body.instructions.indexOf(stringifyContent_(fakeConversation_()[0].content)) === 0, 'system → instructions');
+  const types = r.body.input.map((i) => i.type + (i.role ? ':' + i.role : ''));
+  assert_(types.indexOf('message:user') !== -1 && types.indexOf('function_call') !== -1 && types.indexOf('function_call_output') !== -1 && types.indexOf('message:system') === -1, 'input 項目：' + types.join(','));
+  const fc = r.body.input.find((i) => i.type === 'function_call');
+  const fo = r.body.input.find((i) => i.type === 'function_call_output');
+  assert_(fc.call_id && fc.name && typeof fc.arguments === 'string' && fo.call_id === fc.call_id && typeof fo.output === 'string', 'function_call / output 欄位');
+  assertEqual_(r.body.tools[0].type, 'function', 'tools 扁平格式');
+  assert_(r.body.tools[0].name && r.body.tools[0].parameters && r.body.tool_choice === 'auto', 'tools 欄位');
+  const items = chatgptInputItems_([{ role: 'assistant', content: '想一下', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: { a: 1 } } }] }]);
+  assertEqual_([items.input.length, items.input[0].content[0].type, items.input[1].arguments], [2, 'output_text', '{"a":1}'], 'assistant 文字 + 工具呼叫 → 兩項；arguments 物件轉字串');
+  // SSE
+  const sse = ['event: response.created', 'data: {"type":"response.created","response":{"id":"r1"}}', '', 'event: response.output_text.delta', 'data: {"type":"response.output_text.delta","delta":"Hel"}', '',
+    'event: response.completed', 'data: {"type":"response.completed","response":{"id":"r1","object":"response","status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"},{"type":"output_text","text":" world"}]},{"type":"function_call","call_id":"call_9","name":"fake_echo","arguments":"{\\"text\\":\\"x\\"}"}],"usage":{"input_tokens":12,"output_tokens":5}}}', '', 'data: [DONE]', ''].join('\n');
+  const events = parseSse_(sse);
+  assertEqual_([events.length, events[0].event, events[2].data.type], [3, 'response.created', 'response.completed'], 'SSE 解析（[DONE] 略過）');
+  const final = chatgptFinalFromSse_(sse);
+  assertEqual_(final.id, 'r1', '取最終 response');
+  const parsed = chatgptParseResponse_(final);
+  assertEqual_([parsed.text, parsed.toolCalls, parsed.usage, parsed.stop], ['Hello world', [{ id: 'call_9', name: 'fake_echo', args: { text: 'x' } }], { prompt: 12, completion: 5 }, 'tool_calls'], 'ChatResult');
+  assertEqual_(chatgptParseResponse_({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }], usage: {} }).stop, 'end', '純文字 → end');
+  assertEqual_(chatgptParseResponse_({ status: 'incomplete', output: [] }).stop, 'length', 'incomplete → length');
+  // failed / 純 JSON 錯誤
+  const failed = ['event: response.failed', 'data: {"type":"response.failed","response":{"id":"r2","status":"failed","error":{"code":"subscription_sharing_usage_limit_exceeded","message":"limit"}}}', ''].join('\n');
+  const e1 = assertThrows_(() => chatgptFinalFromSse_(failed), 'failed');
+  assertEqual_([e1.status, e1.code, /額度用完/.test(e1.message)], [429, 'subscription_sharing_usage_limit_exceeded', true], 'failed → 429 + 提示');
+  const e2 = assertThrows_(() => chatgptFinalFromSse_('{"error":{"code":"subscription_sharing_user_not_eligible","message":"no"}}'), '純 JSON 錯誤');
+  assertEqual_([e2.status, e2.code], [403, 'subscription_sharing_user_not_eligible'], 'JSON 錯誤 → 403');
+  assertEqual_(chatgptFinalFromSse_('{"object":"response","status":"completed","output":[]}').object, 'response', '非串流 JSON 回應也接受');
+  assertThrows_(() => chatgptFinalFromSse_('event: response.created\ndata: {"type":"response.created"}\n'), '沒有 completed');
+  assertEqual_(extractApiError_({ detail: 'direct admission denied' }, ''), 'direct admission denied', '{detail} 錯誤');
+  // 模型清單
+  assertEqual_(chatgptParseModels_({ models: [{ slug: 'gpt-a', display_name: 'A', visibility: 'list' }, { slug: 'hidden', visibility: 'hidden' }] }), [{ slug: 'gpt-a', display_name: 'A' }], 'SIWC models[]');
+  assertEqual_(chatgptParseModels_({ data: [{ id: 'gpt-b' }] }), [{ slug: 'gpt-b', display_name: 'gpt-b' }], '標準 data[]');
+}
+
+function testChatgptFlow_() {
+  const now = 1800000000000;
+  const gpt = validateProvider_(fakeProviderInput_({ id: 'gpt', protocol: 'chatgpt', base_url: '', model: 'gpt-5', priority: 1 }));
+  const backup = validateProvider_(fakeProviderInput_({ id: 'backup', priority: 2 }));
+  const completed = (text) => fakeResponse_(200, ['event: response.completed', 'data: ' + JSON.stringify({ type: 'response.completed', response: { object: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }], usage: { input_tokens: 3, output_tokens: 2 } } }), ''].join('\n'));
+  // callProvider_：SSE finalize
+  let stub = fetchStub_([completed('hi')]);
+  const r1 = callProvider_(gpt, { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => 'TOK' });
+  assertEqual_([r1.text, r1.provider, r1.model, r1.usage], ['hi', 'gpt', 'gpt-5', { prompt: 3, completion: 2 }], 'callProvider_ 走 SSE');
+  assertEqual_(JSON.parse(stub.calls[0].options.payload).stream, true, '送出 stream:true');
+  // 額度用完（response.failed 429）→ 換下一個
+  stub = fetchStub_([fakeResponse_(200, 'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"limit"}}}\n'), fakeResponse_(200, { choices: [{ message: { content: 'from backup' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })]);
+  const records = [];
+  const r2 = chatWithChain_([gpt, backup], { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => 'TOK', record: (e) => records.push(e) });
+  assertEqual_([r2.text, r2.provider, r2.fallbacks.length, r2.fallbacks[0].status, records[0].ok], ['from backup', 'backup', 1, 429, false], '429 fallback');
+  // chatgptAccessToken_：未到期直接回；到期 refresh（鎖、滾動 token 寫回）
+  const mem = (initial) => { let c = initial; return { get: () => (c ? Object.assign({}, c) : null), set: (v) => { c = v; } , peek: () => c }; };
+  const lockLog = [];
+  const lock = { waitLock: () => lockLog.push('wait'), releaseLock: () => lockLog.push('release') };
+  const fresh = parseChatGptCredentials_(fakeSiwcCreds_({ expires_at: now + 3600000 }), now);
+  assertEqual_(chatgptAccessToken_(gpt, { store: mem(fresh), now: () => now, lock, fetch: () => { throw new Error('不該打'); } }), fresh.access_token, '未到期直接用');
+  assertEqual_(lockLog.length, 0, '未到期不拿鎖');
+  const expiring = parseChatGptCredentials_(fakeSiwcCreds_({ expires_at: now + 60000 }), now);
+  const store = mem(expiring);
+  stub = fetchStub_([fakeResponse_(200, { access_token: fakeJwt_({ exp: 9 }), refresh_token: 'rt_new', expires_in: 3600, scope: 'openid offline_access chatgpt.tokens.use.direct' })]);
+  const tok = chatgptAccessToken_(gpt, { store, now: () => now, lock, fetch: stub.fetch });
+  assertEqual_([tok === fakeJwt_({ exp: 9 }), store.peek().refresh_token, store.peek().expires_at, lockLog, stub.calls[0].url, stub.calls[0].options.contentType], [true, 'rt_new', now + 3600000, ['wait', 'release'], CHATGPT_TOKEN_URL, 'application/x-www-form-urlencoded'], 'refresh 並寫回滾動 token');
+  assert_(/refresh_token=rt_1/.test(stub.calls[0].options.payload), 'refresh 用舊 refresh token');
+  // 等鎖期間別人已 refresh → 不再打
+  const raced = mem(expiring);
+  const lock2 = { waitLock: () => { raced.set(Object.assign({}, expiring, { access_token: 'other', expires_at: now + 3600000 })); }, releaseLock: () => {} };
+  assertEqual_(chatgptAccessToken_(gpt, { store: raced, now: () => now, lock: lock2, fetch: () => { throw new Error('不該打'); } }), 'other', '拿到鎖後重讀');
+  // 終端錯誤 → invalid、通知、throw 401；之後不再打
+  const bad = mem(expiring);
+  const notes = [];
+  stub = fetchStub_([fakeResponse_(400, { error: 'invalid_grant', error_description: 'expired' })]);
+  const warn = console.warn; console.warn = () => {};
+  const e = assertThrows_(() => chatgptAccessToken_(gpt, { store: bad, now: () => now, lock, fetch: stub.fetch, notify: (t) => notes.push(t) }), 'invalid_grant');
+  console.warn = warn;
+  assertEqual_([e.status, bad.peek().invalid, notes.length, /重新執行 scripts\/siwc-login\.js/.test(e.message), /invalid_grant/.test(notes[0])], [401, 'invalid_grant', 1, true, true], '終端錯誤');
+  assertThrows_(() => chatgptAccessToken_(gpt, { store: bad, now: () => now, lock, fetch: () => { throw new Error('不該打'); } }), 'invalid 後不再打');
+  // 暫時錯誤（5xx）→ 不標 invalid、throw 5xx（可 fallback）
+  const tmp = mem(expiring);
+  stub = fetchStub_([fakeResponse_(503, { detail: 'down' })]);
+  const e3 = assertThrows_(() => chatgptAccessToken_(gpt, { store: tmp, now: () => now, lock, fetch: stub.fetch }), '5xx');
+  assertEqual_([e3.status, tmp.peek().invalid, isFallbackableError_(e3)], [503, '', true], '暫時錯誤不標 invalid');
+  // 沒憑證
+  assert_(/siwc-login/.test(assertThrows_(() => chatgptAccessToken_(gpt, { store: mem(null) }), '沒憑證').message), '沒憑證提示登入');
+  // chainForRequest_：非 owner 剔除 chatgpt
+  const providers = [gpt, backup, validateProvider_(fakeProviderInput_({ id: 'fast1', role: 'fast' }))];
+  assertEqual_(chainForRequest_(providers, { role: 'main' }).map((p) => p.id), ['gpt', 'backup'], 'owner 全鏈');
+  assertEqual_(chainForRequest_(providers, { role: 'main', principal: 'group_member' }).map((p) => p.id), ['backup'], '群組成員剔除 chatgpt');
+  assertEqual_(chainForRequest_(providers, { role: 'main', principal: 'guest' }).map((p) => p.id), ['backup'], '訪客剔除');
+  assertEqual_(chainForRequest_(providers, { providerId: 'gpt' })[0].id, 'gpt', 'owner 指定');
+  assertThrows_(() => chainForRequest_(providers, { providerId: 'gpt', principal: 'group_member' }), '成員指定 chatgpt 報錯');
+  assertThrows_(() => chainForRequest_(providers, { providerId: 'nope' }), '找不到');
+  // runTurn_ 把 principal 傳給 chat
+  const fake = fakeChat_([{ text: 'ok', stop: 'end' }]);
+  runTurn_({ message: 'hi', principal: 'group_member' }, fakeTurnDeps_(fake.chat));
+  assertEqual_(fake.calls[0].principal, 'group_member', 'chat 收到 principal');
+  // 撤銷：清憑證
+  const rv = mem(fresh);
+  stub = fetchStub_([fakeResponse_(200, { revocation_endpoint: 'https://auth.openai.com/api/accounts/oauth/revoke' }), fakeResponse_(200, '')]);
+  const rr = chatgptRevoke_(gpt, { store: rv, fetch: stub.fetch });
+  assertEqual_([rr.revoked, rr.cleared, rv.peek(), /token=rt_1/.test(stub.calls[1].options.payload)], [true, true, null, true], '撤銷並清憑證');
+  // 模型清單（注入 token）
+  stub = fetchStub_([fakeResponse_(200, { models: [{ slug: 'gpt-5', display_name: 'GPT-5', visibility: 'list' }] })]);
+  assertEqual_(chatgptListModels_(gpt, { token: 'T', fetch: stub.fetch }).map((m) => m.slug), ['gpt-5'], '列模型');
+  assertEqual_(stub.calls[0].options.headers.Authorization, 'Bearer T', '模型清單帶 bearer');
 }

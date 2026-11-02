@@ -20,7 +20,8 @@ src/
   appsscript.json   # OAuth scopes、webapp 預設（USER_DEPLOYING / MYSELF）、Asia/Taipei、V8
   Config.gs         # Script Properties 封裝、APP_VERSION、REQUIRED_SCOPES、assertOwner()、Config sheet 讀寫
   Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫
-  Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()
+  Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()；M7：chainForRequest_（chatgpt 只服務 owner）
+  Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh、Responses API + SSE adapter、模型清單、登出
   ToolRegistry.gs   # M2：工具宣告 {name, toolset, description, parameters, risk, handler}、無重名檢查、轉中立工具格式
   ToolExecutor.gs   # M2：參數驗證 → principal（M7-A）→ RBAC → 審批策略 → 執行 → AuditLog → 溢寫；Config 設定讀寫；Approvals 決定；securityAudit_
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
@@ -44,6 +45,7 @@ src/
   Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron / 技能健檢
   Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項 + M6 5 項 + M7-A 5 項（principal / injection / secrets）；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
+scripts/siwc-login.js    # M7：在本機完成 Sign in with ChatGPT（動態註冊、PKCE、驗 ID token），印出要貼到管理頁的憑證 JSON
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
@@ -194,6 +196,22 @@ clasp deploy -i <deploymentId> -d "說明"
 | 備註 | `max_tokens` 必填，沒設程式用 1024 | key 走 `x-goog-api-key` header，不進 URL |
 
 管理頁「新增 provider」有這幾個範本可一鍵帶入，再貼上 key 儲存即可。
+
+### ChatGPT 方案（protocol `chatgpt`，Sign in with ChatGPT）
+
+用你的 **ChatGPT Plus / Pro 方案額度**跑 agent，不用 OpenAI API key。走的是 OpenAI 2026-09-29 起的官方開源方案（[Sign in with ChatGPT → ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)）：動態註冊一個屬於你的 OAuth client，拿 access token 打**公開的** `POST https://api.openai.com/v1/responses`（不是 ChatGPT 的 backend-api）。
+
+| 項目 | 說明 |
+|---|---|
+| 登入 | OAuth 回呼只能到 `127.0.0.1`，所以在 **Mac 上**跑 `node scripts/siwc-login.js --account <代號>`（node ≥ 18，零依賴）：開瀏覽器 → 選 ChatGPT 帳號 → 第一次會要你替這個 app 命名並勾選「使用 ChatGPT 方案」→ 回到終端機印出一段憑證 JSON。憑證同時存在 `~/.config/gas-agent/siwc/<代號>.json`（0600；`--print` 可重印）。每個 GAS Agent 安裝（= `accounts/` 的一個代號）有自己穩定的 `ext_agent_host_id` 與 client id，重跑會沿用 |
+| 設定 | 管理頁「模型」→ 新增 provider → 範本「ChatGPT 方案」（protocol `chatgpt`、base_url `https://api.openai.com/v1`）→ 儲存 → 編輯 → 把那段 JSON 貼進「ChatGPT 憑證」→ 儲存 →「列出可用模型」選一個填 `model` → 儲存 →「測試連線」。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 scope `chatgpt.tokens.use.direct` 才收），不存 sheet、不回傳 token |
+| 續期 | access token 1 小時；每次呼叫前剩不到 5 分鐘就用 refresh token 換新（30 天滾動，LockService 序列化避免 trigger 與管理頁同時換把滾動 token 弄壞）。refresh 回 `invalid_grant` 等終端錯誤 → 憑證標失效、推 Telegram 提醒、Doctor 紅燈，重跑 `siwc-login.js` 貼新憑證即可。**30 天內要至少被用到一次**，否則 refresh token 過期 |
+| 請求 | 依官方 preview 限制：`store: false`、`stream: true`、system 走 `instructions`、歷史放 `input`（function_call / function_call_output 項目）、不帶 `temperature` / `max_output_tokens` 等欄位（`extra_body` 帶了也會被拿掉）。GAS 的 UrlFetch 沒有串流，會等整段 SSE 回完再解析 `response.completed`。額度用完（`subscription_sharing_usage_limit_exceeded`，Plus 是 5 小時滾動上限、所有 app 共用）當 429 → 自動換備援鏈的下一個 provider |
+| **只服務 owner** | 條款要求請求必須為已驗證的使用者本人：`chainForRequest_` 會把 chatgpt provider 從 Telegram 群聊成員 / 訪客那一輪的備援鏈剔除（指定它會報錯），所以**群組要能用就得另外有一個 API key 的 main provider**。每個帳號（agent）各自登入自己的 ChatGPT 帳號，憑證不互用、不共享 |
+| 登出 | 編輯 provider →「登出」：撤銷 refresh token 並清憑證；或到 [ChatGPT 設定 → Apps](https://chatgpt.com/settings/usage) 停用這個 app（OpenAI 不會通知我們，下次呼叫才會發現） |
+| 條款 | [Sign in with ChatGPT Terms](https://openai.com/policies/sign-in-with-chatgpt-terms/)：token 須存在使用者本機或自己控制的環境、不得共享方案額度、請求須為本人。GAS 跑在你自己的 Google 帳號但 Script Properties 是 Google 代管，屬灰色地帶；本人 2026-11-03 知情後決定採用 |
+
+Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 25 天沒續期、scope 齊。
 
 ### 驗證
 
@@ -584,7 +602,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（64 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（67 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。

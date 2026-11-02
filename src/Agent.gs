@@ -245,7 +245,7 @@ function runTurn_(input, deps) {
     if (now() - started > budgetMs) { stopped = 'time_budget'; break; }
     if (steps.length >= maxSteps) { stopped = 'max_steps'; stoppedDetail = `${steps.length} 步`; break; }
 
-    last = chat({ providerId: input.providerId || '', role: 'main', messages: messages.slice(), tools, sessionId });
+    last = chat({ providerId: input.providerId || '', role: 'main', messages: messages.slice(), tools, sessionId, principal });
     llmCalls++;
     usage.prompt += (last.usage && last.usage.prompt) || 0;
     usage.completion += (last.usage && last.usage.completion) || 0;

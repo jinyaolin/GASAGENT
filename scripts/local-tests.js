@@ -36,7 +36,13 @@ const sandbox = {
       if (pattern === 'yyyy-MM-dd') { const p = (n) => (n < 10 ? '0' + n : String(n)); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }
       return d.toISOString();
     },
-    newBlob: (s) => ({ getBytes: () => Array.from(Buffer.from(String(s))) }),
+    newBlob: (s) => {
+      const buf = Array.isArray(s) ? Buffer.from(s) : Buffer.from(String(s));
+      return { getBytes: () => Array.from(buf), getDataAsString: () => buf.toString('utf8') };
+    },
+    base64DecodeWebSafe: (s) => Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
+    base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')),
+    base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
   },
   MimeType: { PLAIN_TEXT: 'text/plain', PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document', GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet', GOOGLE_SLIDES: 'application/vnd.google-apps.presentation' },
   Charts: { ChartType: {} },

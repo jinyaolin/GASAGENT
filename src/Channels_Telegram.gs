@@ -705,6 +705,28 @@ function deliverTurnToTelegram_(chatId, result, deps) {
 }
 
 /**
+ * 推一則純文字給 owner 的 Telegram（M7：憑證失效等系統提醒）。Telegram 沒啟用或沒 chat id 就略過；不 throw。
+ * @param {string} text
+ * @param {{cfg: (ChannelConfig|undefined), send: (Function|undefined)}=} deps
+ * @return {{ok: boolean, skipped: string, error: string}}
+ */
+function telegramNotifyOwner_(text, deps) {
+  deps = deps || {};
+  const out = { ok: false, skipped: '', error: '' };
+  try {
+    const cfg = deps.cfg || getChannelConfig_();
+    if (!cfg.telegramEnabled) { out.skipped = 'disabled'; return out; }
+    const chatId = cfg.telegramOwnerChatId || cfg.telegramAllowedUserIds[0] || '';
+    if (!chatId) { out.skipped = 'no_chat_id'; return out; }
+    (deps.send || ((c, t, o) => telegramSend_(c, t, o)))(String(chatId), String(text || ''));
+    out.ok = true;
+  } catch (err) {
+    out.error = String(err && err.message || err);
+  }
+  return out;
+}
+
+/**
  * 任何通道（聊天台 / Email / 排程）停在審批時，推一則帶「批准 / 拒絕」按鈕的通知到 owner 的 Telegram。
  * Telegram 自己來的任務不用（回覆本身就帶按鈕）。不 throw。
  * @param {{channel: string, sessionId: string, steps: !Array<TurnStep>, message: (string|undefined)}} info

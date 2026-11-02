@@ -369,7 +369,7 @@ function transcriptForSummary_(messages) {
  * 用 fast 模型（沒有就 main）把舊訊息併進既有摘要。
  * @param {string} previousSummary
  * @param {!Array<!Object>} oldMessages
- * @param {{chat: (Function|undefined), sessionId: (string|undefined)}=} deps chat 預設 runChatTurn_（role fast → main）
+ * @param {{chat: (Function|undefined), sessionId: (string|undefined), principal: (string|undefined)}=} deps chat 預設 runChatTurn_（role fast → main）；principal 傳給 chat（chatgpt provider 只服務 owner）
  * @return {string} 新摘要
  */
 function summarizeMessages_(previousSummary, oldMessages, deps) {
@@ -386,7 +386,7 @@ function summarizeMessages_(previousSummary, oldMessages, deps) {
     '## 新增對話',
     transcriptForSummary_(oldMessages),
   ].join('\n');
-  const r = chat({ role: 'fast', messages: [{ role: 'user', content: prompt }], maxTokens: 2048, sessionId: deps.sessionId || '' });
+  const r = chat({ role: 'fast', messages: [{ role: 'user', content: prompt }], maxTokens: 2048, sessionId: deps.sessionId || '', principal: deps.principal || 'owner' });
   const text = String(r.text || '').trim();
   return truncateText_(text || previousSummary, SUMMARY_MAX_CHARS).text;
 }
@@ -557,7 +557,7 @@ function runSessionTurn_(input, deps) {
   if (needsCompaction_(session.summary, live, cfg)) {
     const split = splitForCompaction_(live, cfg.keepRecentTurns);
     const summarize = deps.summarize || summarizeMessages_;
-    session.summary = summarize(session.summary, split.old, { chat: deps.chat, sessionId: session.id });
+    session.summary = summarize(session.summary, split.old, { chat: deps.chat, sessionId: session.id, principal });
     session.compact_seq = split.old[split.old.length - 1].seq;
     live = split.recent;
     compacted = true;

@@ -268,12 +268,13 @@
     { id: 'openai', label: 'OpenAI', protocol: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
     { id: 'anthropic', label: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', max_tokens: 4096 },
     { id: 'gemini', label: 'Google Gemini', protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', max_tokens: 4096 },
+    { id: 'chatgpt', label: 'ChatGPT 方案（Sign in with ChatGPT，不用 API key）', protocol: 'chatgpt', base_url: 'https://api.openai.com/v1', model: 'gpt-5' },
   ];
 
   const PROVIDER_FIELDS = [
     { key: 'id', label: 'id', hint: '小寫字母 / 數字 / _ / -；每個 provider 唯一、存檔後不可改（key 綁 PROVIDER_KEY_<id>）。同協定第二組請換 id，例如 gemini-2', required: true },
     { key: 'label', label: '顯示名稱' },
-    { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini'], required: true },
+    { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini', 'chatgpt'], required: true, hint: 'chatgpt = 用你的 ChatGPT Plus / Pro 方案（Sign in with ChatGPT），不用 API key；只服務 owner 本人，群組成員 / 訪客那一輪不會用它' },
     { key: 'base_url', label: 'base_url', hint: 'openai：到 /v1 為止（不含 /chat/completions）；anthropic / gemini：只到網域', required: true },
     { key: 'model', label: 'model', required: true },
     { key: 'role', label: '角色', type: 'select', options: ['main', 'fast', 'embed'], required: true },
@@ -339,7 +340,9 @@
             el('td', {}, p.model),
             el('td', {}, p.role),
             el('td', {}, String(p.priority)),
-            el('td', {}, p.hasKey ? el('code', {}, p.keyHint) : el('span', { class: 'warn-text' }, '未設定')),
+            el('td', {}, p.protocol === 'chatgpt'
+              ? (p.hasKey ? el('span', { class: 'badge', title: p.oauth ? `refresh token 已 ${p.oauth.refreshAgeDays} 天；access token ${p.oauth.expiresInMin} 分鐘後到期` : '' }, `ChatGPT ${p.keyHint}`) : el('span', { class: 'warn-text' }, p.keyHint ? `憑證${p.keyHint}` : '未登入'))
+              : (p.hasKey ? el('code', {}, p.keyHint) : el('span', { class: 'warn-text' }, '未設定'))),
             el('td', { class: 'actions' }, [btnTest, btnEdit, btnToggle, btnDelete]),
           ]), $result);
         });
@@ -409,6 +412,7 @@
             const preset = PROVIDER_PRESETS.find((x) => x.id === sel.value);
             if (!preset) return;
             PROVIDER_FIELDS.forEach((f) => { if (preset[f.key] !== undefined) inputs[f.key].value = preset[f.key]; });
+            inputs.protocol.dispatchEvent(new Event('change'));
             // id 已被用掉就自動接 -2、-3…，避免新增時覆蓋既有的同範本 provider。
             if (!inputs.id.value || providers.some((x) => x.id === inputs.id.value)) {
               let candidate = preset.id;
@@ -447,13 +451,48 @@
 
       const keyInput = el('input', { type: 'password', autocomplete: 'off', placeholder: p && p.hasKey ? `已設定（${p.keyHint}），留空則不變` : '貼上 API key' });
       const keyRow = el('div', { class: 'key-row' }, [keyInput]);
-      if (p && p.hasKey) {
+      if (p && p.hasKey && p.protocol !== 'chatgpt') {
         keyRow.append(el('button', { class: 'small danger', onclick: async () => {
           if (!confirm(`清除「${p.id}」的 API key？`)) return;
           try { await call('adminClearProviderKey', p.id); await load(); openForm(providers.find((x) => x.id === p.id)); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); }
         } }, '清除 key'));
       }
-      grid.append(field('API key', keyRow, '只寫入 Script Properties PROVIDER_KEY_<id>，不存 sheet、不回傳明文'));
+      const $keyField = field('API key', keyRow, '只寫入 Script Properties PROVIDER_KEY_<id>，不存 sheet、不回傳明文');
+      grid.append($keyField);
+      // M7 chatgpt：貼 scripts/siwc-login.js 的憑證，而不是 API key
+      const oauthInput = el('textarea', { rows: 3, spellcheck: 'false', placeholder: p && p.hasKey ? `已登入（${p.keyHint}），留空則不變` : '在本機執行 node scripts/siwc-login.js --account <代號>，把印出的整段 JSON 貼在這裡' });
+      const $oauthMsg = el('div', { class: 'meta' });
+      const oauthRow = el('div', { class: 'key-row' }, [oauthInput]);
+      const $models = el('div');
+      if (p && p.protocol === 'chatgpt' && p.hasKey) {
+        oauthRow.append(el('button', { class: 'small', onclick: async () => {
+          $models.innerHTML = ''; $models.append(el('span', { class: 'loading-inline' }, '查詢模型…'));
+          try {
+            const list = await call('adminListProviderModels', p.id);
+            $models.innerHTML = '';
+            if (!list.length) { $models.append(el('span', { class: 'warn-text' }, '這個帳號沒有可列的模型')); return; }
+            const sel = el('select', { onchange: () => { if (sel.value) inputs.model.value = sel.value; } }, [el('option', { value: '' }, `— 選一個填入 model（${list.length} 個）—`)].concat(list.map((m) => el('option', { value: m.slug }, `${m.display_name}（${m.slug}）`))));
+            $models.append(sel);
+          } catch (err) { $models.innerHTML = ''; $models.append(errorBox(err)); }
+        } }, '列出可用模型'));
+        oauthRow.append(el('button', { class: 'small danger', onclick: async () => {
+          if (!confirm(`登出「${p.id}」的 ChatGPT 帳號？會撤銷 refresh token 並清除憑證。`)) return;
+          try { await call('adminClearProviderKey', p.id); await load(); openForm(providers.find((x) => x.id === p.id)); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); }
+        } }, '登出'));
+      }
+      if (p && p.oauth) {
+        const o = p.oauth;
+        $oauthMsg.textContent = o.invalid ? `憑證已失效（${o.invalid}）：重跑 siwc-login.js 貼新憑證` : `${o.email || o.subject}；access token ${o.expiresInMin > 0 ? o.expiresInMin + ' 分鐘後到期' : '已過期'}（會自動 refresh）；refresh token 已 ${o.refreshAgeDays} 天（30 天內要成功 refresh 一次）${o.scopesOk ? '' : '；缺 chatgpt.tokens.use.direct scope'}`;
+      }
+      const $oauthField = field('ChatGPT 憑證', el('div', {}, [oauthRow, $oauthMsg, $models]), '只寫入 Script Properties PROVIDER_OAUTH_<id>，不存 sheet、不回傳 token。條款：只能用你自己的 ChatGPT 方案、只服務你本人；憑證別給別人。');
+      grid.append($oauthField);
+      function syncProtocolFields() {
+        const isChatgpt = inputs.protocol.value === 'chatgpt';
+        $keyField.style.display = isChatgpt ? 'none' : '';
+        $oauthField.style.display = isChatgpt ? '' : 'none';
+      }
+      inputs.protocol.addEventListener('change', syncProtocolFields);
+      syncProtocolFields();
 
       const btnSave = el('button', { class: 'primary', onclick: save }, isNew ? '新增' : '儲存');
       const btnCancel = el('button', { onclick: () => { $form.style.display = 'none'; $form.innerHTML = ''; } }, '取消');
@@ -471,12 +510,14 @@
         PROVIDER_FIELDS.forEach((f) => { payload[f.key] = inputs[f.key].value.trim(); });
         payload.enabled = enabled.checked;
         payload.apiKey = keyInput.value;
+        payload.oauthCredentials = oauthInput.value;
         payload.isNew = isNew;
         btnSave.disabled = true;
         $msg.innerHTML = '';
         try {
           await call('adminSaveProvider', payload);
           keyInput.value = '';
+          oauthInput.value = '';
           $form.style.display = 'none';
           $form.innerHTML = '';
           await load();

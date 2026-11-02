@@ -101,10 +101,19 @@ function runDoctor() {
       } else {
         push('provider_main', '至少一個啟用的 main provider', 'ok',
           `備援鏈：${mains.map((p) => `${p.id}（${p.protocol} / ${p.model}）`).join(' → ')}`);
-        const missing = mains.filter((p) => !getProviderKey_(p.id)).map((p) => p.id);
-        push('provider_main_key', 'main provider 的 API key 已設定',
+        const missing = mains.filter((p) => !providerHasCredential_(p)).map((p) => p.id);
+        push('provider_main_key', 'main provider 的 API key / 憑證已設定',
           missing.length === mains.length ? 'fail' : missing.length ? 'warn' : 'ok',
-          missing.length ? `缺 key：${missing.join(', ')}（Script Property PROVIDER_KEY_<id>），請到管理頁「模型」填入。` : `${mains.length} 個皆已設定`);
+          missing.length ? `缺：${missing.join(', ')}（API key 在 Script Property PROVIDER_KEY_<id>；chatgpt 協定要貼 siwc-login 憑證），請到管理頁「模型」填入。` : `${mains.length} 個皆已設定`);
+        // M7：chatgpt 協定的憑證狀態（失效 / refresh token 快到 30 天）
+        listProviders_().filter((p) => p.enabled && p.protocol === 'chatgpt').forEach((p) => {
+          const s = chatgptCredentialSummary_(getProviderOAuth_(p.id));
+          if (!s) { push(`chatgpt_${p.id}`, `ChatGPT provider ${p.id} 憑證`, 'fail', '尚未貼上 scripts/siwc-login.js 的憑證。'); return; }
+          const stale = s.refreshAgeDays >= 25;
+          push(`chatgpt_${p.id}`, `ChatGPT provider ${p.id} 憑證可用`, s.invalid ? 'fail' : (stale || !s.scopesOk) ? 'warn' : 'ok',
+            s.invalid ? `已失效（${s.invalid}）：重跑 scripts/siwc-login.js 並貼上新憑證。`
+              : `${s.email || s.subject}；access token ${s.expiresInMin > 0 ? s.expiresInMin + ' 分鐘後到期（會自動 refresh）' : '已過期，下次呼叫會 refresh'}；refresh token 已 ${s.refreshAgeDays} 天${stale ? '，超過 25 天沒成功 refresh，30 天會失效' : ''}${s.scopesOk ? '' : '；缺 chatgpt.tokens.use.direct scope'}`);
+        });
       }
     } catch (err) {
       push('provider_main', '至少一個啟用的 main provider', 'fail', String(err && err.message || err));
