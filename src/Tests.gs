@@ -93,7 +93,7 @@ function smokeTestTable_() {
     ['telegram: update 解析、secret / 白名單驗證、保留指令解析、長文切段、審批鍵盤、webhook URL、通道設定解析', testTelegramParse_, 'pure'],
     ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字先回收到再排隊（沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批', testTelegramHandle_, 'pure'],
     ['email: 內文去引用 / 簽名、掃描只處理 owner 未加星且非 agent 回覆的信並加星、thread 沿用 session、到期旗標', testEmailChannel_, 'pure'],
-    ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
+    ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；非 Telegram 來源停在審批時推 Telegram 通知；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
   ];
 }
 
@@ -1192,10 +1192,12 @@ function fakeSessionDeps_(chat, overrides) {
   const toolConfig = fakeM3ToolConfig_();
   const cfg = fakeAgentConfig_();
   const skills = memorySkillStore_();
+  const notices = [];
   return Object.assign({
     store: ss.store, cfg, toolConfig, registry, memoryStore: mem.store, skillStore: skills.store, chat,
     turnDeps: { executeDeps: { sink: sink.sink, spill: memorySpill_().store } },
-    _ss: ss, _mem: mem, _sink: sink, _skills: skills,
+    notifyApprovals: (info) => { notices.push(info); return { ok: true, chatId: '111', skipped: '', error: '' }; },
+    _ss: ss, _mem: mem, _sink: sink, _skills: skills, _notices: notices,
   }, overrides || {});
 }
 
@@ -2391,6 +2393,26 @@ function testChannelDelivery_() {
   assertEqual_(tg.length, 1, '回覆送到 Telegram');
   assert_(/已送審/.test(tg[0].t) && /待你審批：fake_send/.test(tg[0].t) && tg[0].o.replyMarkup, '回覆文字 + 按鈕');
   assertEqual_(q.store.get(job.id).payload.result.channel_delivery.ok, true, 'result 記投遞');
+  assertEqual_(sessionDeps._notices.length, 0, 'Telegram 來源的任務不另推審批通知');
+  // Email 來源停在審批 → 推 Telegram 通知（帶按鈕）；回信標註「也已推到 Telegram」
+  const fakeE = fakeChat_([{ toolCalls: [{ id: 'e1', name: 'fake_send', args: { text: 'mail' } }], stop: 'tool_calls' }, { text: '已送審', stop: 'end' }]);
+  const emailDeps = fakeQueueSessionDeps_(fakeE.chat);
+  const emailsOut = [];
+  const je = enqueue_('turn', { message: '寄信', channel: 'email', mode: 'interactive', external_id: 'thA', email_thread_id: 'thA' }, '', { store: q.store });
+  const re = queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps: emailDeps, channelDeps: { replyEmail: (tid, body) => emailsOut.push([tid, body]) } });
+  assertEqual_([re.ran.id, re.ran.state, emailDeps._notices.length], [je.id, 'needs_approval', 1], 'Email 來源 → 推一則審批通知');
+  assertEqual_([emailDeps._notices[0].channel, emailDeps._notices[0].steps[0].tool, !!emailDeps._notices[0].steps[0].approvalId, emailDeps._notices[0].message], ['email', 'fake_send', true, '寄信'], '通知內容');
+  assert_(/也已推到 Telegram/.test(emailsOut[0][1]), '回信標註已推 Telegram：' + emailsOut[0][1]);
+  // notifyApprovalsTelegram_ 本體（注入 send）：停用 / 沒 chat id / 正常
+  const tgOut = [];
+  const steps = [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_7', argsPreview: '{"to":"me"}' }];
+  assertEqual_(notifyApprovalsTelegram_({ channel: 'admin', sessionId: 's', steps }, { cfg: parseChannelConfig_({}), send: () => tgOut.push(1) }).skipped, 'disabled', '未啟用不推');
+  assertEqual_(notifyApprovalsTelegram_({ channel: 'admin', sessionId: 's', steps }, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE' }), send: () => tgOut.push(1) }).skipped, 'no_chat_id', '沒 chat id');
+  const n1 = notifyApprovalsTelegram_({ channel: 'email', sessionId: 's9', steps, message: '幫我寄信' }, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111' }), send: (c, t, o) => tgOut.push([c, t, o]) });
+  assertEqual_([n1.ok, n1.chatId, tgOut[0][0], tgOut[0][2].replyMarkup.inline_keyboard[0][0].callback_data], [true, '111', '111', 'apr:apr_7:approve'], '推到白名單第一個 id 並帶按鈕');
+  assert_(/來自Email 指令信的任務需要你審批：「幫我寄信」/.test(tgOut[0][1]) && /gmail_send \{"to":"me"\}/.test(tgOut[0][1]) && /session s9/.test(tgOut[0][1]), '通知文字：' + tgOut[0][1]);
+  assertEqual_(notifyApprovalsTelegram_({ channel: 'admin', sessionId: 's', steps }, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_owner_chat_id: '5', telegram_notify_approvals: 'false' }), send: () => tgOut.push(1) }).skipped, 'disabled', '開關關閉');
+  assertEqual_(notifyApprovalsTelegram_({ channel: 'admin', sessionId: 's', steps }, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_owner_chat_id: '5' }), send: () => { throw new Error('down'); } }).error, 'down', '送失敗不 throw');
   // 審批後續跑：payload 帶 telegram_chat_id → 續跑結果也送回 Telegram
   const apRows = sessionDeps._sink.approvals.map((r, i) => Object.assign({ _row: i + 2 }, r));
   const ap = memoryApprovalStore_(apRows);

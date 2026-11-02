@@ -456,6 +456,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | webhook URL | `<部署 B /exec>?src=telegram&key=<32 字元 secret>`。GAS 的 `doPost` 拿不到 HTTP header，所以 secret 放 query；`doPost` 比對 `e.parameter.key` 與 Script Property `TELEGRAM_WEBHOOK_SECRET`，再比對 `message.from.id` 是否在 Config `telegram_allowed_user_ids`。不符一律丟掉、不回話、記 `AuditLog`（tool `telegram:webhook`） |
 | 回應 | 一律 `HtmlService.createHtmlOutput('ok')`，第一跳就是 200（`ContentService` 會 302，Telegram 會不斷重送）。每分鐘最多 30 個 update（CacheService 計數） |
 | 流程 | 文字訊息 → 回「收到，處理中…」→ `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
+| 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
 | 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼）、白名單 user id、部署 B 網址、secret（儲存時自動產生；可重新產生）、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
@@ -466,7 +467,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 觸發 | 寄件者 = `OWNER_EMAIL`（自己寄給自己）且 thread 貼有 Gmail 標籤 `agent/inbox`（Config `email_inbox_label`；可在 Gmail 設篩選器自動貼標，例如 `from:me to:me subject:[agent]`） |
 | 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`，每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
 | 內文 | 去掉 `>` 引用、`On … wrote:` 之後、`-- ` 簽名檔，截 8000 字；內文全是引用就用主旨 |
-| 回覆 | `thread.reply(text, {name:'GAS Agent'})` 進同一 thread，寄件者是 owner 本人；送出後把自己的回覆加星避免被當成指令。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕） |
+| 回覆 | `thread.reply(text, {name:'GAS Agent'})` 進同一 thread，寄件者是 owner 本人；送出後把自己的回覆加星避免被當成指令。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕）；Telegram 通道開著時會同時推帶按鈕的 Telegram 通知，回信會標「也已推到 Telegram」 |
 | 設定 | 管理頁「通道」：啟用、標籤、掃描間隔、「建立標籤」「立刻掃一次」 |
 
 Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指向設定的部署 B（含 Telegram 回報的待處理數與最後錯誤）；Email 啟用時標籤存在、掃描旗標已設。
@@ -480,7 +481,8 @@ Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指�
 5. 審批按鈕：Telegram 說 `寄一封信給我自己，主旨 test，內文 hello`（gmail external 需開）→ 回覆附「✅ 批准 gmail_send / ❌ 拒絕」按鈕 → 按批准 → 回「已批准…agent 會接續回覆」→ 一分鐘內收到 agent 的收尾訊息、信件寄達。
 6. `/weekly-report` 在 Telegram 也能用（技能注入）；`/new` 開新 session；`/model` 列模型。
 7. Email：「通道」勾啟用 Email、間隔先設 1 → 儲存 → 「建立標籤」。用 Gmail 寄一封信給自己，主旨 `[agent] 測試`，內文 `列出我今天的行事曆事件`，寄出後到收件匣把這封信貼上標籤 `agent/inbox`（或先在 Gmail 設篩選器）→ 等 1–2 分鐘（或「通道」按「立刻掃一次」）→ 同一 thread 收到 GAS Agent 的回信；原信已加星。驗完把間隔調回 5。
-8. 排程投遞：新增一個排程 `deliver_to = telegram` → 「立即執行」→ Telegram 收到「📋 <名稱> 日期」+ 內容。
+8. 跨通道審批：用 Email 指令信要求寄一封信給自己 → Telegram 收到「⏸ 來自 Email 指令信的任務需要你審批」+ 按鈕 → 按批准 → Email thread 收到 agent 的收尾回信。
+9. 排程投遞：新增一個排程 `deliver_to = telegram` → 「立即執行」→ Telegram 收到「📋 <名稱> 日期」+ 內容。
 
 ## 開發流程
 

@@ -12,6 +12,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
   telegram_allowed_user_ids: '',
   telegram_webhook_url: '',
   telegram_owner_chat_id: '',
+  telegram_notify_approvals: true,
   email_enabled: false,
   email_inbox_label: 'agent/inbox',
   email_scan_every_minutes: 5,
@@ -19,7 +20,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
 
 /**
  * @typedef {{
- *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string,
+ *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean,
  *   emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
  * }} ChannelConfig
  */
@@ -37,6 +38,7 @@ function parseChannelConfig_(map) {
     telegramAllowedUserIds: toStringList_(map.telegram_allowed_user_ids).filter((x) => /^\d+$/.test(x)),
     telegramWebhookUrl: String(map.telegram_webhook_url || '').trim(),
     telegramOwnerChatId: String(map.telegram_owner_chat_id || '').trim(),
+    telegramNotifyApprovals: map.telegram_notify_approvals === undefined ? d.telegram_notify_approvals : toBoolean_(map.telegram_notify_approvals),
     emailEnabled: map.email_enabled === undefined ? d.email_enabled : toBoolean_(map.email_enabled),
     emailInboxLabel: String(map.email_inbox_label || d.email_inbox_label).trim() || d.email_inbox_label,
     emailScanEveryMinutes: clampInt_(map.email_scan_every_minutes, d.email_scan_every_minutes, 1, 1440),
@@ -110,7 +112,7 @@ function deliverTurnToChannel_(payload, result, deps) {
 function channelReplyText_(result, opts) {
   const lines = [String(result.text || '（這輪沒有文字結果）').trim()];
   const pending = (result.steps || []).filter((s) => s.status === 'pending_approval');
-  if (pending.length) lines.push('', `⏸ 待你審批：${pending.map((s) => s.tool).join(', ')}。${(opts && opts.approvalHint) || ''}`.trim());
+  if (pending.length) lines.push('', `⏸ 待你審批：${pending.map((s) => s.tool).join(', ')}。${(opts && opts.approvalHint) || ''}${result.approval_notice && result.approval_notice.ok ? '（也已推到 Telegram，可直接按按鈕）' : ''}`.trim());
   if (result.continued_by) lines.push('', '（任務尚未完成，系統已排續跑，稍後會再回覆。）');
   if (result.skillProposal && result.skillProposal.proposed) lines.push('', `💡 agent 提了一個技能提案（${result.skillProposal.approvalId}），到管理頁「紀錄 → 審批」決定。`);
   return lines.join('\n');

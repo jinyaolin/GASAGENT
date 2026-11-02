@@ -226,6 +226,7 @@ function adminChat(input) {
     curation: r.curation ? describeCuration_(r.curation) : '',
     command: r.command || '',
     skills: r.skills || { loaded: [], missing: [] },
+    approvalNotice: r.approvalNotice || null,
     skillProposal: r.skillProposal ? {
       evaluated: true, proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', status: r.skillProposal.status || '',
       text: r.skillProposal.text || '',

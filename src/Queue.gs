@@ -368,6 +368,7 @@ function summarizeTurnResult_(r) {
     compacted: !!r.compacted,
     skills: r.skills || null,
     skillProposal: r.skillProposal ? { proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', text: truncateText_(r.skillProposal.text, 300).text } : null,
+    approval_notice: r.approvalNotice || null,
   };
 }
 

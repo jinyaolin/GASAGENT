@@ -413,6 +413,36 @@ function deliverTurnToTelegram_(chatId, result, deps) {
   return send(chatId, text, { replyMarkup: telegramApprovalKeyboard_(pending) }) || { messages: 1 };
 }
 
+/**
+ * 任何通道（聊天台 / Email / 排程）停在審批時，推一則帶「批准 / 拒絕」按鈕的通知到 owner 的 Telegram。
+ * Telegram 自己來的任務不用（回覆本身就帶按鈕）。不 throw。
+ * @param {{channel: string, sessionId: string, steps: !Array<TurnStep>, message: (string|undefined)}} info
+ * @param {{cfg: (ChannelConfig|undefined), send: (Function|undefined)}=} deps
+ * @return {{ok: boolean, chatId: string, skipped: string, error: string}}
+ */
+function notifyApprovalsTelegram_(info, deps) {
+  deps = deps || {};
+  const out = { ok: false, chatId: '', skipped: '', error: '' };
+  try {
+    const cfg = deps.cfg || getChannelConfig_();
+    if (!cfg.telegramEnabled || !cfg.telegramNotifyApprovals) { out.skipped = 'disabled'; return out; }
+    const chatId = cfg.telegramOwnerChatId || cfg.telegramAllowedUserIds[0] || '';
+    if (!chatId) { out.skipped = 'no_chat_id'; return out; }
+    const pending = (info.steps || []).filter((s) => s.status === 'pending_approval' && s.approvalId);
+    if (!pending.length) { out.skipped = 'nothing_pending'; return out; }
+    const source = { admin: '管理頁聊天台', email: 'Email 指令信', cron: '排程' }[info.channel] || info.channel;
+    const lines = [`⏸ 來自${source}的任務需要你審批${info.message ? `：「${truncateText_(String(info.message).replace(/\s+/g, ' '), 80).text}」` : ''}`, ''];
+    pending.forEach((s) => lines.push(`• ${s.tool} ${truncateText_(s.argsPreview || '', 200).text}`));
+    lines.push('', `session ${info.sessionId}。按按鈕決定，或到管理頁「紀錄 → 審批」。`);
+    (deps.send || ((c, t, o) => telegramSend_(c, t, o)))(String(chatId), lines.join('\n'), { replyMarkup: telegramApprovalKeyboard_(pending) });
+    out.ok = true;
+    out.chatId = String(chatId);
+  } catch (err) {
+    out.error = String(err && err.message || err);
+  }
+  return out;
+}
+
 // ---- 管理頁用 -------------------------------------------------------------------------------------------
 
 /**

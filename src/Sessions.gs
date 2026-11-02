@@ -7,7 +7,7 @@
  *
  * runSessionTurn_() 是聊天台（M3）與 Queue runner（M4）的共同入口：
  *   載入 / 建立 session → 必要時壓縮 → 記憶快照 + 技能索引（M5；/<skill> 與 cron skills 注入全文）→ runTurn_ → 寫回訊息
- *   → 技能自動提案評估（M5：≥ 5 步且順利結束，同 session 一次）→ curation nudge。
+ *   → 技能自動提案評估（M5：≥ 5 步且順利結束，同 session 一次）→ 審批通知推 Telegram（M6；非 Telegram 來源）→ curation nudge。
  * 全部依賴（store / chat / now）可注入，測試用記憶體 store。
  */
 
@@ -472,7 +472,7 @@ function closeSession_(s, deps) {
  *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), skillStore: (Object|undefined), chat: (Function|undefined),
  *   summarize: (Function|undefined), curate: (Function|undefined), now: (Function|undefined), turnDeps: (Object|undefined)}=} deps
  * @return {!Object} runTurn_ 結果 + {sessionId, sessionCreated, sessionReason, turns, compacted, curation, command,
- *   skills: {loaded, missing}, skillProposal: ?{evaluated, proposed, approvalId, text}}
+ *   skills: {loaded, missing}, skillProposal: ?{evaluated, proposed, approvalId, text}, approvalNotice: ?{ok, chatId, skipped, error}}
  */
 function runSessionTurn_(input, deps) {
   deps = deps || {};
@@ -629,6 +629,13 @@ function runSessionTurn_(input, deps) {
     }
   }
 
+  // 4c. M6：停在審批的動作推一則帶按鈕的 Telegram 通知（Telegram 來源的任務回覆本身就有按鈕，不重複）
+  let approvalNotice = null;
+  const pendingSteps = r.steps.filter((s) => s.status === 'pending_approval' && s.approvalId);
+  if (pendingSteps.length && channel !== 'telegram') {
+    approvalNotice = (deps.notifyApprovals || notifyApprovalsTelegram_)({ channel, sessionId: session.id, steps: pendingSteps, message: parsed.rest });
+  }
+
   // 5. Curation nudge：每 K 輪一次，且本輪沒花太久才做（避免撞 6 分鐘）
   let curation = null;
   if (cfg.curationEveryTurns > 0 && session.turns - session.last_curated_turn >= cfg.curationEveryTurns && (now() - started) < 180000) {
@@ -641,6 +648,6 @@ function runSessionTurn_(input, deps) {
 
   return Object.assign(r, {
     sessionId: session.id, sessionCreated: resolved.created, sessionReason: resolved.reason, turns: session.turns,
-    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal,
+    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal, approvalNotice,
   });
 }
