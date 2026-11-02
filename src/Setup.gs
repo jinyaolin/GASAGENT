@@ -50,6 +50,29 @@ function installAgent() {
 }
 
 /**
+ * 強制重新授權：在編輯器執行這支，每個服務都輕輕碰一下，Apps Script 就會對尚未授權的 scope 跳出同意畫面。
+ * 用在 Doctor「scopes」紅燈但重跑 installAgent() 不跳授權時（installAgent 沒用到 Gmail / Calendar 等，runtime 不會要）。
+ * 只讀不寫；回傳每個服務是否可用。
+ * @return {!Object<string, string>}
+ */
+function reauthorize() {
+  const out = {};
+  const probe = (name, fn) => { try { out[name] = String(fn()); } catch (err) { out[name] = 'ERROR: ' + (err && err.message || err); } };
+  probe('gmail', () => `unread ${GmailApp.getInboxUnreadCount()}`);
+  probe('calendar', () => CalendarApp.getDefaultCalendar().getName());
+  probe('drive', () => DriveApp.getRootFolder().getName());
+  probe('spreadsheets', () => getDb_().getName());
+  probe('documents', () => `${DocumentApp.ParagraphHeading.HEADING1}`);
+  probe('presentations', () => `${SlidesApp.PredefinedLayout.TITLE}`);
+  probe('urlfetch', () => `HTTP ${UrlFetchApp.fetch('https://www.google.com/generate_204', { muteHttpExceptions: true }).getResponseCode()}`);
+  probe('scriptapp', () => `${ScriptApp.getProjectTriggers().length} triggers`);
+  probe('email', () => Session.getEffectiveUser().getEmail());
+  probe('scopes', () => { const g = getGrantedScopes_(); return g.error || `${g.granted.filter((x) => REQUIRED_SCOPES.indexOf(x) !== -1).length} / ${REQUIRED_SCOPES.length} 已授權`; });
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+/**
  * 確保恰好一支每分鐘 trigger 指向 queueTick；多的刪掉。
  * @return {{created: boolean, removedDuplicates: number, total: number}}
  */

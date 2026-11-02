@@ -529,7 +529,7 @@ node scripts/local-tests.js
 | `scripts/install.sh` 在 `create-script` 失敗 | 同上（API 沒開或剛開還沒生效）；或登入的不是目標帳號：`clasp -u <代號> logout` 後重跑 |
 | 多帳號切換後 `clasp` 指令打到錯的專案 | 根目錄 `.clasp.json` 是最後一次腳本複製進來的帳號；一律透過 `scripts/deploy.sh --account <代號>` 操作，或手動 `cp accounts/<代號>/clasp.json .clasp.json` |
 | 管理頁顯示「尚未安裝」 | 回編輯器執行 `installAgent()` |
-| Doctor「scopes」紅燈 | 在編輯器重新執行 `installAgent()`，讓 Google 重新要求授權。**沒有跳出授權畫面**：先把編輯器分頁整頁重新整理（clasp 推的 manifest 不會自動載入），再執行；還是沒跳就到 <https://myaccount.google.com/permissions> 移除「GAS Agent」的存取權後再執行一次，會出現完整同意畫面 |
+| Doctor「scopes」紅燈 | 在編輯器重新執行 `installAgent()`，讓 Google 重新要求授權。**沒有跳出授權畫面**：先把編輯器分頁整頁重新整理（clasp 推的 manifest 不會自動載入），再執行；還是沒跳就在編輯器執行 **`reauthorize()`**（它會實際呼叫 Gmail / Calendar / Drive 等服務，runtime 一定會要缺的 scope）；最後手段是到 <https://myaccount.google.com/permissions> 移除「GAS Agent」的存取權後再執行一次 |
 | Doctor「trigger」顯示 0 支 | 執行 `installAgent()`；若要清掉重裝可先 `removeAgentTriggers()` |
 | `installAgent()` 說 owner 不符 | 這個 script 已綁別的帳號；到「專案設定 → 指令碼屬性」刪 `OWNER_EMAIL` 再執行 |
 | 側欄分頁點了整頁空白、網址變成 `…script.googleusercontent.com/userCodeAppPanel#/…` | 線上是舊版本：`clasp deploy -i <deploymentId>` 推新版本。根因是 HtmlService 注入 `<base target="_top">`，導航已改為 `preventDefault` + 自設 `location.hash` |
