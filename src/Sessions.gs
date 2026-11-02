@@ -6,7 +6,8 @@
  * 已被壓成 summary（放在 system prompt 的「先前對話摘要」區塊）。真相在 Sheet，CacheService 只當熱快取。
  *
  * runSessionTurn_() 是聊天台（M3）與 Queue runner（M4）的共同入口：
- *   載入 / 建立 session → 必要時壓縮 → 記憶快照 → runTurn_ → 寫回訊息 → curation nudge。
+ *   載入 / 建立 session → 必要時壓縮 → 記憶快照 + 技能索引（M5；/<skill> 與 cron skills 注入全文）→ runTurn_ → 寫回訊息
+ *   → 技能自動提案評估（M5：≥ 5 步且順利結束，同 session 一次）→ curation nudge。
  * 全部依賴（store / chat / now）可注入，測試用記憶體 store。
  */
 
@@ -136,8 +137,9 @@ function deserializeMessage_(role, content) {
  * @typedef {{
  *   id: string, channel: string, external_id: string, title: string, summary: string, model_override: string,
  *   token_est: number, created: ?Date, last_active: ?Date, status: string, compact_seq: number, turns: number,
- *   last_curated_turn: number, embedding: ?Array<number>, _row: (number|undefined)
+ *   last_curated_turn: number, embedding: ?Array<number>, skill_proposed_turn: number, _row: (number|undefined)
  * }} SessionRow
+ * skill_proposed_turn（M5）：已在第幾輪請模型評估過技能提案；0 = 還沒。同 session 只評估一次。
  */
 
 /**
@@ -163,6 +165,7 @@ function parseSessionRow_(r) {
     turns: toNumber_(r.turns, 0),
     last_curated_turn: toNumber_(r.last_curated_turn, 0),
     embedding: Array.isArray(embedding) ? embedding : null,
+    skill_proposed_turn: toNumber_(r.skill_proposed_turn, 0),
   };
 }
 
@@ -176,6 +179,7 @@ function serializeSession_(s) {
     model_override: s.model_override, token_est: s.token_est, created: s.created, last_active: s.last_active,
     status: s.status, compact_seq: s.compact_seq, turns: s.turns, last_curated_turn: s.last_curated_turn,
     embedding: s.embedding ? JSON.stringify(s.embedding) : '',
+    skill_proposed_turn: s.skill_proposed_turn || 0,
   };
 }
 
@@ -205,7 +209,7 @@ function sheetSessionStore_() {
       const now = new Date();
       const s = Object.assign({
         id: newSessionId_(), channel: 'admin', external_id: '', title: '', summary: '', model_override: '', token_est: 0,
-        created: now, last_active: now, status: 'active', compact_seq: 0, turns: 0, last_curated_turn: 0, embedding: null,
+        created: now, last_active: now, status: 'active', compact_seq: 0, turns: 0, last_curated_turn: 0, embedding: null, skill_proposed_turn: 0,
       }, fields || {});
       s._row = appendTableRow_('Sessions', serializeSession_(s));
       return s;
@@ -401,13 +405,16 @@ function chatFastOrMain_(input) {
 // ---- 輪次入口 -----------------------------------------------------------------------------
 
 /**
- * 解析聊天輸入的斜線指令。純函式。
+ * 解析聊天輸入的斜線指令：/new、/status，或 M5 的 /<skill-name>（其餘開頭為 / 的字串當一般訊息）。純函式。
  * @param {string} text
- * @return {{command: string, rest: string}} command 為 '' 表示一般訊息
+ * @return {{command: string, rest: string, skill: string}} command 為 '' 表示一般訊息；'skill' 時 skill 為技能名
  */
 function parseSlashCommand_(text) {
   const m = /^\/(new|status)\b\s*([\s\S]*)$/i.exec(String(text || '').trim());
-  return m ? { command: m[1].toLowerCase(), rest: m[2].trim() } : { command: '', rest: String(text || '').trim() };
+  if (m) return { command: m[1].toLowerCase(), rest: m[2].trim(), skill: '' };
+  const sk = parseSkillSlash_(text);
+  if (sk) return { command: 'skill', rest: sk.rest, skill: sk.name };
+  return { command: '', rest: String(text || '').trim(), skill: '' };
 }
 
 /**
@@ -457,11 +464,13 @@ function closeSession_(s, deps) {
 /**
  * 聊天台 / Queue 共同入口：一輪含持久化。
  * @param {{message: string, sessionId: (string|undefined), channel: (string|undefined), providerId: (string|undefined),
- *   systemExtra: (string|undefined), mode: (string|undefined)}} input
+ *   systemExtra: (string|undefined), mode: (string|undefined), skills: (string|undefined)}} input
+ *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt
  * @param {{store: (Object|undefined), cfg: (AgentConfig|undefined), toolConfig: (ToolConfig|undefined),
- *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), chat: (Function|undefined),
+ *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), skillStore: (Object|undefined), chat: (Function|undefined),
  *   summarize: (Function|undefined), curate: (Function|undefined), now: (Function|undefined), turnDeps: (Object|undefined)}=} deps
- * @return {!Object} runTurn_ 結果 + {sessionId, sessionCreated, sessionReason, turns, compacted, curation, command}
+ * @return {!Object} runTurn_ 結果 + {sessionId, sessionCreated, sessionReason, turns, compacted, curation, command,
+ *   skills: {loaded, missing}, skillProposal: ?{evaluated, proposed, approvalId, text}}
  */
 function runSessionTurn_(input, deps) {
   deps = deps || {};
@@ -486,7 +495,7 @@ function runSessionTurn_(input, deps) {
     }
     if (!parsed.rest) {
       return { text: lines.join('\n'), steps: [], stopped: '', usage: { prompt: 0, completion: 0 }, costEst: 0, ms: now() - started, llmCalls: 0, fallbacks: [],
-        sessionId: fresh.id, sessionCreated: true, sessionReason: '', turns: 0, compacted: false, curation: closed ? closed.curation : null, command: 'new' };
+        sessionId: fresh.id, sessionCreated: true, sessionReason: '', turns: 0, compacted: false, curation: closed ? closed.curation : null, command: 'new', skills: { loaded: [], missing: [] }, skillProposal: null };
     }
     // /new 後面帶訊息：在新 session 繼續跑。
     input = Object.assign({}, input, { message: parsed.rest, sessionId: fresh.id });
@@ -494,14 +503,39 @@ function runSessionTurn_(input, deps) {
     const s = input.sessionId ? store.get(input.sessionId) : null;
     const text = s ? `session ${s.id}：${s.turns} 輪，約 ${s.token_est} tokens，${s.summary ? '有' : '無'}摘要，上次活動 ${fmtDate_(s.last_active)}。` : '目前沒有 session，送出第一則訊息就會建立。';
     return { text, steps: [], stopped: '', usage: { prompt: 0, completion: 0 }, costEst: 0, ms: now() - started, llmCalls: 0, fallbacks: [],
-      sessionId: s ? s.id : '', sessionCreated: false, sessionReason: '', turns: s ? s.turns : 0, compacted: false, curation: null, command: 'status' };
+      sessionId: s ? s.id : '', sessionCreated: false, sessionReason: '', turns: s ? s.turns : 0, compacted: false, curation: null, command: 'status', skills: { loaded: [], missing: [] }, skillProposal: null };
+  }
+
+  const toolConfig = deps.toolConfig || getToolConfig_();
+  const registry = deps.registry || getToolRegistry_();
+  const memoryStore = deps.memoryStore || sheetMemoryStore_();
+  const skillStore = deps.skillStore || (registry.byName.skill_load ? driveSkillStore_() : null);
+
+  // M5：/<skill-name> → 技能全文注入；找不到就直接回錯誤文字（不打模型、不建 session）。
+  const skillBlocks = [];
+  const skillsReport = { loaded: [], missing: [] };
+  const wantSkills = [];
+  if (parsed.command === 'skill') wantSkills.push(parsed.skill);
+  String(input.skills || '').split(/[\s,;，、]+/).forEach((n) => { if (n) wantSkills.push(n); });
+  if (wantSkills.length) {
+    const got = skillStore ? skillBlocksFor_(wantSkills, skillStore) : { blocks: [], loaded: [], missing: wantSkills.slice() };
+    skillBlocks.push(...got.blocks);
+    skillsReport.loaded = got.loaded;
+    skillsReport.missing = got.missing;
+    if (parsed.command === 'skill' && got.loaded.indexOf(parsed.skill) === -1) {
+      let names = [];
+      try { names = skillStore ? enabledSkills_(getSkillIndex_(skillStore)).map((x) => x.name) : []; } catch (err) { names = []; }
+      const text = `找不到技能「${parsed.skill}」${got.missing.length && /（/.test(got.missing[0]) ? '：' + got.missing[0] : ''}。` +
+        `可用技能：${names.length ? names.map((x) => '/' + x).join('、') : '（無；到管理頁「技能」分頁新增）'}。`;
+      return { text, steps: [], stopped: '', usage: { prompt: 0, completion: 0 }, costEst: 0, ms: now() - started, llmCalls: 0, fallbacks: [],
+        sessionId: input.sessionId || '', sessionCreated: false, sessionReason: '', turns: 0, compacted: false, curation: null, command: 'skill',
+        skills: skillsReport, skillProposal: null };
+    }
+    if (parsed.command === 'skill' && !parsed.rest) parsed.rest = SKILL_DEFAULT_MESSAGE;
   }
 
   const resolved = resolveSession_(input.sessionId || '', channel, cfg, store, now);
   const session = resolved.session;
-  const toolConfig = deps.toolConfig || getToolConfig_();
-  const registry = deps.registry || getToolRegistry_();
-  const memoryStore = deps.memoryStore || sheetMemoryStore_();
 
   // 1. 載入活訊息，必要時壓縮
   let live = store.loadMessages(session.id, session.compact_seq);
@@ -520,10 +554,25 @@ function runSessionTurn_(input, deps) {
   const contextBlocks = [];
   if (snapshot) contextBlocks.push(snapshot);
   if (session.summary) contextBlocks.push('## 先前對話摘要（本 session 較早的部分已壓縮）\n' + session.summary);
-  contextBlocks.push(`## 本 session\nid=${session.id}，這是第 ${session.turns + 1} 輪。使用者可用 /new 開新 session。`);
+  // M5：啟用技能的索引（名稱 + 描述）；全文注入的技能接在後面
+  if (skillStore) {
+    try {
+      const indexBlock = buildSkillsIndexBlock_(getSkillIndex_(skillStore));
+      if (indexBlock) contextBlocks.push(indexBlock);
+    } catch (err) {
+      contextBlocks.push(`## 可用技能\n（技能索引讀取失敗：${err && err.message || err}）`);
+    }
+  }
+  skillBlocks.forEach((b) => contextBlocks.push(b));
+  contextBlocks.push(`## 本 session\nid=${session.id}，這是第 ${session.turns + 1} 輪。使用者可用 /new 開新 session，/<技能名> 直接套用技能。`);
 
   // 3. 跑一輪
   const history = live.map((m) => { const o = Object.assign({}, m); delete o.seq; return o; });
+  const turnDeps = Object.assign({ registry, config: toolConfig, chat: deps.chat, now: deps.now }, deps.turnDeps || {}, {
+    // 時間預算：Config turn_budget_seconds 與呼叫端（Queue 剩餘預算）取小。
+    budgetMs: Math.min(cfg.turnBudgetSeconds * 1000, (deps.turnDeps && deps.turnDeps.budgetMs) || Infinity),
+    executeDeps: Object.assign({ registry, config: toolConfig, memoryStore, sessionStore: store, agentConfig: cfg, skillStore }, (deps.turnDeps && deps.turnDeps.executeDeps) || {}),
+  });
   const r = runTurn_({
     message: parsed.rest,
     history,
@@ -532,11 +581,7 @@ function runSessionTurn_(input, deps) {
     mode: input.mode || 'interactive',
     systemExtra: input.systemExtra || '',
     contextBlocks,
-  }, Object.assign({ registry, config: toolConfig, chat: deps.chat, now: deps.now }, deps.turnDeps || {}, {
-    // 時間預算：Config turn_budget_seconds 與呼叫端（Queue 剩餘預算）取小。
-    budgetMs: Math.min(cfg.turnBudgetSeconds * 1000, (deps.turnDeps && deps.turnDeps.budgetMs) || Infinity),
-    executeDeps: Object.assign({ registry, config: toolConfig, memoryStore, sessionStore: store, agentConfig: cfg }, (deps.turnDeps && deps.turnDeps.executeDeps) || {}),
-  }));
+  }, turnDeps);
 
   // 4. 寫回這輪新增的訊息（system 與 history 之外的）
   const newMessages = r.messages.slice(1 + history.length);
@@ -547,6 +592,40 @@ function runSessionTurn_(input, deps) {
   if (!session.title) session.title = truncateText_(parsed.rest.replace(/\s+/g, ' '), 60).text;
   session.token_est = estimateTokens_(session.summary) + live.concat(newMessages).reduce((acc, m) => acc + estimateMessageTokens_(m), 0);
   store.update(session);
+
+  // 4b. M5：複雜任務（≥ SKILL_PROPOSE_MIN_STEPS 步、順利結束）後請模型評估一次是否值得存成技能；同 session 只問一次。
+  //     這次評估的訊息不寫進 Messages（避免污染對話），結果放 skillProposal 給 UI 顯示；提案本身在 Approvals。
+  let skillProposal = null;
+  if (shouldNudgeSkillProposal_(r, session, { hasSkillManage: !!(registry.byName.skill_manage && isToolAllowed_(registry.byName.skill_manage, toolConfig.rbac)), elapsedMs: now() - started })) {
+    session.skill_proposed_turn = session.turns;
+    store.update(session);
+    try {
+      const nudge = runTurn_({
+        message: skillProposalNudgeMessage_(r.steps.length),
+        history: r.messages.slice(1),
+        providerId: input.providerId || session.model_override || '',
+        sessionId: session.id,
+        mode: input.mode || 'interactive',
+        systemExtra: input.systemExtra || '',
+        contextBlocks,
+      }, Object.assign({}, turnDeps, { budgetMs: Math.min(SKILL_PROPOSE_BUDGET_MS, turnDeps.budgetMs || SKILL_PROPOSE_BUDGET_MS), maxSteps: 2 }));
+      const proposalStep = nudge.steps.find((s) => s.tool === 'skill_manage');
+      skillProposal = {
+        evaluated: true,
+        proposed: !!(proposalStep && proposalStep.status === 'pending_approval'),
+        approvalId: proposalStep ? proposalStep.approvalId || '' : '',
+        status: proposalStep ? proposalStep.status : '',
+        text: truncateText_(nudge.text, 500).text,
+        steps: nudge.steps,
+      };
+      r.usage.prompt += nudge.usage.prompt;
+      r.usage.completion += nudge.usage.completion;
+      r.costEst = Math.round((r.costEst + nudge.costEst) * 1e6) / 1e6;
+      r.llmCalls += nudge.llmCalls;
+    } catch (err) {
+      skillProposal = { evaluated: true, proposed: false, approvalId: '', status: 'error', text: String(err && err.message || err), steps: [] };
+    }
+  }
 
   // 5. Curation nudge：每 K 輪一次，且本輪沒花太久才做（避免撞 6 分鐘）
   let curation = null;
@@ -560,6 +639,6 @@ function runSessionTurn_(input, deps) {
 
   return Object.assign(r, {
     sessionId: session.id, sessionCreated: resolved.created, sessionReason: resolved.reason, turns: session.turns,
-    compacted, curation, command: parsed.command,
+    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal,
   });
 }

@@ -11,6 +11,7 @@
  * - `web_allowed_domains`：web_fetch 的域名白名單（一行一個；空 = 全拒）。
  * - `persona`：system prompt 開頭的人格描述。
  * - `slides_template_id`：slides_create_deck 預設複製的範本簡報（Drive file id 或網址）；空 = Google 預設主題。
+ * - `skills_folder_id`（M5）：技能資料夾的 Drive id；空 = 自動建 `GAS Agent/skills`。
  *
  * 全部外部依賴（registry、config、記錄寫入、溢寫儲存）都可由 deps 注入，測試不碰 Drive / Sheet。
  */
@@ -23,6 +24,7 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   WEB_ALLOWED_DOMAINS: 'web_allowed_domains',
   PERSONA: 'persona',
   SLIDES_TEMPLATE_ID: 'slides_template_id',
+  SKILLS_FOLDER_ID: 'skills_folder_id',
 });
 
 /** RBAC 設定 key 前綴：rbac.<toolset>。 */
@@ -51,7 +53,7 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  * @typedef {{
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
- *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string
+ *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string
  * }} ToolConfig
  */
 
@@ -91,6 +93,7 @@ function parseToolConfig_(map) {
     webAllowedDomains: parseAllowedDomains_(map[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS]),
     persona: String(map[TOOL_CONFIG_KEYS.PERSONA] || '').trim(),
     slidesTemplateId: String(map[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] || '').trim(),
+    skillsFolderId: String(map[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] || '').trim(),
   };
 }
 
@@ -115,6 +118,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS in map)) missing[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = '';
   if (!(TOOL_CONFIG_KEYS.PERSONA in map)) missing[TOOL_CONFIG_KEYS.PERSONA] = '';
   if (!(TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID in map)) missing[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = '';
+  if (!(TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID in map)) missing[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = '';
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
   if (keys.length) setConfigValues_(missing);
@@ -151,6 +155,8 @@ function saveToolConfig_(input) {
   values[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = parseAllowedDomains_(input.web_allowed_domains).join('\n');
   values[TOOL_CONFIG_KEYS.PERSONA] = String(input.persona || '').trim();
   values[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = parseDriveId_(input.slides_template_id);
+  // skills_folder_id 由「技能」分頁管理；工具分頁沒送就不動。
+  if (input.skills_folder_id !== undefined) values[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = parseDriveId_(input.skills_folder_id);
   setConfigValues_(values);
   return getToolConfig_();
 }
@@ -437,9 +443,25 @@ function executeTool_(name, args, ctx, deps) {
   const denied = checkToolAccess_(tool, config.rbac);
   if (denied) return finish('denied', toolErrorText_('rbac_denied', denied));
 
-  if (!ctx.approved && needsApproval_(tool, config.approvalPolicy, mode)) {
+  // deps 裡除了 executor 自己用的四個，其餘（memoryStore / sessionStore / agentConfig / skillStore / embed…）都透給 handler，測試可注入假 store。
+  const extras = {};
+  Object.keys(deps).forEach((k) => { if (['registry', 'config', 'sink', 'spill'].indexOf(k) === -1) extras[k] = deps[k]; });
+  const handlerCtx = Object.assign({}, ctx, extras, { mode, config, spill: deps.spill || null, registry });
+
+  // 提案型工具（M5 skill_manage）：未批准時不執行，先讓工具自己驗證並給 reason，再走與 X 類相同的審批路徑。
+  let reason = '';
+  if (!ctx.approved && typeof tool.proposal === 'function') {
+    try {
+      reason = String(tool.proposal(normalizedArgs, handlerCtx).reason || `提案：${name}`);
+    } catch (err) {
+      return finish('invalid', toolErrorText_('invalid_proposal', String(err && err.message || err)));
+    }
+  } else if (!ctx.approved && needsApproval_(tool, config.approvalPolicy, mode)) {
+    reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；審批策略 ${config.approvalPolicy}；模式 ${mode}`;
+  }
+  if (reason) {
     const approvalId = newApprovalId_();
-    const reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；審批策略 ${config.approvalPolicy}；模式 ${mode}`;
+    const isProposal = typeof tool.proposal === 'function';
     try {
       sink.approval({
         id: approvalId,
@@ -457,16 +479,15 @@ function executeTool_(name, args, ctx, deps) {
     return finish('pending_approval', JSON.stringify({
       status: 'pending_approval',
       approval_id: approvalId,
-      message: `此動作待批准（${tool.name}）。owner 會在管理頁「紀錄 → 審批」決定；批准後系統會直接執行一次。請不要重試同一動作，向使用者說明「已送出審批」並結束即可。`,
+      message: isProposal
+        ? `提案已送出（${tool.name}），owner 會在管理頁「紀錄 → 審批」決定，批准後才會寫入。請不要重送同一提案，向使用者說明「已提出提案待審批」並結束即可。`
+        : `此動作待批准（${tool.name}）。owner 會在管理頁「紀錄 → 審批」決定；批准後系統會直接執行一次。請不要重試同一動作，向使用者說明「已送出審批」並結束即可。`,
     }), { approvalId });
   }
 
-  // deps 裡除了 executor 自己用的四個，其餘（memoryStore / sessionStore / agentConfig / embed…）都透給 handler，測試可注入假 store。
-  const extras = {};
-  Object.keys(deps).forEach((k) => { if (['registry', 'config', 'sink', 'spill'].indexOf(k) === -1) extras[k] = deps[k]; });
   let result;
   try {
-    result = tool.handler(normalizedArgs, Object.assign({}, ctx, extras, { mode, config, spill: deps.spill || null, registry }));
+    result = tool.handler(normalizedArgs, handlerCtx);
   } catch (err) {
     const message = String(err && err.message || err);
     return finish('error', toolErrorText_('tool_error', message), { error: message });
@@ -545,7 +566,7 @@ function sheetApprovalStore_() {
  * owner 決定一筆審批。批准 = 立刻以 approved=true 執行該工具一次（RBAC 仍檢）並把結果寫回；拒絕 = 標記 denied。
  * M4：若 Approvals.job_id 對應一個仍 active 的 session（M2 起 job_id 存 sessionId），再 enqueue 一個 continuation job，
  * 以 user 訊息「（系統）先前待審批的 X 已由 owner 批准並執行，結果：…」（拒絕也通知）接回該 session 續跑。
- * curation 提議（reason 以 curation 開頭）不是對話中的動作，不續跑。
+ * curation 提議（reason 以 curation 開頭）與技能提案（M5，reason 以「技能提案」開頭）不是對話中的動作，不續跑。
  * @param {string} id
  * @param {boolean} approve
  * @param {{approvalStore: (Object|undefined), sessionStore: (Object|undefined), queueStore: (Object|undefined),
@@ -583,7 +604,7 @@ function decideApproval_(id, approve, deps) {
  * @return {?Object} job
  */
 function enqueueApprovalContinuation_(row, approved, outcome, deps) {
-  if (/^curation/i.test(String(row.reason || ''))) return null;
+  if (/^curation/i.test(String(row.reason || '')) || String(row.reason || '').indexOf(SKILL_PROPOSAL_REASON_PREFIX) === 0) return null;
   const sessionId = String(row.job_id || '');
   if (!sessionId) return null;
   let session = null;

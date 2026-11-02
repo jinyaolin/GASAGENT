@@ -7,7 +7,7 @@
 
 /**
  * 安裝或修復 agent。幂等：重跑不會重建 DB、不會重複裝 trigger。
- * @return {{owner: string, db: {id: string, url: string, created: boolean}, schema: Object, trigger: Object, toolConfig: Object, version: string}}
+ * @return {{owner: string, db: {id: string, url: string, created: boolean}, schema: Object, trigger: Object, toolConfig: Object, cronNextRun: string, skills: Object, version: string}}
  * @throws {Error} 目前帳號與既有 OWNER_EMAIL 不符
  */
 function installAgent() {
@@ -31,6 +31,9 @@ function installAgent() {
   // M4：CRON_NEXT_RUN 旗標與 Cron tab 對齊（queueTick 閒置時靠它判斷有沒有排程要跑）。
   let cronNextRun = '';
   try { cronNextRun = refreshCronNextRunProp_(sheetCronStore_().list()); } catch (err) { cronNextRun = `failed: ${err && err.message || err}`; }
+  // M5：技能資料夾為空就寫入兩個內建範例技能（weekly-report / deck-planning）。
+  let skills = {};
+  try { skills = { folder: skillsFolder_().getName(), installed: installBuiltinSkills_() }; } catch (err) { skills = { error: String(err && err.message || err) }; }
 
   const summary = {
     version: APP_VERSION,
@@ -40,6 +43,7 @@ function installAgent() {
     trigger,
     toolConfig,
     cronNextRun,
+    skills,
   };
   console.log(JSON.stringify(summary, null, 2));
   return summary;

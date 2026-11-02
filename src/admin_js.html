@@ -9,7 +9,7 @@
     { id: 'models', label: '模型' },
     { id: 'tools', label: '工具' },
     { id: 'memory', label: '記憶' },
-    { id: 'skills', label: '技能', milestone: 'M5' },
+    { id: 'skills', label: '技能' },
     { id: 'cron', label: '排程' },
     { id: 'logs', label: '紀錄' },
     { id: 'settings', label: '設定' },
@@ -459,12 +459,12 @@
   const STEP_STATUS_LABEL = { ok: '完成', error: '失敗', denied: 'RBAC 拒絕', invalid: '參數錯誤', pending_approval: '待審批' };
 
   async function renderChat(root) {
-    root.append(...header('聊天台', 'Session 持久化在 DB 的 Sessions / Messages。輸入 /new 開新 session、/status 看目前 session；閒置超過設定小時會自動開新的。'));
+    root.append(...header('聊天台', 'Session 持久化在 DB 的 Sessions / Messages。輸入 /new 開新 session、/status 看目前 session、/<技能名> 直接套用技能全文；閒置超過設定小時會自動開新的。'));
 
     const $provider = el('select', { title: '選擇 provider' }, el('option', { value: '' }, '自動（main 備援鏈）'));
     const $session = el('select', { title: '切換 session' }, el('option', { value: '' }, '— 新 session —'));
     const $system = el('textarea', { rows: 2, placeholder: '額外 system 指示（選填；人格請到「工具」分頁設定）' });
-    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。/new 開新 session。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
+    const $input = el('textarea', { rows: 3, placeholder: '輸入訊息，Ctrl / ⌘ + Enter 送出。/new 開新 session；/weekly-report 之類套用技能。例：找出上週收到關於 X 的信，整理成一份 Doc，並草擬回信' });
     const $log = el('div', { class: 'chat-log' });
     const $sessInfo = el('span', { class: 'hint' });
     const $bg = el('input', { type: 'checkbox', title: '把這則訊息排進 Queue，由每分鐘 trigger 執行並輪詢結果（驗證 M4 Queue 路徑；超過時間預算會自動續跑）' });
@@ -549,11 +549,14 @@
           r.stopped ? `中止：${r.stopped}` : null,
           r.jobChain ? `Queue job：${r.jobChain.join(' → ')}` : null,
           r.compacted ? '本輪前已壓縮較早對話' : null,
+          r.skills && r.skills.loaded && r.skills.loaded.length ? `技能：${r.skills.loaded.join(', ')}` : null,
+          r.skills && r.skills.missing && r.skills.missing.length ? `找不到技能：${r.skills.missing.join(', ')}` : null,
+          r.skillProposal ? (r.skillProposal.proposed ? `技能提案已送審（${r.skillProposal.approvalId}）→ 紀錄 → 審批` : `技能提案評估：${r.skillProposal.text || r.skillProposal.status || '不需要'}`) : null,
           r.curation ? `記憶整理：${r.curation}` : null,
           r.sessionReason || null,
         ].filter(Boolean).join(' · ');
         const fallbacks = (r.fallbacks || []).map((f) => `備援：${f.error}`).join('\n');
-        $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : ''), false, r.steps));
+        $pending.replaceWith(bubble('assistant', r.text || '（空回覆）', meta + (fallbacks ? '\n' + fallbacks : ''), false, (r.steps || []).concat(r.skillProposal && r.skillProposal.steps ? r.skillProposal.steps : [])));
         if (r.sessionId && r.sessionId !== sessionId) {
           sessionId = r.sessionId;
           if (r.command === 'new') $log.innerHTML = '';
@@ -1030,22 +1033,44 @@
       const btnApprove = el('button', { class: 'primary small', onclick: () => decide(a, true, [btnApprove, btnDeny], $result) }, '批准並執行');
       const btnDeny = el('button', { class: 'small danger', onclick: () => decide(a, false, [btnApprove, btnDeny], $result) }, '拒絕');
       let args = a.args;
-      try { args = JSON.stringify(JSON.parse(a.args), null, 2); } catch (err) { /* 原樣 */ }
+      let parsedArgs = null;
+      try { parsedArgs = JSON.parse(a.args); args = JSON.stringify(parsedArgs, null, 2); } catch (err) { /* 原樣 */ }
+      const isSkill = a.tool === 'skill_manage' && parsedArgs;
       return el('div', { class: 'approval ' + (pending ? 'pending' : 'state-' + a.state) }, [
         el('div', { class: 'step-head' }, [
           el('code', {}, a.tool),
           el('span', { class: 'badge' }, pending ? '待審批' : a.state === 'approved' ? '已批准' : '已拒絕'),
           el('span', { class: 'meta' }, `${a.id} · ${a.created_at || ''}${a.decided_at ? ' → ' + a.decided_at : ''} · ${a.reason}`),
         ]),
-        el('pre', { class: 'approval-args' }, args),
+        isSkill ? skillProposalPreview(parsedArgs) : el('pre', { class: 'approval-args' }, args),
         a.result ? el('div', { class: 'step-result' }, a.result) : null,
         pending ? el('div', { class: 'toolbar' }, [btnApprove, btnDeny]) : null,
         $result,
       ]);
     }
 
+    /** skill_manage 提案的 diff 預覽：create 顯示全文、patch 顯示 find → replace。 */
+    function skillProposalPreview(p) {
+      const box = el('div', { class: 'skill-diff' });
+      box.append(el('div', { class: 'step-head' }, [el('span', { class: 'badge' }, p.action === 'create' ? '新建技能' : '修補技能'), el('code', {}, p.name || ''),
+        p.description ? el('span', { class: 'meta' }, p.description) : null,
+        p.triggers && p.triggers.length ? el('span', { class: 'meta' }, `觸發：${[].concat(p.triggers).join('、')}`) : null]));
+      if (p.action === 'create') {
+        box.append(el('pre', { class: 'approval-args diff-add' }, p.content || '（無正文）'));
+      } else {
+        if (p.patch_find !== undefined) {
+          box.append(el('div', { class: 'meta' }, '找到（將被取代）'), el('pre', { class: 'approval-args diff-del' }, p.patch_find || '（空）'),
+            el('div', { class: 'meta' }, '取代成'), el('pre', { class: 'approval-args diff-add' }, p.patch_replace || '（刪除該片段）'));
+        }
+        if (p.content) box.append(el('div', { class: 'meta' }, '整份新正文'), el('pre', { class: 'approval-args diff-add' }, p.content));
+        if (p.patch_find === undefined && !p.content) box.append(el('div', { class: 'meta' }, '只改 description / triggers / version'));
+      }
+      box.append(el('details', {}, [el('summary', { class: 'meta' }, '原始參數 JSON'), el('pre', { class: 'approval-args' }, JSON.stringify(p, null, 2))]));
+      return box;
+    }
+
     async function decide(a, approve, buttons, $result) {
-      if (approve && !confirm(`批准並立刻執行 ${a.tool}？\n\n${a.args}`)) return;
+      if (approve && !confirm(a.tool === 'skill_manage' ? `批准這個技能提案並寫入 Drive（${a.reason}）？` : `批准並立刻執行 ${a.tool}？\n\n${a.args}`)) return;
       buttons.forEach((b) => { b.disabled = true; });
       $result.innerHTML = '';
       try {
@@ -1195,7 +1220,7 @@
       const $prompt = el('textarea', { rows: 4, style: 'font-family: inherit', placeholder: '例：搜尋昨天收到的信件（newer_than:1d），挑出重要的 5–10 封，整理成「重點 / 待回覆 / 可忽略」三段摘要。' });
       const $deliver = el('select', {}, data.deliverTargets.map((t) => el('option', { value: t }, DELIVER_LABEL[t] || t)));
       const $model = el('select', {}, [el('option', { value: '' }, '自動（main 備援鏈）')].concat(data.providers.map((p) => el('option', { value: p.id }, `${p.label || p.id}（${p.role} · ${p.model}）`))));
-      const $skills = el('input', { type: 'text', placeholder: 'M5 才生效' });
+      const $skills = el('input', { type: 'text', placeholder: '例：weekly-report（逗號分隔多個）' });
       const $enabled = el('input', { type: 'checkbox' });
       if (c) { $name.value = c.name; $schedule.value = c.schedule; $prompt.value = c.prompt; $deliver.value = c.deliver_to; $model.value = c.model_pin; $skills.value = c.skills; $enabled.checked = c.enabled; }
       else { $deliver.value = 'doc'; $enabled.checked = true; }
@@ -1209,7 +1234,7 @@
           field('schedule *', $schedule, '5 欄 cron（分 時 日 月 週；* , - */n）或 hourly / daily HH:MM / weekly <mon..sun> HH:MM；時區 Asia/Taipei'),
           field('投遞', $deliver, 'email 只寄給 owner 自己，不走審批'),
           field('模型', $model, '空 = main 備援鏈'),
-          field('技能', $skills, '逗號分隔；M5 才會載入'),
+          field('技能', $skills, '逗號分隔技能名；執行時把技能全文注入 system prompt（名稱見「技能」分頁）'),
           field('啟用', el('label', { class: 'checkbox' }, [$enabled, ' 啟用'])),
         ]),
         field('任務指令 *', $prompt, '會在全新 session、無人模式下執行：寫清楚要查什麼、產出什麼格式；不要期待模型反問'),
@@ -1235,6 +1260,127 @@
     load();
   }
 
+  // ---- 技能（M5）---------------------------------------------------------------------------------
+
+  async function renderSkills(root) {
+    root.append(...header('技能', 'Drive 資料夾裡每個子資料夾一個 SKILL.md（agentskills.io 格式）。system prompt 只放啟用技能的名稱與描述，模型用 skill_load 載全文；聊天台輸入 /<技能名> 直接套用。agent 的 skill_manage 提案在「紀錄 → 審批」批准後才會寫入。'));
+    const $status = el('span', { class: 'hint' });
+    const $table = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+    const $form = el('div', { class: 'panel', style: 'display:none' });
+    const $folder = el('div', { class: 'meta' });
+    const $msg = el('div');
+    const btnAdd = el('button', { class: 'primary', onclick: () => openForm(null) }, '新增技能');
+    const btnReindex = el('button', { onclick: () => load('adminReindexSkills') }, '重新索引');
+    const btnFolder = el('button', { onclick: () => changeFolder() }, '更換資料夾');
+    root.append(el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [btnAdd, btnReindex, btnFolder, $status]), $folder, $table, $msg]), $form);
+    let data = { skills: [], folder: null, installed: [] };
+
+    async function load(fn) {
+      $table.innerHTML = '';
+      $table.append(el('div', { class: 'loading' }, '載入中…'));
+      $msg.innerHTML = '';
+      try {
+        data = await call(fn || 'adminListSkills');
+        renderTable();
+      } catch (err) {
+        $table.innerHTML = '';
+        $table.append(errorBox(err));
+      }
+    }
+
+    function renderTable() {
+      $status.textContent = `${data.skills.length} 個技能（${data.skills.filter((x) => x.enabled && !x.error).length} 啟用）· 索引快取 15 分鐘`;
+      $folder.innerHTML = '';
+      if (data.folder) $folder.append('資料夾：', el('a', { href: data.folder.url, target: '_blank', rel: 'noopener' }, data.folder.name), data.folder.configured ? '（Config skills_folder_id）' : '（預設 GAS Agent/skills）');
+      if (data.installed && data.installed.length) $msg.append(el('div', { class: 'summary ok' }, `已寫入內建範例技能：${data.installed.join(', ')}`));
+      $table.innerHTML = '';
+      if (!data.skills.length) { $table.append(el('div', { class: 'placeholder' }, '尚無技能。按「新增技能」，或在 Drive 資料夾放 <名稱>/SKILL.md 後按「重新索引」。')); return; }
+      const thead = el('thead', {}, el('tr', {}, ['', '名稱', '描述', '觸發 / 版本', '更新', ''].map((h) => el('th', {}, h))));
+      const tbody = el('tbody', {}, data.skills.map((sk) => {
+        const btnEdit = el('button', { class: 'small', onclick: () => openForm(sk) }, '編輯');
+        const btnToggle = el('button', { class: 'small', onclick: () => toggle(sk, btnToggle) }, sk.enabled ? '停用' : '啟用');
+        const btnOpen = sk.url ? el('a', { href: sk.url, target: '_blank', rel: 'noopener', class: 'small' }, '開啟 Drive 檔') : null;
+        return el('tr', { class: sk.enabled && !sk.error ? '' : 'disabled-row' }, [
+          el('td', {}, el('span', { class: 'dot ' + (sk.enabled && !sk.error ? 'on' : 'off'), title: sk.error ? '壞檔' : sk.enabled ? '啟用' : '停用' })),
+          el('td', {}, [el('code', {}, '/' + sk.name), sk.error ? el('div', { class: 'warn-text' }, sk.error) : null]),
+          el('td', {}, sk.description),
+          el('td', {}, [el('div', { class: 'meta' }, (sk.triggers || []).join('、')), el('div', { class: 'meta' }, sk.version ? 'v' + sk.version : '')]),
+          el('td', { class: 'nowrap' }, (sk.updated || '').slice(0, 16).replace('T', ' ')),
+          el('td', { class: 'actions' }, [btnOpen, sk.error ? null : btnEdit, sk.error ? null : btnToggle]),
+        ]);
+      }));
+      $table.append(el('table', { class: 'table' }, [thead, tbody]));
+    }
+
+    async function toggle(sk, btn) {
+      btn.disabled = true;
+      try { data = await call('adminSetSkillEnabled', sk.name, !sk.enabled); renderTable(); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); btn.disabled = false; }
+    }
+
+    async function changeFolder() {
+      const v = prompt('技能資料夾的 Drive id 或網址（留空 = 改回預設 GAS Agent/skills）：', data.folder && data.folder.configured ? data.folder.id : '');
+      if (v === null) return;
+      try { data = await call('adminSetSkillsFolder', v.trim()); renderTable(); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); }
+    }
+
+    async function openForm(sk) {
+      const isNew = !sk;
+      $form.innerHTML = '';
+      $form.style.display = '';
+      $form.append(el('div', { class: 'loading' }, '載入中…'));
+      let cur = { name: '', description: '', triggers: [], version: '1.0', enabled: true, body: '' };
+      if (sk) {
+        try { cur = await call('adminGetSkill', sk.name); } catch (err) { $form.innerHTML = ''; $form.append(errorBox(err)); return; }
+      }
+      $form.innerHTML = '';
+      const $name = el('input', { type: 'text', placeholder: 'weekly-report（小寫字母 / 數字 / 連字號）' });
+      $name.value = cur.name;
+      if (!isNew) $name.disabled = true;
+      const $desc = el('input', { type: 'text', placeholder: '一行說明何時用這個技能（會放進 system prompt）' });
+      $desc.value = cur.description;
+      const $triggers = el('input', { type: 'text', placeholder: '週報, weekly report' });
+      $triggers.value = (cur.triggers || []).join(', ');
+      const $version = el('input', { type: 'text' });
+      $version.value = cur.version || '';
+      const $enabled = el('input', { type: 'checkbox' });
+      $enabled.checked = cur.enabled !== false;
+      const $body = el('textarea', { rows: 18, spellcheck: 'false', placeholder: '# 技能標題\n\n## 步驟\n1. …\n\n## 輸出格式\n…\n\n## 注意\n…' });
+      $body.value = cur.body || '';
+      const $fmsg = el('div');
+      const btnSave = el('button', { class: 'primary', onclick: save }, isNew ? '新增' : '儲存');
+      const btnCancel = el('button', { onclick: () => { $form.style.display = 'none'; $form.innerHTML = ''; } }, '取消');
+      $form.append(
+        el('h3', {}, isNew ? '新增技能' : `編輯 ${cur.name}`),
+        el('div', { class: 'form-grid' }, [
+          field('名稱 *', $name, '也是資料夾名與聊天指令 /<名稱>；存檔後不可改'),
+          field('描述 *', $desc, 'frontmatter description；≤ 300 字'),
+          field('觸發詞', $triggers, 'frontmatter triggers，逗號分隔（給模型判斷何時載入）'),
+          field('版本', $version, 'frontmatter version'),
+          field('啟用', el('label', { class: 'checkbox' }, [$enabled, ' 啟用（列入 system prompt 的可用技能）'])),
+        ]),
+        field('正文（markdown）*', $body, '給模型照做的指示：步驟、要用的工具與參數要點、輸出格式、注意事項'),
+        el('div', { class: 'toolbar' }, [btnSave, btnCancel, cur.url ? el('a', { href: cur.url, target: '_blank', rel: 'noopener' }, '在 Drive 開啟 SKILL.md') : null]),
+        $fmsg,
+      );
+      $form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      async function save() {
+        btnSave.disabled = true;
+        $fmsg.innerHTML = '';
+        try {
+          data = await call('adminSaveSkill', { name: $name.value.trim(), description: $desc.value, triggers: $triggers.value, version: $version.value, enabled: $enabled.checked, body: $body.value, isNew });
+          $form.style.display = 'none';
+          $form.innerHTML = '';
+          renderTable();
+        } catch (err) {
+          $fmsg.append(errorBox(err));
+          btnSave.disabled = false;
+        }
+      }
+    }
+
+    load();
+  }
+
   // ---- 尚未實作的分頁 ----------------------------------------------------------
 
   function renderPlaceholder(item) {
@@ -1247,7 +1393,7 @@
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings, cron: renderCron };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings, cron: renderCron, skills: renderSkills };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {

@@ -13,7 +13,7 @@
  * Job type：
  *   turn          聊天台「背景執行」：payload {message, providerId, systemExtra, channel, mode}，session_id 可空（會建新）
  *   continuation  續跑：payload {message, origin: checkpoint|approval, continuations, cron?}，接在同一 session
- *   cron          排程：payload {cron_id, name, prompt, deliver_to, model_pin, skills}；建新 session（channel cron）、mode autonomous、結束後投遞
+ *   cron          排程：payload {cron_id, name, prompt, deliver_to, model_pin, skills}；建新 session（channel cron）、mode autonomous、skills 全文注入（M5）、結束後投遞
  *   curation      記憶整理：session_id 指定 session
  * 結果寫在 payload.result（text / steps 摘要 / stopped / sessionId / continued_by / delivery），error 欄放失敗原因。
  *
@@ -353,6 +353,8 @@ function summarizeTurnResult_(r) {
     llmCalls: r.llmCalls || 0,
     ms: r.ms || 0,
     compacted: !!r.compacted,
+    skills: r.skills || null,
+    skillProposal: r.skillProposal ? { proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', text: truncateText_(r.skillProposal.text, 300).text } : null,
   };
 }
 
@@ -377,6 +379,7 @@ function runTurnJob_(job, deps) {
     providerId: p.providerId || '',
     systemExtra: p.systemExtra || '',
     mode: p.mode || 'interactive',
+    skills: p.skills || (p.cron && p.cron.skills) || '',
   }, sessionDeps);
   if (r.sessionId) job.session_id = r.sessionId;
 
@@ -388,7 +391,7 @@ function runTurnJob_(job, deps) {
       const next = enqueue_('continuation', {
         message: CONTINUATION_PROMPT, origin: 'checkpoint', continuations: continuations + 1,
         channel: p.channel || 'admin', providerId: p.providerId || '', systemExtra: p.systemExtra || '', mode: p.mode || 'interactive',
-        cron: p.cron || null, root_job_id: p.root_job_id || job.id,
+        skills: p.skills || (p.cron && p.cron.skills) || '', cron: p.cron || null, root_job_id: p.root_job_id || job.id,
       }, r.sessionId, { store: deps.store });
       result.continued_by = next.id;
     } else {
@@ -445,7 +448,7 @@ function runCronJob_(job, deps) {
   job.session_id = session.id;
   job.payload = Object.assign({}, p, {
     message: p.prompt, channel: 'cron', providerId: p.model_pin || '', mode: 'autonomous', systemExtra: AUTONOMOUS_SYSTEM_EXTRA,
-    cron: { cron_id: p.cron_id || '', name: p.name || '', deliver_to: p.deliver_to || 'none' },
+    cron: { cron_id: p.cron_id || '', name: p.name || '', deliver_to: p.deliver_to || 'none', skills: p.skills || '' },
   });
   return runTurnJob_(job, deps);
 }

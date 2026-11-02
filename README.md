@@ -4,7 +4,7 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M4 完成並驗收，下一步 M5 技能**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M5 技能程式完成，待本人驗收；之後 M6 通道**。
 
 ## 設計要點
 
@@ -26,17 +26,19 @@ src/
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
   Tools_Gmail.gs  Tools_Calendar.gs  Tools_Web.gs  Tools_Session.gs   # M2：八個 toolset 的 handler
   Tools_Cron.gs     # M4：cronjob_manage 宣告（toolset cronjob）
+  Tools_Skills.gs   # M5：skill_load / skill_manage 宣告（toolset skill；skill_manage 帶 proposal hook）
+  Skills.gs         # M5：Drive skills 資料夾 store、SKILL.md frontmatter 解析、索引快取、注入區塊、提案 / 自動提案、內建範例技能
   Agent.gs          # M2：runTurn_() 工具呼叫迴圈、system prompt、步數 / 時間 / 熔斷
   Sessions.gs       # M3：Sessions / Messages 持久化、CacheService 熱快取、context 壓縮、/new、runSessionTurn_()
   Memory.gs         # M3：Memory / UserProfile 上限與快照、memory_manage、session_search、curation
   Queue.gs          # M4：job 狀態機、LockService、queueTick()、checkpoint 續跑、turn / cron / continuation / curation runner
   Cron.gs           # M4：schedule 解析（5 欄 cron + 捷徑）、computeNextRun_、Cron store、到期掃描、cronjob_manage handler
   Deliver.gs        # M4：cron 結果投遞（doc / email / none）
-  Setup.gs          # installAgent()：寫 OWNER_EMAIL、建 DB、裝每分鐘 trigger、補工具設定預設值、對齊 CRON_NEXT_RUN（可重跑）
+  Setup.gs          # installAgent()：寫 OWNER_EMAIL、建 DB、裝每分鐘 trigger、補工具設定預設值、對齊 CRON_NEXT_RUN、寫入內建技能（可重跑）
   Admin.gs          # doGet 路由 + admin* 後端入口
   AdminPage.html / admin_js.html / admin_css.html   # 管理頁 SPA（檔名避開與 Admin.gs 撞名）
-  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron 健檢
-  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項；標 'pure' 的可在本機跑
+  Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron / 技能健檢
+  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 .clasp.json.example # clasp 綁定範本（.clasp.json 本身不進 git）
 ```
@@ -196,6 +198,7 @@ clasp deploy -i <deploymentId> -d "說明"
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
+| skill | `skill_load`(R，M5：載技能全文) `skill_manage`(W，M5：create / patch **只提案**，owner 批准後才寫入) |
 
 唯一的 D 類工具是 `slides_delete_slide`（刪簡報某一頁；RBAC delete 預設關，要用自己開），Gmail / Drive 沒有任何刪除工具。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
 
@@ -249,6 +252,8 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 **M4 起批准 / 拒絕後會續跑原對話**：若 `Approvals.job_id`（存 session id）對應的 session 仍 active，會排一個 `continuation` job，以 user 訊息「（系統）先前待審批的 X 已由 owner 批准並執行，結果：…」（拒絕則「已由 owner 拒絕，未執行」）接回該 session，由 trigger 一分鐘內跑完；到聊天台切到該 session 就看得到 agent 的後續回覆。curation 提議（`memory_manage`）批准只套用、不續跑。同一輪裡模型若重複要求同一個被攔的動作，不會再寫第二筆。
 
 「紀錄」分頁下方同時列最近 50 筆 `AuditLog`（每次工具執行一列，失敗列紅底）。
+
+**提案型工具（M5）**：工具宣告可帶 `proposal(args, ctx)` hook（目前只有 `skill_manage`）。未批准時 executor 不執行 handler，改呼叫 hook 驗證參數並取得 reason（以「技能提案」開頭），寫一列 `Approvals` 後回 `pending_approval`；批准時才以 `approved=true` 執行 handler。與 X 類共用同一條路（去重、`needs_approval` job 狀態、AuditLog），但不看 `approval_policy`，而且批准後**不續跑**原對話（與 curation 相同）。「紀錄」的審批卡片對 `skill_manage` 顯示 diff 預覽：create 顯示全文、patch 顯示「找到 → 取代成」。
 
 ### M2 驗收步驟（請在瀏覽器操作）
 
@@ -354,7 +359,7 @@ token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何
 | `weekly mon 09:00` / `每週一 09:00` | 每週固定日 |
 | `hourly` / `每小時` | 每小時整點 |
 
-排程任務在**無人模式**跑：system prompt 會加「沒有使用者在線、不要提問、輸出可直接交付的結果」；X 類工具依 `approval_policy` 處理（`always` / `autonomous_only` 都會送審，結果文件裡會列出待審批的動作，批准後會續跑該 session）。**排程任務執行中 `cronjob_manage` 只能 `list`**，不能再建 / 改 / 觸發排程（避免遞迴）。`skills` 欄位 M5 才生效。
+排程任務在**無人模式**跑：system prompt 會加「沒有使用者在線、不要提問、輸出可直接交付的結果」；X 類工具依 `approval_policy` 處理（`always` / `autonomous_only` 都會送審，結果文件裡會列出待審批的動作，批准後會續跑該 session）。**排程任務執行中 `cronjob_manage` 只能 `list`**，不能再建 / 改 / 觸發排程（避免遞迴）。`skills` 欄（逗號分隔技能名）在執行時把技能**全文**注入 system prompt，續跑 job 也會帶著；找不到的技能列在結果的 `skills.missing` 與投遞文件的執行資訊裡。
 
 ### 投遞（`Deliver.gs`）
 
@@ -381,6 +386,59 @@ token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何
 4. 「設定」把 `turn_budget_seconds` 調成 30 → 儲存。「聊天台」勾「背景執行」，輸入一個要呼叫幾個工具的任務（例：`列出我 Drive 最近 10 個檔案，逐一讀出前 200 字，最後整理成一份 Doc`）→ 送出。預期：氣泡顯示 job id 與輪詢秒數；「紀錄 → Queue」看到第一個 job `done`、結果標「中止 time_budget」「續跑 → job_…」，接著出現 `continuation` job；全部跑完後聊天台顯示合併的回覆（各段以「— 續跑 —」分隔）與 `Queue job：job_a → job_b` 鏈。驗完把 `turn_budget_seconds` 調回 270。
 5. 審批後續跑：聊天台（不勾背景）要求寄一封信給自己 → 停在審批 → 「紀錄」按「批准並執行」→ 卡片下方出現「已排續跑 job …」→ 一分鐘後聊天台切回該 session（或重新整理），最後一則是 agent 根據「已由 owner 批准並執行」的系統訊息做的收尾。
 
+## 技能（M5）
+
+沿 hermes 的設計：技能是 Drive 上的 `SKILL.md`（[agentskills.io](https://agentskills.io) 格式），**system prompt 只放啟用技能的名稱與一行描述**，模型要用時才 `skill_load` 載全文；複雜任務做完後 agent 會評估「值得存成技能嗎」，值得就提案，owner 批准才寫入。
+
+### 檔案與格式
+
+資料夾預設 `GAS Agent/skills/`（Config `skills_folder_id` 可改；「技能」分頁「更換資料夾」），每個技能一個子資料夾：`<name>/SKILL.md`。
+
+```markdown
+---
+name: weekly-report
+description: "產出本週週報 Google 文件：讀本週 Calendar 事件與寄出的郵件，整理成固定章節。"
+triggers: [週報, weekly report]
+version: 1.0
+enabled: true
+---
+# 週報格式
+（給模型照做的 markdown：步驟、要用的工具與參數要點、輸出格式、注意事項）
+```
+
+- `name` 必填：小寫字母 / 數字 / 連字號，與資料夾名相同，也是聊天指令 `/<name>`。`description` 必填（≤ 300 字，會進 system prompt）。`triggers` / `version` / `enabled` 選填；`enabled: false` 的技能不列入 system prompt，但 `/<name>` 明確指定時仍可用。
+- 索引（名稱 / 描述 / 啟停 / file id / 更新時間）快取在 CacheService 15 分鐘；管理頁或 `skill_manage` 寫入都會清快取，直接在 Drive 改檔請按「重新索引」。
+- 第一次 `installAgent()` 或開「技能」分頁時資料夾若為空，會寫入兩個內建範例：**`weekly-report`**（週報：讀本週 Calendar 事件與寄出的信，產出固定章節的 Doc）與 **`deck-planning`**（原本寫在 system prompt 的簡報規劃規則，現在搬成技能；system prompt 只剩一行「做簡報前先 skill_load deck-planning」）。
+
+### 用法
+
+| 入口 | 行為 |
+|---|---|
+| 聊天台一般訊息 | system prompt 多一段「## 可用技能」（啟用技能的名稱 + 描述）與「## 技能」規則；模型判斷任務符合某技能就 `skill_load` 載全文照做 |
+| 聊天台 `/<name> 訊息` | 直接把該技能**全文**注入 system prompt，斜線拿掉後的文字當訊息（沒有文字就用「請依照上方技能的指示執行」）。找不到該技能回錯誤文字並列出可用技能，不打模型、不算一輪 |
+| 排程 `skills` 欄 | 逗號分隔技能名，執行時全文注入；續跑 job 也帶著 |
+| `skill_load(name)` | 回 frontmatter 與全文（停用的會標註） |
+| `skill_manage(action=create\|patch, …)` | **只提案**：驗證後寫一列 `Approvals`（reason「技能提案：新建 / 修補「name」— 描述」），owner 批准後才建 / 改檔。`patch` 用 `patch_find` → `patch_replace`（原文片段需唯一命中）或整份 `content`，也可只改 `description` / `triggers` |
+
+toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<toolset>_` 開頭，而工具名沿 hermes 叫 `skill_load` / `skill_manage`；RBAC key 是 `rbac.skill`，預設 read / write 開。
+
+### 自動提案
+
+一輪結束後若 **工具呼叫 ≥ 5 步、順利結束（沒被中止）、至少一步成功、這個 session 還沒評估過、本輪沒花超過 3 分鐘、`skill_manage` 可用**，`runSessionTurn_` 會再打一次模型（帶本輪完整歷史，預算 60 秒、最多 2 步）請它評估「這個流程值得存成技能嗎」，值得就呼叫 `skill_manage create` 提案。這次評估的訊息**不寫進 Messages**（避免污染對話），結果放在回傳的 `skillProposal`（聊天台 meta 顯示「技能提案已送審（apr_…）」或模型的評估文字），提案本身在「紀錄 → 審批」。同 session 只評估一次：`Sessions.skill_proposed_turn` 記第幾輪問過（新欄位，Doctor 會提醒「重新安裝」補欄）。
+
+### 管理頁「技能」分頁
+
+列表（名稱 / 描述 / 觸發 / 版本 / 更新時間 / 開啟 Drive 檔 / 編輯 / 啟停；壞檔標原因）、「新增技能」「編輯」表單（名稱、描述、觸發詞、版本、啟用、正文 markdown → 組成 frontmatter + 正文寫入 Drive，owner 直接寫不走審批）、「重新索引」、「更換資料夾」。Doctor 加三項：`skills_folder_id` 有效、資料夾可讀、每個 SKILL.md 可解析。
+
+### M5 驗收步驟（請在瀏覽器操作）
+
+1. Doctor → 「重新安裝」（`Sessions` 補 `skill_proposed_turn` 欄、Config 補 `rbac.skill` 與 `skills_folder_id`、Drive 建 `GAS Agent/skills` 並寫入兩個內建技能）→ 全綠（含技能三項）→ 「跑 smoke tests」56 項全過。
+2. 「技能」分頁應列出 `weekly-report` 與 `deck-planning`，都啟用；「開啟 Drive 檔」能看到 SKILL.md。按「編輯」改一個字儲存，再按「重新索引」確認更新時間變了。
+3. 聊天台輸入 `/weekly-report` → 預期步驟含 `calendar_list_events`、`gmail_search`、`docs_create`，回覆附一份「週報 YYYY-MM-DD ～ MM-DD」Doc 連結，章節為「本週重點 / 會議與活動 / 本週完成 / 待辦與下週計畫 / 風險與需要決定的事」；meta 顯示「技能：weekly-report」。輸入 `/nope` 應回「找不到技能」並列出可用技能。
+4. 聊天台（不帶斜線）輸入一個會用到 ≥ 5 次工具的任務（例：`列出我 Drive 最近 6 個檔案，逐一讀出前 200 字，最後整理成一份 Doc`）→ 回覆 meta 出現「技能提案已送審（apr_…）」（或「技能提案評估：不需要…」，那就換個更像固定流程的任務再試一次新 session）→ 「紀錄 → 審批」出現 `skill_manage` 卡片，顯示新建技能的名稱、描述與全文預覽 → 「批准並執行」→ 「技能」分頁多了該技能，Drive `GAS Agent/skills/<name>/SKILL.md` 存在。卡片不會出現「已排續跑 job」。
+5. 聊天台輸入「幫我把 weekly-report 技能的『本週重點（3 條以內…）』改成 5 條以內」→ 預期 `skill_manage patch` 步驟標「待審批」→ 審批卡片顯示「找到 → 取代成」→ 批准 → 開 Drive 檔確認已改。
+6. 排程：新增一個排程，技能欄填 `weekly-report`，任務指令「產出本週週報」，投遞 doc → 「立即執行」→ 結果 Doc 的「執行資訊」有「載入技能：weekly-report」。
+
 ## 開發流程
 
 ```bash
@@ -395,7 +453,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（pure 測試，不碰 Google 服務）→ `clasp push` → `clasp deploy -i <deploymentId> -d "…"` → 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（50 項 pure 測試，不碰 Google 服務）→ `clasp push` → `clasp deploy -i <deploymentId> -d "…"` → 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
 - 不要把 `.clasp.json`（含 scriptId）以外的任何金鑰放進 repo；金鑰只進 Script Properties。
@@ -433,6 +491,11 @@ node scripts/local-tests.js
 | cron 任務的信沒寄出 / 文件沒分享 | 無人模式下 X 類工具依審批策略送審：到「紀錄」批准，agent 會續跑收尾。投遞到 owner 自己的 `email` 不受此限 |
 | agent 做的簡報很素 / 沒有規劃 | 到「工具」分頁填「簡報範本」（先在 Drive 用 Slides 主題庫做一份喜歡的範本）；system prompt 已要求先回大綱確認、每頁一重點、交錯版面並寫講者備忘。要圖就在指令裡給 Drive 圖片或公開網址 |
 | agent 在排程任務裡說「不可建立排程」 | 刻意限制：排程任務執行中 `cronjob_manage` 只能 list，避免遞迴排程 |
+| `/weekly-report` 回「找不到技能」 | 技能資料夾空的或快取舊：開一次「技能」分頁（會寫入內建技能）或按「重新索引」；Doctor 看 `skills_folder_id` 是否指到錯的資料夾 |
+| 技能分頁某列標紅字「缺少 SKILL.md」/「缺 description」 | Drive 裡該子資料夾沒有 SKILL.md 或 frontmatter 不完整；用分頁「編輯」重寫或在 Drive 修檔後「重新索引」 |
+| agent 說「skill_manage 只能以提案方式進行」 | 刻意限制：技能新建 / 修補一律進審批，到「紀錄 → 審批」批准 |
+| 複雜任務做完沒有技能提案 | 觸發條件是 ≥ 5 步、順利結束、同 session 第一次；或模型評估為不值得（meta 會顯示評估文字）。開新 session 再試，或直接要求「把這個流程存成技能」 |
+| 升到 M5 後 Doctor 說 `Sessions` 缺 `skill_proposed_turn` / 缺 `rbac.skill` | 按「重新安裝」 |
 
 ## 里程碑
 
@@ -441,6 +504,6 @@ node scripts/local-tests.js
 - [x] M2 工具與 RBAC（八個 toolset、registry / executor、審批、溢寫、工具迴圈、工具 / 紀錄分頁）—— 批准後續跑對話留到 M3/M4
 - [x] M3 記憶：Sessions / Messages 持久化、context 壓縮、Memory / UserProfile 上限與快照、memory_manage、session_search（可選向量）、curation 進審批、記憶 / 設定分頁
 - [x] M4 排程與非同步 Queue：job 狀態機、checkpoint 續跑、審批後續跑、Cron 解析與到期掃描、`cronjob_manage`、投遞 doc / email、排程 / Queue 分頁、背景執行
-- [ ] M5 技能（Drive `skills/`）
+- [x] M5 技能：Drive `skills/<name>/SKILL.md`、索引快取、system prompt 只放名稱 + 描述、`skill_load` / `/<skill>` / cron skills 全文注入、`skill_manage` 提案進審批、≥ 5 步自動提案、技能分頁 —— 程式完成，待本人驗收
 - [ ] M6 通道（Telegram webhook 部署 B、Email 指令信）
 - [ ] M7 加固與維運

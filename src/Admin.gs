@@ -225,6 +225,12 @@ function adminChat(input) {
     compacted: !!r.compacted,
     curation: r.curation ? describeCuration_(r.curation) : '',
     command: r.command || '',
+    skills: r.skills || { loaded: [], missing: [] },
+    skillProposal: r.skillProposal ? {
+      evaluated: true, proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', status: r.skillProposal.status || '',
+      text: r.skillProposal.text || '',
+      steps: (r.skillProposal.steps || []).map((s) => ({ tool: s.tool, argsPreview: s.argsPreview, resultPreview: s.resultPreview, status: s.status, ok: s.ok, ms: s.ms, approvalId: s.approvalId })),
+    } : null,
   };
 }
 
@@ -599,6 +605,92 @@ function adminSetCronEnabled(id, enabled) {
 function adminRunCronNow(id) {
   assertOwner();
   return publicJob_(runCronNow_(String(id || ''), { cronStore: sheetCronStore_(), queueStore: sheetQueueStore_() }));
+}
+
+// ---- M5：技能分頁 -----------------------------------------------------------------------------
+
+/**
+ * 技能分頁：索引（略過快取）+ 資料夾資訊。第一次開（資料夾為空）會寫入內建範例技能。
+ * @return {{skills: !Array<!Object>, folder: {id: string, name: string, url: string, configured: boolean}, installed: !Array<string>}}
+ */
+function adminListSkills() {
+  assertOwner();
+  ensureToolConfigDefaults_();
+  const store = driveSkillStore_();
+  const installed = installBuiltinSkills_(store);
+  const folder = store.folder();
+  return {
+    skills: getSkillIndex_(store, { force: true }),
+    folder: { id: folder.getId(), name: folder.getName(), url: folder.getUrl(), configured: !!getToolConfig_().skillsFolderId },
+    installed,
+  };
+}
+
+/**
+ * 技能分頁：單一技能全文（給編輯表單）。
+ * @param {string} name
+ * @return {{name: string, description: string, triggers: !Array<string>, version: string, enabled: boolean, body: string, text: string, fileId: string, url: string, updated: string}}
+ */
+function adminGetSkill(name) {
+  assertOwner();
+  const got = loadSkill_(String(name || ''), driveSkillStore_());
+  if (!got) throw new Error(`找不到技能「${name}」。`);
+  const s = got.skill;
+  return { name: s.name, description: s.description, triggers: s.triggers, version: s.version, enabled: s.enabled, body: s.body, text: got.text, fileId: got.fileId, url: got.url, updated: got.updated };
+}
+
+/**
+ * 技能分頁：owner 直接新增 / 編輯（不走審批）。表單欄位組成 frontmatter + 正文。
+ * @param {{name: string, description: string, triggers: (string|Array<string>|undefined), version: (string|undefined), enabled: (boolean|undefined), body: string, isNew: (boolean|undefined)}} input
+ * @return {!Object} adminListSkills()
+ */
+function adminSaveSkill(input) {
+  assertOwner();
+  input = input || {};
+  const store = driveSkillStore_();
+  const name = requireSkillName_(input.name);
+  if (input.isNew && store.get(name)) throw new Error(`技能「${name}」已存在；要修改請用該列的「編輯」。`);
+  const text = serializeSkillFile_({ name, description: input.description, triggers: input.triggers, version: input.version, enabled: input.enabled !== false, body: input.body });
+  parseSkillFile_(text); // 寫入前再驗一次
+  store.save(name, text);
+  return adminListSkills();
+}
+
+/**
+ * 技能分頁：啟用 / 停用（改 frontmatter enabled）。
+ * @param {string} name
+ * @param {boolean} enabled
+ * @return {!Object} adminListSkills()
+ */
+function adminSetSkillEnabled(name, enabled) {
+  assertOwner();
+  driveSkillStore_().setEnabled(requireSkillName_(name), !!enabled);
+  return adminListSkills();
+}
+
+/**
+ * 技能分頁：重新索引（清 CacheService 快取後重讀 Drive）。
+ * @return {!Object} adminListSkills()
+ */
+function adminReindexSkills() {
+  assertOwner();
+  invalidateSkillIndex_();
+  return adminListSkills();
+}
+
+/**
+ * 技能分頁：改技能資料夾（Config skills_folder_id；空 = 預設 GAS Agent/skills）。
+ * @param {string} folderIdOrUrl
+ * @return {!Object} adminListSkills()
+ */
+function adminSetSkillsFolder(folderIdOrUrl) {
+  assertOwner();
+  const id = parseDriveId_(folderIdOrUrl);
+  if (id) DriveApp.getFolderById(id); // 驗證可開啟
+  setConfigValues_({ [TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID]: id });
+  skillsFolderCache_ = null;
+  invalidateSkillIndex_();
+  return adminListSkills();
 }
 
 /**

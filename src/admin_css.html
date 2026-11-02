@@ -180,6 +180,13 @@
   .badge.state-done { background: var(--ok-soft); color: var(--ok); }
   .badge.state-failed { background: var(--fail-soft); color: var(--fail); }
 
+  /* M5：技能提案 diff 預覽 */
+  .skill-diff { margin: 6px 0; }
+  .skill-diff .approval-args { max-height: 320px; }
+  .approval-args.diff-add { border-left: 3px solid var(--ok); background: var(--ok-soft); }
+  .approval-args.diff-del { border-left: 3px solid var(--fail); background: var(--fail-soft); text-decoration: line-through; }
+  .table a.small { font-size: 13px; margin-left: 4px; white-space: nowrap; }
+
   @media (max-width: 720px) {
     .app { flex-direction: column; }
     .sidebar { width: auto; flex: none; height: auto; position: static; }

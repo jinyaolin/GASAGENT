@@ -3,7 +3,8 @@
  *
  * 測試只對已安裝的環境做無副作用（或幂等）的操作：不會新建 spreadsheet、不會改 Properties、不打外部網路。
  * M1 的 adapter / 備援鏈測試是純函式 + 注入的 fetch stub；M2 的 registry / executor / 迴圈測試用假 registry、
- * 記憶體 sink 與假 provider，不寫 Sheet、不碰 Drive；M4 的 queue / cron / deliver 測試用記憶體 store、假鎖與注入的投遞 handler。
+ * 記憶體 sink 與假 provider，不寫 Sheet、不碰 Drive；M4 的 queue / cron / deliver 測試用記憶體 store、假鎖與注入的投遞 handler；
+ * M5 的技能測試用記憶體 skill store（memorySkillStore_）。
  * 第三欄 'pure' 的測試可在本機 node 跑（scripts/local-tests.js）。
  */
 
@@ -81,6 +82,13 @@ function smokeTestTable_() {
     ['cron: 到期掃描入列並推進 next_run；cron job 建新 session、autonomous 模式送審批、投遞 doc、更新 last_status；cronjob_manage 在 autonomous 只能 list', testCronJobAutonomous_, 'pure'],
     ['deliver: 標題「<name> YYYY-MM-DD」、內文含結果與執行資訊；doc / email / none；handler 失敗回 ok=false', testDeliverContent_, 'pure'],
     ['gmail: 附件參數宣告、數量 / 總量上限、轉寄內文組裝、gmail_forward 為 X 類走審批', testGmailAttachments_, 'pure'],
+    // M5
+    ['skills: SKILL.md frontmatter 解析（list / 引號 / enabled）、壞檔報錯、序列化來回、名稱與 /<skill> 規則', testSkillParse_, 'pure'],
+    ['skills: 索引只列啟用且可解析者；/<skill> 注入全文與預設訊息；找不到回錯誤文字不打模型；system prompt 含技能規則', testSkillInjection_, 'pure'],
+    ['skills: skill_manage 提案進 Approvals（reason 技能提案）不寫檔、壞提案回 invalid；批准後才建 / 改檔；提案不續跑', testSkillManageProposal_, 'pure'],
+    ['skills: cron 的 skills 欄在 cron job 與續跑 job 都傳下去並注入全文；找不到的列在 missing', testSkillCronInjection_, 'pure'],
+    ['skills: 自動提案觸發條件（≥ 5 步、順利結束、每 session 一次、需開 skill_manage）；評估呼叫不寫入 Messages', testSkillAutoProposal_, 'pure'],
+    ['skills: 內建範例技能可解析；資料夾為空才寫入', testSkillBuiltins_, 'pure'],
   ];
 }
 
@@ -592,7 +600,7 @@ function execFake_(name, args, ctx, cfg, registry) {
 function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
   assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
-  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob'], 'toolset 順序');
+  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob', 'skill'], 'toolset 順序');
   assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name), ['slides_delete_slide'], 'D 類只有刪簡報頁（RBAC delete 預設關）');
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_forward', 'gmail_send'], 'X 類只有 share / send / forward');
   registry.list.forEach((t) => {
@@ -987,7 +995,9 @@ function testDocsSlidesSpecs_() {
   assertEqual_([parseDriveId_('1AbC_dEf-GhIjK'), parseDriveId_(''), parseDriveId_('https://drive.google.com/open?id=1XyZ_abcdefghij')], ['1AbC_dEf-GhIjK', '', '1XyZ_abcdefghij'], '純 id / 空 / open?id=');
   const slidesReg = buildToolRegistry_(slidesTools_());
   const prompt = buildSystemPrompt_(fakeToolConfig_({ rbac: { slides: { read: true, write: true, delete: false, external: false } } }), slidesReg, '');
-  assert_(/## 簡報/.test(prompt) && /先用文字回大綱/.test(prompt) && /slides_update_slide/.test(prompt), 'system prompt 含簡報規劃規則');
+  assert_(/## 簡報/.test(prompt) && /先用文字回大綱/.test(prompt), '沒有 skill toolset 時 system prompt 保留一段精簡簡報規則');
+  const withSkills = buildSystemPrompt_(fakeToolConfig_({ rbac: { slides: { read: true, write: true, delete: false, external: false }, skill: { read: true, write: true, delete: false, external: false } } }), buildToolRegistry_(slidesTools_().concat(skillsTools_())), '');
+  assert_(/## 技能/.test(withSkills) && /skill_load deck-planning/.test(withSkills) && !/## 簡報/.test(withSkills), '有 skill toolset 時簡報規則改成一行指向 deck-planning 技能');
   assert_(/slides 的 delete：slides_delete_slide/.test(prompt), '刪頁預設列在未開放');
   const sink = memorySink_();
   const del = executeTool_('slides_delete_slide', { presentation_id: 'p', slide_index: 2 }, {}, { registry: slidesReg, config: fakeToolConfig_({ rbac: { slides: { read: true, write: true, delete: false, external: false } } }), sink: sink.sink, spill: memorySpill_().store });
@@ -1160,10 +1170,11 @@ function testSessionSerialization_() {
   const big = msgs.map((m) => Object.assign({}, m, { content: m.content ? m.content + 'x'.repeat(2000) : m.content }));
   assertEqual_(needsCompaction_('', big, cfg), true, '超門檻且可切');
   assertEqual_(needsCompaction_('', big.slice(6), cfg), false, '超門檻但只剩 1 輪不可切');
-  assertEqual_(parseSlashCommand_('/new'), { command: 'new', rest: '' }, '/new');
-  assertEqual_(parseSlashCommand_('/NEW  繼續聊'), { command: 'new', rest: '繼續聊' }, '/new 帶訊息');
-  assertEqual_(parseSlashCommand_('/status'), { command: 'status', rest: '' }, '/status');
-  assertEqual_(parseSlashCommand_('/newer stuff'), { command: '', rest: '/newer stuff' }, '非指令');
+  assertEqual_(parseSlashCommand_('/new'), { command: 'new', rest: '', skill: '' }, '/new');
+  assertEqual_(parseSlashCommand_('/NEW  繼續聊'), { command: 'new', rest: '繼續聊', skill: '' }, '/new 帶訊息');
+  assertEqual_(parseSlashCommand_('/status'), { command: 'status', rest: '', skill: '' }, '/status');
+  assertEqual_(parseSlashCommand_('/newer stuff'), { command: 'skill', rest: 'stuff', skill: 'newer' }, '其他 /<name> 視為技能（M5）');
+  assertEqual_(parseSlashCommand_('不是指令 /x'), { command: '', rest: '不是指令 /x', skill: '' }, '非開頭的 / 是一般訊息');
   assertEqual_(transcriptForSummary_(msgs.slice(3, 6)), '[assistant 呼叫工具] fake_echo({"text":"a"})\n[工具 fake_echo 結果] r\n[assistant] a2', 'transcript');
 }
 
@@ -1175,10 +1186,11 @@ function fakeSessionDeps_(chat, overrides) {
   const registry = fakeM3Registry_();
   const toolConfig = fakeM3ToolConfig_();
   const cfg = fakeAgentConfig_();
+  const skills = memorySkillStore_();
   return Object.assign({
-    store: ss.store, cfg, toolConfig, registry, memoryStore: mem.store, chat,
+    store: ss.store, cfg, toolConfig, registry, memoryStore: mem.store, skillStore: skills.store, chat,
     turnDeps: { executeDeps: { sink: sink.sink, spill: memorySpill_().store } },
-    _ss: ss, _mem: mem, _sink: sink,
+    _ss: ss, _mem: mem, _sink: sink, _skills: skills,
   }, overrides || {});
 }
 
@@ -1852,4 +1864,301 @@ function testGmailAttachments_() {
   assertEqual_(JSON.parse(sink.approvals[0].args), { thread_id: 't1', to: 'a@b.c', body: '請看' }, 'Approvals 參數');
   assertEqual_(run('gmail_send', { to: 'a', subject: 's', body: 'b', attachment_file_ids: 'notarray' }, open).status, 'invalid', 'attachment_file_ids 非陣列拒絕');
   assertEqual_(validateToolArgs_(byName.gmail_send, { to: 'a', subject: 's', body: 'b', attachment_file_ids: '["f1","f2"]' }).attachment_file_ids, ['f1', 'f2'], 'JSON 字串陣列可轉型');
+}
+
+// ---- M5：skills ------------------------------------------------------------------------------------------
+
+/**
+ * 記憶體版 skill store（介面同 driveSkillStore_：list / get / save / setEnabled）。
+ * @param {!Array<{name: string, text: string}>=} initial
+ * @return {{store: Object, files: !Object<string, {text: string, id: string}>}}
+ */
+function memorySkillStore_(initial) {
+  const files = {};
+  let n = 0;
+  const store = {
+    list: () => Object.keys(files).sort().map((name) => {
+      let entry;
+      try { entry = skillIndexEntry_(name, parseSkillFile_(files[name].text), null, ''); } catch (err) { entry = skillIndexEntry_(name, null, null, String(err && err.message || err)); }
+      entry.fileId = files[name].id;
+      return entry;
+    }),
+    get: (name) => (files[name] ? { text: files[name].text, fileId: files[name].id, url: 'https://drive.example/' + files[name].id, updated: '2026-11-02T10:00:00+08:00' } : null),
+    save: (name, text) => { const created = !files[name]; files[name] = { text, id: created ? 'sk_' + (++n) : files[name].id }; return { fileId: files[name].id, url: 'https://drive.example/' + files[name].id, created }; },
+    setEnabled: (name, enabled) => { if (!files[name]) throw new Error('no skill ' + name); return store.save(name, rewriteSkillEnabled_(files[name].text, enabled)); },
+  };
+  (initial || []).forEach((sk) => store.save(sk.name, sk.text));
+  return { store, files };
+}
+
+/** @return {string} 測試用技能全文 */
+function fakeSkillText_(name, overrides) {
+  return serializeSkillFile_(Object.assign({ name, description: `${name} 的描述`, triggers: ['觸發' + name], version: '1.0', enabled: true, body: `# ${name}\n\n## 步驟\n1. 第一步\n2. 第二步` }, overrides || {}));
+}
+
+/** registry：假工具 + session + memory + skill */
+function fakeM5Registry_() {
+  return buildToolRegistry_(fakeToolDecls_().concat(sessionTools_(), memoryTools_(), skillsTools_()));
+}
+
+/** rbac：fake / session / memory / skill 全開 */
+function fakeM5ToolConfig_(overrides) {
+  const c = fakeM3ToolConfig_(overrides);
+  c.rbac = Object.assign({}, c.rbac, { skill: { read: true, write: true, delete: false, external: false } });
+  return c;
+}
+
+function testSkillParse_() {
+  const p = parseSkillFile_('---\nname: weekly-report\ndescription: "週報格式, 含逗號"\ntriggers: [週報, "weekly report"]\nversion: 1.0\nenabled: false\n# 註解\n---\n\n# 正文\n步驟一\n');
+  assertEqual_([p.name, p.description, p.triggers, p.version, p.enabled, p.body], ['weekly-report', '週報格式, 含逗號', ['週報', 'weekly report'], '1.0', false, '# 正文\n步驟一'], 'frontmatter 各欄');
+  const multi = parseSkillFile_('---\nname: a\ndescription: d\ntriggers:\n  - x\n  - "y z"\n---\nbody');
+  assertEqual_([multi.triggers, multi.enabled, multi.body], [['x', 'y z'], true, 'body'], '多行 list、enabled 預設 true');
+  assertEqual_(parseSkillFile_('---\r\nname: crlf\r\ndescription: d\r\n---\r\nb\r\n').body, 'b', 'CRLF');
+  assertThrows_(() => parseSkillFile_('# 沒有 frontmatter'), '無 frontmatter');
+  assertThrows_(() => parseSkillFile_('---\ndescription: d\n---\nb'), '缺 name');
+  assertThrows_(() => parseSkillFile_('---\nname: a\n---\nb'), '缺 description');
+  assertThrows_(() => parseSkillFile_('---\nname: Weekly Report\ndescription: d\n---\nb'), 'name 有大寫 / 空白');
+  assertThrows_(() => parseSkillFile_(''), '空字串');
+  // 序列化來回
+  const text = serializeSkillFile_({ name: 'deck-planning', description: '  規劃  簡報  ', triggers: '簡報, deck', version: '2', enabled: false, body: 'line1\n\nline2\n\n' });
+  const back = parseSkillFile_(text);
+  assertEqual_([back.name, back.description, back.triggers, back.version, back.enabled, back.body], ['deck-planning', '規劃 簡報', ['簡報', 'deck'], '2', false, 'line1\n\nline2'], '來回一致');
+  assertEqual_(parseSkillFile_(rewriteSkillEnabled_(text, true)).enabled, true, 'rewriteSkillEnabled_');
+  assertEqual_(parseSkillFile_(serializeSkillFile_({ name: 'q', description: 'he said "hi"', body: 'x' })).description, 'he said "hi"', '描述含引號');
+  assertThrows_(() => serializeSkillFile_({ name: 'Bad Name', description: 'd', body: 'x' }), '序列化拒絕壞名稱');
+  assertThrows_(() => serializeSkillFile_({ name: 'ok', description: '', body: 'x' }), '序列化拒絕空描述');
+  // 名稱與斜線
+  assertEqual_([requireSkillName_('/Weekly-Report'), requireSkillName_(' a1 ')], ['weekly-report', 'a1'], 'requireSkillName_ 正規化');
+  assertThrows_(() => requireSkillName_('bad_name'), '底線不合法');
+  assertEqual_(parseSkillSlash_('/weekly-report  做本週的'), { name: 'weekly-report', rest: '做本週的' }, '/<skill> 帶訊息');
+  assertEqual_(parseSkillSlash_('/Weekly-Report'), { name: 'weekly-report', rest: '' }, '不分大小寫、無訊息');
+  assertEqual_([parseSkillSlash_('/new x'), parseSkillSlash_('/status'), parseSkillSlash_('hi /x'), parseSkillSlash_('/bad_name')], [null, null, null, null], '保留字 / 非開頭 / 底線都不是技能');
+  // 索引過濾與區塊
+  const index = [
+    { name: 'a', description: 'A', enabled: true, triggers: ['甲'], error: '' },
+    { name: 'b', description: 'B', enabled: false, triggers: [], error: '' },
+    { name: 'c', description: '', enabled: true, triggers: [], error: '缺 description' },
+  ];
+  assertEqual_(enabledSkills_(index).map((x) => x.name), ['a'], '只留啟用且可解析');
+  const block = buildSkillsIndexBlock_(index);
+  assert_(/## 可用技能/.test(block) && /- a：A（觸發：甲）/.test(block) && !/- b/.test(block), '索引區塊：' + block);
+  assertEqual_(buildSkillsIndexBlock_([]), '', '沒有啟用技能 → 空');
+  assert_(/^## 技能「a」/.test(buildSkillTextBlock_(parseSkillFile_(fakeSkillText_('a')))) && /## 步驟/.test(buildSkillTextBlock_(parseSkillFile_(fakeSkillText_('a')))), '全文區塊');
+}
+
+function testSkillInjection_() {
+  const skills = memorySkillStore_([
+    { name: 'weekly-report', text: fakeSkillText_('weekly-report', { description: '週報格式' }) },
+    { name: 'old', text: fakeSkillText_('old', { enabled: false }) },
+    { name: 'broken', text: '沒有 frontmatter' },
+  ]);
+  assertEqual_(skills.store.list().map((x) => [x.name, x.enabled, !!x.error]), [['broken', false, true], ['old', false, false], ['weekly-report', true, false]], 'store.list 標壞檔與停用');
+  const fake = fakeChat_([{ text: '做好了', stop: 'end' }]);
+  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  // 一般訊息：system prompt 有索引（只有 weekly-report）與技能規則，沒有全文
+  const r0 = runSessionTurn_({ message: '哈囉' }, deps);
+  const sys0 = fake.calls[0].messages[0].content;
+  assert_(/## 技能\n/.test(sys0) && /skill_load deck-planning/.test(sys0), '技能規則進 system prompt');
+  assert_(/## 可用技能/.test(sys0) && /- weekly-report：週報格式/.test(sys0) && !/- old/.test(sys0) && !/broken/.test(sys0), '索引只列啟用且可解析：' + sys0);
+  assert_(!/## 技能「/.test(sys0), '一般訊息不注入全文');
+  assertEqual_([r0.command, r0.skills], ['', { loaded: [], missing: [] }], 'skills 報告為空');
+  // /weekly-report：全文注入、預設訊息
+  const r1 = runSessionTurn_({ message: '/weekly-report', sessionId: r0.sessionId }, deps);
+  const req1 = fake.calls[1];
+  assert_(/## 技能「weekly-report」（已載入全文/.test(req1.messages[0].content) && /## 步驟\n1. 第一步/.test(req1.messages[0].content), '全文在 system prompt');
+  assertEqual_(req1.messages[req1.messages.length - 1].content, SKILL_DEFAULT_MESSAGE, '沒有文字就用預設訊息');
+  assertEqual_([r1.command, r1.skills.loaded, r1.skills.missing, r1.turns], ['skill', ['weekly-report'], [], 2], '回傳 skills 報告');
+  assertEqual_(deps._ss.messages.filter((m) => m.role === 'user').map((m) => m.content), ['哈囉', SKILL_DEFAULT_MESSAGE], '存進 Messages 的 user 訊息已去掉斜線');
+  // /weekly-report 帶文字：斜線拿掉後的文字當訊息；停用的技能也能用 / 明確指定
+  const r2 = runSessionTurn_({ message: '/Weekly-Report 只要會議部分', sessionId: r0.sessionId }, deps);
+  assertEqual_(fake.calls[2].messages[fake.calls[2].messages.length - 1].content, '只要會議部分', '斜線後文字');
+  assertEqual_(r2.skills.loaded, ['weekly-report'], '不分大小寫');
+  const r2b = runSessionTurn_({ message: '/old 用舊的', sessionId: r0.sessionId }, deps);
+  assertEqual_(r2b.skills.loaded, ['old'], '明確指定停用的技能仍可注入');
+  // 找不到 / 壞檔：回錯誤文字、不打模型、不多一輪
+  const callsBefore = fake.calls.length;
+  const r3 = runSessionTurn_({ message: '/nope 做事', sessionId: r0.sessionId }, deps);
+  assert_(/找不到技能「nope」/.test(r3.text) && /\/weekly-report/.test(r3.text) && !/\/old/.test(r3.text), '找不到：列出可用技能 ' + r3.text);
+  assertEqual_([r3.command, r3.steps.length, fake.calls.length, r3.skills.missing], ['skill', 0, callsBefore, ['nope']], '不打模型');
+  const r4 = runSessionTurn_({ message: '/broken', sessionId: r0.sessionId }, deps);
+  assert_(/找不到技能「broken」：broken（/.test(r4.text), '壞檔帶原因：' + r4.text);
+  assertEqual_(deps._ss.store.get(r0.sessionId).turns, 4, '找不到不算一輪');
+  // skill_load 工具
+  const out = executeTool_('skill_load', { name: 'weekly-report' }, {}, { registry: fakeM5Registry_(), config: fakeM5ToolConfig_(), sink: memorySink_().sink, spill: memorySpill_().store, skillStore: skills.store });
+  assertEqual_([out.status, out.result.name, out.result.enabled], ['ok', 'weekly-report', true], 'skill_load');
+  assert_(/## 步驟/.test(out.result.content), 'skill_load 回全文');
+  const miss = executeTool_('skill_load', { name: 'nope' }, {}, { registry: fakeM5Registry_(), config: fakeM5ToolConfig_(), sink: memorySink_().sink, spill: memorySpill_().store, skillStore: skills.store });
+  assert_(miss.status === 'error' && /可用技能：weekly-report/.test(miss.content), 'skill_load 找不到列可用：' + miss.content);
+  // 沒有 skill toolset 的舊 registry：/<skill> 一律找不到，且 system prompt 無技能區塊
+  const fakeOld = fakeChat_([{ text: 'x' }]);
+  const depsOld = fakeSessionDeps_(fakeOld.chat, { skillStore: null });
+  const r5 = runSessionTurn_({ message: '/weekly-report' }, depsOld);
+  assert_(/找不到技能/.test(r5.text) && fakeOld.calls.length === 0, '沒有 store 就找不到');
+  runSessionTurn_({ message: 'hi' }, depsOld);
+  assert_(!/可用技能/.test(fakeOld.calls[0].messages[0].content), '沒有 store 不加索引區塊');
+}
+
+function testSkillManageProposal_() {
+  const skills = memorySkillStore_([{ name: 'weekly-report', text: fakeSkillText_('weekly-report') }]);
+  const sink = memorySink_();
+  const registry = fakeM5Registry_();
+  const config = fakeM5ToolConfig_();
+  const run = (args, ctx, extra) => executeTool_('skill_manage', args, Object.assign({ sessionId: 'sess1', mode: 'interactive' }, ctx || {}), Object.assign({ registry, config, sink: sink.sink, spill: memorySpill_().store, skillStore: skills.store }, extra || {}));
+  // create 提案：寫 Approvals、不寫檔
+  const c = run({ action: 'create', name: 'mail-digest', description: '郵件摘要格式', content: '# 郵件摘要\n\n1. 搜信\n2. 整理', triggers: ['郵件摘要'] });
+  assertEqual_([c.status, c.ok, !!c.approvalId, sink.approvals.length, skills.store.get('mail-digest')], ['pending_approval', false, true, 1, null], 'create 進審批、未寫檔');
+  assertEqual_([sink.approvals[0].tool, sink.approvals[0].job_id, sink.approvals[0].state], ['skill_manage', 'sess1', 'pending'], 'Approvals 列');
+  assert_(sink.approvals[0].reason.indexOf('技能提案：新建「mail-digest」') === 0, 'reason：' + sink.approvals[0].reason);
+  assert_(/提案已送出/.test(c.content), '給模型的訊息：' + c.content);
+  assertEqual_(JSON.parse(sink.approvals[0].args).triggers, ['郵件摘要'], 'args 原樣存');
+  // autonomous 模式也進審批；RBAC write 關 → denied 不進審批
+  assertEqual_(run({ action: 'create', name: 'x2', description: 'd', content: 'c' }, { mode: 'autonomous' }).status, 'pending_approval', 'autonomous 也提案');
+  const closed = fakeM5ToolConfig_(); closed.rbac.skill.write = false;
+  assertEqual_(run({ action: 'create', name: 'x3', description: 'd', content: 'c' }, {}, { config: closed }).status, 'denied', 'write 關 → denied');
+  assertEqual_(sink.approvals.length, 2, 'denied 不寫 Approvals');
+  // 壞提案：驗證失敗回 invalid（invalid_proposal），不進審批
+  const bad = [
+    run({ action: 'create', name: 'weekly-report', description: 'd', content: 'c' }),
+    run({ action: 'create', name: 'new-one', description: '', content: 'c' }),
+    run({ action: 'create', name: 'Bad Name', description: 'd', content: 'c' }),
+    run({ action: 'patch', name: 'nope', patch_find: 'a', patch_replace: 'b' }),
+    run({ action: 'patch', name: 'weekly-report', patch_find: '不存在的片段', patch_replace: 'b' }),
+    run({ action: 'patch', name: 'weekly-report', patch_find: '步', patch_replace: 'b' }),
+    run({ action: 'patch', name: 'weekly-report' }),
+  ];
+  assertEqual_(bad.map((o) => o.status), new Array(7).fill('invalid'), '七種壞提案都 invalid：' + bad.map((o) => o.content).join(' | '));
+  assert_(bad.every((o) => /invalid_proposal/.test(o.content)), 'error code');
+  assert_(/已存在/.test(bad[0].content) && /找不到技能/.test(bad[3].content) && /找不到/.test(bad[4].content) && /命中 3 處/.test(bad[5].content) && /沒有任何變更/.test(bad[6].content), '錯誤訊息');
+  assertEqual_(sink.approvals.length, 2, '壞提案不寫 Approvals');
+  // patch 提案
+  const p = run({ action: 'patch', name: 'weekly-report', patch_find: '2. 第二步', patch_replace: '2. 第二步（改）\n3. 第三步', description: '新描述' });
+  assertEqual_([p.status, sink.approvals.length], ['pending_approval', 3], 'patch 進審批');
+  assert_(sink.approvals[2].reason.indexOf('技能提案：修補「weekly-report」') === 0, 'patch reason');
+  assertEqual_(parseSkillFile_(skills.store.get('weekly-report').text).body, '# weekly-report\n\n## 步驟\n1. 第一步\n2. 第二步', '提案階段原檔未動');
+  // 直接呼叫 handler（沒經過 proposal）一律拒絕
+  assertThrows_(() => skillManage_({ action: 'create', name: 'direct', description: 'd', content: 'c' }, { skillStore: skills.store }), '未批准不可直接寫');
+  // owner 批准：才真的寫檔；不續跑；拒絕也不續跑
+  const rows = sink.approvals.map((r, i) => Object.assign({ _row: i + 2 }, r));
+  const ap = memoryApprovalStore_(rows);
+  const ss = memorySessionStore_();
+  const sess = ss.store.create({ id: 'sess1' });
+  assertEqual_(sess.id !== '', true, 'session 建立');
+  rows.forEach((r) => { r.job_id = sess.id; });
+  const q = memoryQueueStore_();
+  const deps = { approvalStore: ap.store, sessionStore: ss.store, queueStore: q.store, registry, config, sink: sink.sink, spill: memorySpill_().store, skillStore: skills.store };
+  const d1 = decideApproval_(rows[0].id, true, deps);
+  assertEqual_([d1.state, d1.outcome.status, d1.continuation, q.jobs.length], ['approved', 'ok', '', 0], '批准 create：執行成功、不續跑');
+  const created = parseSkillFile_(skills.store.get('mail-digest').text);
+  assertEqual_([created.name, created.description, created.triggers, created.enabled, created.body], ['mail-digest', '郵件摘要格式', ['郵件摘要'], true, '# 郵件摘要\n\n1. 搜信\n2. 整理'], '批准後建檔');
+  assert_(/mail-digest/.test(ap.rows[0].result) && /"created":true/.test(ap.rows[0].result), 'Approvals.result：' + ap.rows[0].result);
+  const d2 = decideApproval_(rows[1].id, false, deps);
+  assertEqual_([d2.state, q.jobs.length, skills.store.get('x2')], ['denied', 0, null], '拒絕：不寫檔、不續跑');
+  const d3 = decideApproval_(rows[2].id, true, deps);
+  const patched = parseSkillFile_(skills.store.get('weekly-report').text);
+  assertEqual_([d3.state, patched.description, patched.body, patched.triggers], ['approved', '新描述', '# weekly-report\n\n## 步驟\n1. 第一步\n2. 第二步（改）\n3. 第三步', ['觸發weekly-report']], '批准 patch：取代片段、改描述、triggers 保留');
+  // 批准時狀況已變（技能已存在）→ 執行失敗但審批標 approved
+  const again = run({ action: 'create', name: 'mail-digest-2', description: 'd', content: 'c' });
+  skills.store.save('mail-digest-2', fakeSkillText_('mail-digest-2'));
+  const ap2 = memoryApprovalStore_([Object.assign({ _row: 2 }, sink.approvals[sink.approvals.length - 1])]);
+  const d4 = decideApproval_(again.approvalId, true, Object.assign({}, deps, { approvalStore: ap2.store }));
+  assertEqual_([d4.state, d4.outcome.status], ['approved', 'error'], '已存在 → 執行失敗');
+  assert_(/已存在/.test(ap2.rows[0].result), '失敗原因寫回 result');
+  assertEqual_(sink.audits.filter((a) => a.tool === 'skill_manage').length >= 10, true, '每次都寫 AuditLog');
+}
+
+function testSkillCronInjection_() {
+  const skills = memorySkillStore_([{ name: 'weekly-report', text: fakeSkillText_('weekly-report') }, { name: 'deck-planning', text: fakeSkillText_('deck-planning') }]);
+  // runSessionTurn_ 的 input.skills：全文注入、找不到列 missing
+  const fake = fakeChat_([{ text: '做好了', stop: 'end' }]);
+  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  const r = runSessionTurn_({ message: '跑排程', channel: 'cron', mode: 'autonomous', skills: 'weekly-report, deck-planning,nope' }, deps);
+  const sys = fake.calls[0].messages[0].content;
+  assert_(/## 技能「weekly-report」（已載入全文/.test(sys) && /## 技能「deck-planning」（已載入全文/.test(sys), '兩個技能全文都在');
+  assertEqual_([r.skills.loaded, r.skills.missing, fake.calls[0].messages[fake.calls[0].messages.length - 1].content], [['weekly-report', 'deck-planning'], ['nope'], '跑排程'], 'loaded / missing；訊息不變');
+  // cron job → runTurnJob_ 把 skills 傳給 runSessionTurn_；續跑 job 的 payload 也帶 skills
+  const q = memoryQueueStore_();
+  const cron = memoryCronStore_();
+  const ss = memorySessionStore_();
+  const captured = [];
+  let stopped = 'max_steps';
+  const runSessionTurn = (input) => { captured.push(input); return { text: 'ok', steps: [], stopped, stoppedDetail: '', sessionId: input.sessionId || ss.store.create({ channel: 'cron' }).id, usage: { prompt: 1, completion: 1 }, llmCalls: 1, ms: 5 }; };
+  const c = createCron_({ name: '週報', schedule: 'weekly mon 09:00', prompt: '產出本週週報', deliver_to: 'none', skills: 'weekly-report' }, { cronStore: cron.store, providerIds: [] });
+  const job = enqueue_('cron', cronJobPayload_(c), '', { store: q.store });
+  assertEqual_(job.payload.skills, 'weekly-report', 'cron payload 帶 skills');
+  const res = runQueueJob_(q.store.get(job.id), { store: q.store, cronStore: cron.store, budgetMs: 100000, runSessionTurn, sessionDeps: { store: ss.store } });
+  assertEqual_([captured.length, captured[0].skills, captured[0].mode, captured[0].channel], [1, 'weekly-report', 'autonomous', 'cron'], 'runSessionTurn_ 收到 skills');
+  assert_(res.result.continued_by, '中止 → 續跑');
+  const cont = q.store.get(res.result.continued_by);
+  assertEqual_([cont.type, cont.payload.skills, cont.payload.cron.skills], ['continuation', 'weekly-report', 'weekly-report'], '續跑 job 帶 skills');
+  stopped = '';
+  runQueueJob_(cont, { store: q.store, cronStore: cron.store, budgetMs: 100000, runSessionTurn, sessionDeps: { store: ss.store }, deliverDeps: {} });
+  assertEqual_(captured[1].skills, 'weekly-report', '續跑也注入');
+  // cronjob_manage create 可帶 skills
+  const made = cronjobManage_({ action: 'create', name: 'x', schedule: 'daily 08:00', prompt: 'p', skills: 'deck-planning' }, { cronStore: cron.store, queueStore: q.store, providerIds: [] });
+  assertEqual_(made.cron.skills, 'deck-planning', 'cronjob_manage skills');
+  setProp_(PROP.QUEUE_DIRTY, '');
+  setProp_(PROP.CRON_NEXT_RUN, '');
+}
+
+function testSkillAutoProposal_() {
+  // 純判斷
+  const okTurn = { steps: new Array(5).fill({ ok: true }), stopped: '' };
+  const base = { hasSkillManage: true, elapsedMs: 1000 };
+  assertEqual_(shouldNudgeSkillProposal_(okTurn, { turns: 1, skill_proposed_turn: 0 }, base), true, '5 步成功 → 問');
+  assertEqual_(shouldNudgeSkillProposal_({ steps: new Array(4).fill({ ok: true }), stopped: '' }, { turns: 1, skill_proposed_turn: 0 }, base), false, '4 步不問');
+  assertEqual_(shouldNudgeSkillProposal_({ steps: new Array(5).fill({ ok: true }), stopped: 'max_steps' }, { turns: 1, skill_proposed_turn: 0 }, base), false, '被中止不問');
+  assertEqual_(shouldNudgeSkillProposal_({ steps: new Array(5).fill({ ok: false }), stopped: '' }, { turns: 1, skill_proposed_turn: 0 }, base), false, '全失敗不問');
+  assertEqual_(shouldNudgeSkillProposal_(okTurn, { turns: 3, skill_proposed_turn: 1 }, base), false, '同 session 已問過');
+  assertEqual_(shouldNudgeSkillProposal_(okTurn, { turns: 1, skill_proposed_turn: 0 }, { hasSkillManage: false, elapsedMs: 1 }), false, '沒有 skill_manage');
+  assertEqual_(shouldNudgeSkillProposal_(okTurn, { turns: 1, skill_proposed_turn: 0 }, { hasSkillManage: true, elapsedMs: 200000 }), false, '這輪太久');
+  assert_(/5 次工具/.test(skillProposalNudgeMessage_(5)) && /skill_manage/.test(skillProposalNudgeMessage_(5)), 'nudge 訊息');
+  // 整輪：5 步成功 → 多一次模型呼叫 → 模型提案 → Approvals；評估訊息不進 Messages；同 session 第二次不再問
+  const five = (prefix) => ({ toolCalls: [1, 2, 3, 4, 5].map((i) => ({ id: prefix + i, name: 'fake_echo', args: { text: prefix + i } })), stop: 'tool_calls' });
+  const fake = fakeChat_([
+    five('a'), { text: '整理完成。', stop: 'end' },
+    { toolCalls: [{ id: 'p1', name: 'skill_manage', args: { action: 'create', name: 'drive-audit', description: '盤點 Drive 檔案', content: '# 盤點\n1. 列檔\n2. 讀前 200 字\n3. 整理成 Doc' } }], stop: 'tool_calls' }, { text: '已提出技能提案。', stop: 'end' },
+    five('b'), { text: '第二輪完成。', stop: 'end' },
+  ]);
+  const skills = memorySkillStore_();
+  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  const r1 = runSessionTurn_({ message: '盤點我的 Drive' }, deps);
+  assertEqual_([r1.steps.length, r1.text, fake.calls.length, r1.llmCalls], [5, '整理完成。', 4, 4], '主輪 2 次 + 評估 2 次模型呼叫');
+  assert_(/本輪共呼叫了 5 次工具/.test(fake.calls[2].messages[fake.calls[2].messages.length - 1].content), '第 3 次呼叫是評估訊息');
+  assertEqual_(fake.calls[2].messages.length, 1 + 1 + 1 + 5 + 1 + 1, '評估帶完整本輪歷史（system + user + assistant + 5 tool + assistant 文字 + 評估訊息）');
+  assertEqual_([r1.skillProposal.evaluated, r1.skillProposal.proposed, !!r1.skillProposal.approvalId, r1.skillProposal.status, r1.skillProposal.text], [true, true, true, 'pending_approval', '已提出技能提案。'], 'skillProposal 回報');
+  assertEqual_(deps._sink.approvals.length, 1, '一筆提案進 Approvals');
+  assert_(deps._sink.approvals[0].reason.indexOf('技能提案：新建「drive-audit」') === 0, 'reason');
+  assertEqual_(skills.store.get('drive-audit'), null, '尚未寫檔');
+  assertEqual_(deps._ss.messages.length, 1 + 1 + 5 + 1, '評估的訊息不進 Messages（只有主輪 8 則）');
+  assertEqual_(deps._ss.store.get(r1.sessionId).skill_proposed_turn, 1, 'session 記下已評估');
+  // 同 session 再來一次 5 步：不再評估
+  const r2 = runSessionTurn_({ message: '再盤點一次', sessionId: r1.sessionId }, deps);
+  assertEqual_([r2.steps.length, fake.calls.length, r2.skillProposal], [5, 6, null], '不再問');
+  // 新 session 但 skill_manage 的 RBAC write 關：不問
+  const cfgClosed = fakeM5ToolConfig_(); cfgClosed.rbac.skill.write = false;
+  const fake3 = fakeChat_([five('c'), { text: 'ok', stop: 'end' }]);
+  const r3 = runSessionTurn_({ message: 'x' }, fakeSessionDeps_(fake3.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: cfgClosed }));
+  assertEqual_([r3.skillProposal, fake3.calls.length], [null, 2], 'write 關不問');
+  // 評估時模型說不需要：記錄文字、沒有提案，仍標已評估
+  const fake4 = fakeChat_([five('d'), { text: 'ok', stop: 'end' }, { text: '不需要存成技能', stop: 'end' }]);
+  const deps4 = fakeSessionDeps_(fake4.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  const r4 = runSessionTurn_({ message: 'y' }, deps4);
+  assertEqual_([r4.skillProposal.proposed, r4.skillProposal.text, deps4._sink.approvals.length, deps4._ss.store.get(r4.sessionId).skill_proposed_turn], [false, '不需要存成技能', 0, 1], '不提案也只問一次');
+}
+
+function testSkillBuiltins_() {
+  const builtins = builtinSkills_();
+  assertEqual_(builtins.map((b) => b.name), ['weekly-report', 'deck-planning'], '兩個內建技能');
+  builtins.forEach((b) => {
+    const p = parseSkillFile_(b.text);
+    assertEqual_([p.name, p.enabled, p.triggers.length > 0, p.body.length > 200], [b.name, true, true, true], `${b.name} 可解析`);
+  });
+  assert_(/calendar_list_events/.test(builtins[0].text) && /gmail_search/.test(builtins[0].text) && /docs_create/.test(builtins[0].text) && /## 本週重點/.test(builtins[0].text), 'weekly-report 含工具與章節');
+  assert_(/先用文字回大綱/.test(builtins[1].text) && /slides_update_slide/.test(builtins[1].text) && /notes/.test(builtins[1].text), 'deck-planning 含原簡報規則');
+  const empty = memorySkillStore_();
+  assertEqual_(installBuiltinSkills_(empty.store), ['weekly-report', 'deck-planning'], '空資料夾寫入');
+  assertEqual_(installBuiltinSkills_(empty.store), [], '再跑不重寫');
+  const has = memorySkillStore_([{ name: 'mine', text: fakeSkillText_('mine') }]);
+  assertEqual_([installBuiltinSkills_(has.store), Object.keys(has.files)], [[], ['mine']], '已有技能就不寫入內建');
+  assertEqual_(enabledSkills_(empty.store.list()).map((x) => x.name), ['deck-planning', 'weekly-report'], '索引列出兩個');
 }

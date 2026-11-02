@@ -26,8 +26,11 @@ const TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
 /**
  * @typedef {{
  *   name: string, toolset: string, description: string, parameters: !Object, risk: string,
- *   handler: function(!Object, !Object): *, noSpill: (boolean|undefined)
+ *   handler: function(!Object, !Object): *, noSpill: (boolean|undefined),
+ *   proposal: (function(!Object, !Object): {reason: string}|undefined)
  * }} ToolDecl
+ * proposal（M5）：有此 hook 的工具在未批准時不執行 handler，executor 改呼叫它驗證並取得 reason，寫 Approvals 後回 pending_approval；
+ * owner 批准後才以 approved=true 執行 handler（skill_manage 用）。
  */
 
 /**
@@ -53,6 +56,7 @@ function allToolDeclarations_() {
     sessionTools_(),
     memoryTools_(),
     cronTools_(),
+    skillsTools_(),
   );
 }
 
@@ -115,6 +119,7 @@ function validateToolDeclaration_(tool) {
   if (!tool.description || typeof tool.description !== 'string') throw new Error(`${where} 缺 description`);
   if (!RISK_PERMISSION[tool.risk]) throw new Error(`${where} risk 必須是 R / W / D / X`);
   if (typeof tool.handler !== 'function') throw new Error(`${where} handler 必須是函式`);
+  if (tool.proposal !== undefined && typeof tool.proposal !== 'function') throw new Error(`${where} proposal 必須是函式`);
   const schema = tool.parameters;
   if (!schema || typeof schema !== 'object' || schema.type !== 'object') throw new Error(`${where} parameters 必須是 type=object 的 JSON Schema`);
   const props = schema.properties || {};

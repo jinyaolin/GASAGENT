@@ -1,5 +1,5 @@
 /**
- * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）、Queue 與排程（M4）。
+ * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）、Queue 與排程（M4）、技能資料夾與 SKILL.md（M5）。
  *
  * 回傳純 JSON，管理頁 Doctor 分頁以綠 / 紅 / 黃清單顯示。
  * status：'ok' 通過、'fail' 失敗（整體 ok=false）、'warn' 提醒（不影響整體）。
@@ -191,6 +191,35 @@ function runDoctor() {
       if (prop !== expected) push('cron_next_prop', 'CRON_NEXT_RUN 旗標與 Cron tab 一致', 'warn', `旗標 ${prop || '（空）'}，應為 ${expected || '（空）'}；開「排程」分頁或重新安裝會對齊。`);
     } catch (err) {
       push('queue', 'Queue / 排程健檢', 'fail', String(err && err.message || err));
+    }
+  }
+
+  // 11. 技能（M5）：Config skills_folder_id 有效、資料夾可讀、每個 SKILL.md 可解析
+  if (ss) {
+    try {
+      const folderId = getToolConfig_().skillsFolderId;
+      let folder = null;
+      if (folderId) {
+        try {
+          folder = DriveApp.getFolderById(parseDriveId_(folderId));
+          push('skills_folder_cfg', 'Config skills_folder_id 指向有效的 Drive 資料夾', 'ok', `${folder.getName()} — ${folder.getUrl()}`);
+        } catch (err) {
+          push('skills_folder_cfg', 'Config skills_folder_id 指向有效的 Drive 資料夾', 'fail', `skills_folder_id=${folderId} 無法開啟：${err && err.message || err}。到「技能」分頁清空或改成正確的資料夾。`);
+        }
+      } else {
+        folder = skillsFolder_('');
+        push('skills_folder_cfg', 'Config skills_folder_id 指向有效的 Drive 資料夾', 'ok', `未設定，使用預設 ${SKILLS_FOLDER_PATH.join('/')} — ${folder.getUrl()}`);
+      }
+      if (folder) {
+        const index = driveSkillStore_(folder).list();
+        const bad = index.filter((x) => x.error);
+        const enabled = index.filter((x) => x.enabled && !x.error).length;
+        push('skills_folder', '技能資料夾可讀', 'ok', `${index.length} 個技能（${enabled} 啟用）${index.length ? '：' + index.map((x) => x.name).join(', ') : '；開「技能」分頁會寫入內建範例'}`);
+        push('skills_parse', `每個 ${SKILL_FILE_NAME} 可解析（frontmatter name / description）`, bad.length ? 'fail' : 'ok',
+          bad.length ? bad.map((x) => `${x.name}：${x.error}`).join('\n') : index.length ? `${index.length} 個皆可解析` : '（尚無技能）');
+      }
+    } catch (err) {
+      push('skills', '技能健檢', 'fail', String(err && err.message || err));
     }
   }
 

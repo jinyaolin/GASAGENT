@@ -19,7 +19,7 @@ const DB_SCHEMA = Object.freeze({
   Providers: ['id', 'label', 'protocol', 'base_url', 'model', 'role', 'priority', 'enabled', 'extra_headers', 'max_tokens',
     'extra_body', 'cost_in_per_m', 'cost_out_per_m'],
   Sessions: ['id', 'channel', 'external_id', 'title', 'summary', 'model_override', 'token_est', 'created', 'last_active', 'status',
-    'compact_seq', 'turns', 'last_curated_turn', 'embedding'],
+    'compact_seq', 'turns', 'last_curated_turn', 'embedding', 'skill_proposed_turn'],
   Messages: ['session_id', 'seq', 'role', 'content', 'tokens', 'ts'],
   Memory: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],
   UserProfile: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],

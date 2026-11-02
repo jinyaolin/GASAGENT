@@ -45,6 +45,8 @@ function buildDeliveryContent_(cron, result, now) {
   if (result.stopped) lines.push(`- 中止原因：${result.stopped}${result.continuation_exhausted ? '（已達續跑上限，未完成）' : ''}`);
   const pending = steps.filter((s) => s.status === 'pending_approval');
   if (pending.length) lines.push(`- 待 owner 審批：${pending.map((s) => s.tool).join(', ')}（管理頁「紀錄 → 審批」）`);
+  if (result.skills && result.skills.loaded && result.skills.loaded.length) lines.push(`- 載入技能：${result.skills.loaded.join(', ')}${result.skills.missing && result.skills.missing.length ? `（找不到：${result.skills.missing.join(', ')}）` : ''}`);
+  if (result.skillProposal && result.skillProposal.proposed) lines.push(`- 技能提案待審批：${result.skillProposal.approvalId}（管理頁「紀錄 → 審批」）`);
   steps.slice(0, 40).forEach((s) => lines.push(`- ${s.tool}：${s.status}${s.ms ? `，${s.ms} ms` : ''}`));
   return { title, subject: `[GAS Agent] ${title}`, body: lines.join('\n') };
 }
