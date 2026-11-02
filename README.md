@@ -43,18 +43,42 @@ src/
   Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron / 技能健檢
   Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項 + M6 4 項；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
-scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回
+scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號
+scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
+scripts/add-webhook.sh   # 幫既有帳號補建部署 B
+scripts/lib.sh           # 以上三支共用（帳號設定檔、manifest 翻轉、clasp -u 包裝）
+accounts/<name>/         # 每個 Google 帳號的 clasp.json（scriptId）與 deploy.json（部署 ID、網址）；不進 git
 .clasp.json.example # clasp 綁定範本（.clasp.json 本身不進 git）
 ```
 
 ## 安裝
 
-### 0. 前置
+### 一鍵安裝到一個 Google 帳號（建議）
+
+```bash
+scripts/install.sh --account <代號>
+```
+
+`<代號>` 是這個帳號在本機的名字（例 `work`、`family`），同時是 `clasp -u <代號>` 的憑證名；之後更新程式用 `scripts/deploy.sh --account <代號> "說明"`。腳本會：
+
+1. 跑本機 pure 測試。
+2. `clasp -u <代號> login`：瀏覽器登入 Google，**選要安裝到的那個 Gmail**。
+3. 請你到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」（每個帳號一次；腳本會幫你開網頁，開好按 Enter）。
+4. `clasp create-script` 建一個 standalone Apps Script 專案「GAS Agent」並 `push` 全部程式碼。
+5. 開編輯器請你**手動執行 `installAgent()` 並按允許**（OAuth 授權畫面只能本人按；未驗證應用程式警告點「進階 → 前往 GAS Agent」即可）。它會建 DB spreadsheet、11 個 tab、每分鐘 trigger、Config 預設值、Drive `GAS Agent/skills` 與兩個內建技能。跑完按 Enter。
+6. 建部署 A（管理頁，「以我執行 / 只限我」）與部署 B（Telegram webhook，「任何人」；manifest 翻轉後另推一版再翻回；`--no-webhook` 可略過）。
+7. 把 scriptId 與兩個部署 ID 寫進 `accounts/<代號>/{clasp.json,deploy.json}`（**不進 git**），印出管理頁網址與部署 B 網址，以及接下來在管理頁要做的四件事（Doctor → 模型 → 工具 → 通道）。
+
+前置：Node.js、`npm i -g @google/clasp`（3.x）、python3（macOS 內建）。目前這台機器上原本的帳號已遷成 `default`（`accounts/default/`），`scripts/deploy.sh` 不帶 `--account` 就是它。多帳號共用同一個 checkout：所有腳本執行前會把該帳號的 `clasp.json` 複製成根目錄 `.clasp.json`，憑證各自存在 `~/.clasprc.json` 的不同名字下，互不干擾。既有帳號要補部署 B：`scripts/add-webhook.sh --account <代號>`。
+
+### 手動安裝（腳本做不到的環境）
+
+#### 0. 前置
 
 - Node.js 與 `clasp` 3.x：`npm i -g @google/clasp`
 - 到 <https://script.google.com/home/usersettings> 開啟「Google Apps Script API」
 
-### 1. 登入與綁定
+#### 1. 登入與綁定
 
 ```bash
 clasp login
@@ -64,21 +88,19 @@ clasp login
 clasp show-authorized-user
 ```
 
-第一次 clone 這個 repo 時把範本複製成 `.clasp.json`（scriptId 已填好；若要建自己的專案，改用 `clasp create-script --type standalone --title "GAS Agent" --rootDir src`）：
+要接到**既有**的專案把範本複製成 `.clasp.json`（scriptId 已填好）；要建自己的專案改用 `clasp create-script --type standalone --title "GAS Agent" --rootDir src`：
 
 ```bash
 cp .clasp.json.example .clasp.json
 ```
 
-### 2. 推送程式碼
+#### 2. 推送程式碼
 
 ```bash
-clasp push
+clasp push -f
 ```
 
-第一次 push 會問是否覆寫 manifest（`appsscript.json`），回答 yes；或直接 `clasp push -f`。
-
-### 3. 在編輯器執行 `installAgent()` 並授權
+#### 3. 在編輯器執行 `installAgent()` 並授權
 
 ```bash
 clasp open-script
@@ -87,22 +109,16 @@ clasp open-script
 1. 在 Apps Script 編輯器上方選擇函式 `installAgent`，按「執行」。
 2. Google 會跳出授權畫面，列出 `appsscript.json` 的全部 scopes（Drive、Docs、Sheets、Slides、Gmail、Calendar、外部連線、trigger、email），以本人帳號核准。
    未驗證應用程式會出現警告，點「進階 → 前往 GAS Agent（不安全）」即可，這是自己的 script。
-3. 執行紀錄會印出 JSON：`owner`、DB spreadsheet 的 `url`、`schema.createdTabs`（第一次應為 11 個 tab）、`trigger.created: true`。
-4. 重跑 `installAgent()` 是安全的：不會重建 DB、不會多裝 trigger，只補缺的 tab / 欄位。
+3. 執行紀錄會印出 JSON：`owner`、DB spreadsheet 的 `url`、`schema.createdTabs`（第一次應為 11 個 tab）、`trigger.created: true`、`skills.installed`。
+4. 重跑 `installAgent()` 是安全的：不會重建 DB、不會多裝 trigger，只補缺的 tab / 欄位 / 設定。
 
 可順手執行 `runDoctor()` 與 `runSmokeTests()`，在執行紀錄看結果。
 
-### 4. 部署管理頁（部署 A）
+#### 4. 部署管理頁（部署 A）與 webhook（部署 B）
 
-編輯器右上「部署 → 新增部署作業」：
+編輯器右上「部署 → 新增部署作業」：類型「網頁應用程式」、執行身分「**我**」、存取權「**只有我自己**」→ 部署 A。部署 B 同樣步驟但存取權「**任何人**」（Telegram webhook 用；注意新編輯器會把這個選擇寫進 `appsscript.json` 的 `webapp.access`，兩個部署要各自建版本）。
 
-| 欄位 | 值 |
-|---|---|
-| 類型 | 網頁應用程式 |
-| 執行身分 | **我** |
-| 具有存取權的使用者 | **只有我自己** |
-
-部署後複製「網頁應用程式 URL」。**這個 URL 綁定某一個版本號**：之後 `clasp push` 只更新編輯器裡的程式碼，線上頁面不會變。要讓線上更新，用既有部署 ID 推新版本（URL 不變）：
+**每個 URL 綁定某一個版本號**：之後 `clasp push` 只更新編輯器裡的程式碼，線上頁面不會變。要讓線上更新，用既有部署 ID 推新版本（URL 不變）：
 
 ```bash
 clasp deployments
@@ -112,19 +128,20 @@ clasp deployments
 clasp deploy -i <deploymentId> -d "說明"
 ```
 
-> 不要再按「新增部署作業」或 `clasp deploy` 不帶 `-i`：那會產生**另一個** URL，舊 URL 永遠停在舊版本（且保留當時的存取權設定）。多出來的舊部署請到「管理部署作業」封存，或 `clasp undeploy <deploymentId>`。
+> 不要再按「新增部署作業」或 `clasp deploy` 不帶 `-i`：那會產生**另一個** URL，舊 URL 永遠停在舊版本。多出來的舊部署請到「管理部署作業」封存，或 `clasp undeploy <deploymentId>`。
 >
-> 用 `clasp deploy -i` 更新時，Web App 的「執行身分 / 存取權」會依 `appsscript.json` 的 `webapp` 區段（USER_DEPLOYING / MYSELF）設定。
+> 用 `clasp deploy -i` 更新時，Web App 的「執行身分 / 存取權」依**當時** `appsscript.json` 的 `webapp` 區段；更新部署 B 前要把 `access` 改成 `ANYONE_ANONYMOUS`，更新 A 前改回 `MYSELF`。`scripts/deploy.sh` 就是在做這件事。
 
 ### 5. 打開管理頁，看 Doctor
 
-用本人 Google 帳號開「網頁應用程式 URL」→ 左側「Doctor」分頁。全部綠燈代表 M0 完成：
+用本人 Google 帳號開「網頁應用程式 URL」→ 左側「Doctor」分頁。全部綠燈代表安裝完成：
 
 - OWNER_EMAIL / DB_SPREADSHEET_ID 已設定
 - DB spreadsheet 可開啟，11 個 tab 表頭完整
 - 每分鐘 trigger 恰好 1 支
 - 已授權 scopes 涵蓋 `appsscript.json`
 - 時區 Asia/Taipei；Web App 已部署（黃燈僅提醒）
+- 技能資料夾可讀、兩個內建技能可解析
 
 驗收另一半：用另一個 Google 帳號開同一 URL，應被 Google 擋在登入 / 權限頁，看不到管理頁。
 
@@ -498,7 +515,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（54 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh "說明"`（push + 更新部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（54 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。有多個帳號就每個各跑一次 `deploy.sh --account`。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
@@ -509,6 +526,8 @@ node scripts/local-tests.js
 | 現象 | 處理 |
 |---|---|
 | `clasp push` 回 `User has not enabled the Apps Script API` | 到 <https://script.google.com/home/usersettings> 開啟 API，等一分鐘重試 |
+| `scripts/install.sh` 在 `create-script` 失敗 | 同上（API 沒開或剛開還沒生效）；或登入的不是目標帳號：`clasp -u <代號> logout` 後重跑 |
+| 多帳號切換後 `clasp` 指令打到錯的專案 | 根目錄 `.clasp.json` 是最後一次腳本複製進來的帳號；一律透過 `scripts/deploy.sh --account <代號>` 操作，或手動 `cp accounts/<代號>/clasp.json .clasp.json` |
 | 管理頁顯示「尚未安裝」 | 回編輯器執行 `installAgent()` |
 | Doctor「scopes」紅燈 | 在編輯器重新執行 `installAgent()`，讓 Google 重新要求授權 |
 | Doctor「trigger」顯示 0 支 | 執行 `installAgent()`；若要清掉重裝可先 `removeAgentTriggers()` |
