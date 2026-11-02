@@ -11,7 +11,7 @@ use_account "$ACCOUNT"
 [[ -z "$(deploy_json_get "$ACCOUNT" deployB)" ]] || die "accounts/$ACCOUNT 已有部署 B：$(deploy_json_get "$ACCOUNT" deployB)"
 trap manifest_restore EXIT
 [[ "$(manifest_access)" == "MYSELF" ]] || die "manifest 的 webapp.access 不是 MYSELF"
-step "帳號 $ACCOUNT：建立部署 B（任何人）"
+step "帳號 ${ACCOUNT}：建立部署 B（任何人）"
 manifest_set_access ANYONE_ANONYMOUS
 clasp_u "$ACCOUNT" push -f >/dev/null
 OUT="$(clasp_u "$ACCOUNT" --json deploy -d "Telegram webhook（任何人）" 2>&1 || true)"

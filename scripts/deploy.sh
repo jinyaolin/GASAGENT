@@ -25,7 +25,7 @@ trap manifest_restore EXIT
 step "本機 pure 測試"
 node scripts/local-tests.js >/dev/null || die "本機測試失敗，停止"
 
-step "帳號 $ACCOUNT：部署 A（只限我）$DEPLOY_A"
+step "帳號 ${ACCOUNT}：部署 A（只限我）$DEPLOY_A"
 run clasp_u "$ACCOUNT" push -f >/dev/null
 run clasp_u "$ACCOUNT" deploy -i "$DEPLOY_A" -d "$DESC"
 
@@ -33,7 +33,7 @@ if [[ -n "$DEPLOY_B" ]]; then
   step "部署 B（任何人；Telegram webhook）$DEPLOY_B"
   manifest_set_access ANYONE_ANONYMOUS
   run clasp_u "$ACCOUNT" push -f >/dev/null
-  run clasp_u "$ACCOUNT" deploy -i "$DEPLOY_B" -d "$DESC（webhook）"
+  run clasp_u "$ACCOUNT" deploy -i "$DEPLOY_B" -d "${DESC}（webhook）"
   manifest_restore
   run clasp_u "$ACCOUNT" push -f >/dev/null   # 讓編輯器裡的 manifest 回到 MYSELF
 else

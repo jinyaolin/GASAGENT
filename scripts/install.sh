@@ -25,7 +25,7 @@ done
 need_tools
 DIR="$(account_dir "$ACCOUNT")"
 if [[ -f "$DIR/deploy.json" ]]; then
-  die "accounts/$ACCOUNT 已存在（scriptId $(deploy_json_get "$ACCOUNT" scriptId)）。要更新程式請用 scripts/deploy.sh --account $ACCOUNT；要重裝請先把該資料夾移走。"
+  die "accounts/$ACCOUNT 已存在（scriptId $(deploy_json_get "$ACCOUNT" scriptId)）。要更新程式請用 scripts/deploy.sh --account ${ACCOUNT}；要重裝請先把該資料夾移走。"
 fi
 mkdir -p "$DIR"
 trap manifest_restore EXIT
@@ -35,7 +35,7 @@ step "0/6 本機 pure 測試"
 node scripts/local-tests.js >/dev/null || die "本機測試失敗，停止"
 
 if [[ $LOGIN -eq 1 ]]; then
-  step "1/6 以新帳號登入 clasp（憑證名 $ACCOUNT；瀏覽器會開 Google 登入，請選**要安裝到的那個 Gmail**）"
+  step "1/6 以新帳號登入 clasp（憑證名 ${ACCOUNT}；瀏覽器會開 Google 登入，請選**要安裝到的那個 Gmail**）"
   clasp_u "$ACCOUNT" login
 fi
 EMAIL="$(clasp_u "$ACCOUNT" show-authorized-user 2>/dev/null | python3 -c 'import re,sys; m=re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", sys.stdin.read()); print(m.group(0) if m else "")' || true)"
@@ -46,7 +46,7 @@ echo "請用**同一個帳號**開 https://script.google.com/home/usersettings �
 command -v open >/dev/null && open "https://script.google.com/home/usersettings" || true
 read -r -p "開好了按 Enter 繼續… " _
 
-step "3/6 建立 Apps Script 專案「$TITLE」並推送程式碼"
+step "3/6 建立 Apps Script 專案「${TITLE}」並推送程式碼"
 BACKUP=""
 if [[ -f .clasp.json ]]; then BACKUP=".clasp.json.bak.$$"; mv .clasp.json "$BACKUP"; fi
 if ! clasp_u "$ACCOUNT" create-script --type standalone --title "$TITLE" --rootDir src; then
@@ -57,13 +57,13 @@ cp .clasp.json "$DIR/clasp.json"
 [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
 SCRIPT_ID="$(python3 -c 'import json;print(json.load(open(".clasp.json"))["scriptId"])')"
 clasp_u "$ACCOUNT" push -f >/dev/null
-echo "scriptId：$SCRIPT_ID（已推 $(ls src | wc -l | tr -d ' ') 個檔案）"
+echo "scriptId：${SCRIPT_ID}（已推 $(ls src | wc -l | tr -d ' ') 個檔案）"
 
 step "4/6 授權：在編輯器執行 installAgent()"
 cat <<MSG
 瀏覽器會開 Apps Script 編輯器。請：
   1. 上方函式下拉選「installAgent」→ 按「執行」。
-  2. 跳出授權畫面 → 選同一個帳號 → 「進階」→「前往 $TITLE（不安全）」→ 勾選全部 → 允許（這是你自己的 script）。
+  2. 跳出授權畫面 → 選同一個帳號 → 「進階」→「前往 ${TITLE}（不安全）」→ 勾選全部 → 允許（這是你自己的 script）。
   3. 執行紀錄印出 JSON（owner / DB url / trigger.created: true / skills.installed）就完成。
 MSG
 clasp_u "$ACCOUNT" open-script >/dev/null 2>&1 || echo "（開不了瀏覽器就手動開 https://script.google.com/d/$SCRIPT_ID/edit）"
