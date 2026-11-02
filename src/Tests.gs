@@ -2528,6 +2528,15 @@ function testTelegramGroup_() {
   const on = handleTelegramUpdate_(tgGroupMessage_('/group on', 111, -100), f.deps);
   assertEqual_([on.action, f.deps.cfg.telegramOpenGroups, f.deps.cfg.telegramGuestGroups, f.deps._config[f.deps._config.length - 1]], ['group_on', ['-100'], [], { telegram_open_groups: '-100', telegram_guest_groups: '' }], '/group on 寫 Config');
   assert_(/群聊模式/.test(on.text) && /@MyAgentBot/.test(on.text), 'on 文字：' + on.text);
+  assert_(!/隱私模式/.test(on.text), 'api 沒回 getMe 時不出隱私提醒');
+  // 隱私模式開著（getMe can_read_all_group_messages=false）→ /group on / status 附提醒；off 不附
+  const apiPrivacy = (m, p) => m === 'getMe' ? { username: 'MyAgentBot', can_read_all_group_messages: false } : undefined;
+  const apiOpen = (m, p) => m === 'getMe' ? { username: 'MyAgentBot', can_read_all_group_messages: true } : undefined;
+  assertEqual_([telegramPrivacyWarning_(apiPrivacy), telegramPrivacyWarning_(apiOpen), telegramPrivacyWarning_(() => { throw new Error('x'); })], [TELEGRAM_PRIVACY_WARNING, '', ''], '隱私提醒判斷');
+  const savedApi = f.deps.api; f.deps.api = apiPrivacy;
+  assert_(/setprivacy/.test(handleTelegramUpdate_(tgGroupMessage_('/group on', 111, -100), f.deps).text), '/group on 附隱私提醒');
+  assert_(/setprivacy/.test(handleTelegramUpdate_(tgGroupMessage_('/group', 111, -100), f.deps).text), '/group 狀態附隱私提醒');
+  f.deps.api = savedApi;
   assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/group on', 111, -100), f.deps).action, 'group_on', '重複 on 不重複加');
   assertEqual_(f.deps.cfg.telegramOpenGroups, ['-100'], '不重複');
   assert_(/群聊模式/.test(handleTelegramUpdate_(tgGroupMessage_('/group status', 111, -100), f.deps).text), '/group 狀態：群聊');

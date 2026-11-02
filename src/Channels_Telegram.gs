@@ -14,6 +14,9 @@
  *   /group guest 訪客模式（Config telegram_guest_groups）：非白名單成員獨立 session（<chat id>:guest）、沒有工具、不注入記憶 / 技能
  *   /group off   只有白名單成員叫得到
  * 成員（非白名單）的 /指令一律忽略；訪客的附件不處理，群聊成員的附件照常存 Drive。
+ * **隱私模式**：Telegram 預設的 bot 隱私模式下，群組裡的 @bot 一般訊息**不會送到 bot**（只有 /指令、回覆 bot、服務訊息會到），
+ * 所以要在 BotFather `/setprivacy` → Disable 後把 bot 退群再加回（或把 bot 設成群組管理員）。getMe 的
+ * `can_read_all_group_messages` 就是這個狀態；/group 指令與 Doctor 會檢查並提醒（telegramPrivacyWarning_）。
  * 審批按鈕任何人都看得到，但 callback 仍要過白名單。bot username 由 getMe 取得存 Config telegram_bot_username。
  * 附件：照片 / 檔案（document / photo / video / audio / voice）用 getFile 下載存到 Drive `GAS Agent/attachments/telegram/`，
  * 訊息 = caption（沒有就預設一句）+ 附件註記（名稱 / 類型 / Drive file_id / 網址），agent 用 drive_read_text（PDF / 圖片 OCR）、
@@ -40,6 +43,8 @@ const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容�
 const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group']);
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
 const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
+/** 隱私模式開著時 /group 與 Doctor 的提醒。 */
+const TELEGRAM_PRIVACY_WARNING = '⚠️ 這個 bot 的「隱私模式」還開著：Telegram 不會把群組裡 @bot 的一般訊息送給它（只有 /指令和回覆 bot 的訊息會到），所以 @bot 不會有反應。請到 @BotFather → /setprivacy → 選這個 bot → Disable，然後把 bot 退出群組再加回來（或直接把 bot 設成群組管理員）。';
 
 // ---- Properties -------------------------------------------------------------------------------------
 
@@ -221,6 +226,18 @@ function parseTelegramUpdate_(update) {
     }
   }
   return out;
+}
+
+/**
+ * 隱私模式提醒：getMe 的 can_read_all_group_messages 為 false 時回提醒文字，否則空字串。api 失敗也回空字串（不擋流程）。
+ * @param {Function} api (method, payload) → result
+ * @return {string}
+ */
+function telegramPrivacyWarning_(api) {
+  let me = null;
+  try { me = api('getMe', {}); } catch (err) { return ''; }
+  if (!me || me.can_read_all_group_messages !== false) return '';
+  return TELEGRAM_PRIVACY_WARNING;
 }
 
 /**
@@ -474,9 +491,13 @@ function handleTelegramUpdate_(rawUpdate, deps) {
           ? `此群組已切成訪客模式：任何成員 @${bot} 都會得到回答，但不帶工具、不會透露 owner 的資料。/group on 改群聊模式、/group off 關閉。`
           : '此群組已關閉開放：只有白名單成員 @bot 或回覆 bot 時會回答。';
       report.action = 'group_' + want;
+      const warn = telegramPrivacyWarning_(deps.api);
+      if (warn && want !== 'off') report.text += '\n\n' + warn;
     } else {
       const mode = deps.cfg.telegramOpenGroups.indexOf(here) !== -1 ? '群聊模式（成員可用工具，寫入送審）' : deps.cfg.telegramGuestGroups.indexOf(here) !== -1 ? '訪客模式（成員無工具）' : '未開放（只有白名單）';
       report.text = `此群組目前：${mode}。/group on 群聊、/group guest 訪客、/group off 關閉。bot 只在被 @ 提到、被回覆或收到 /指令時反應。`;
+      const warn = telegramPrivacyWarning_(deps.api);
+      if (warn) report.text += '\n\n' + warn;
       report.action = 'group';
     }
     send(report.text); return report;

@@ -242,6 +242,13 @@ function runDoctor() {
           } catch (err) {
             push('tg_webhook', 'Telegram webhook 已登記且指向部署 B', 'fail', String(err && err.message || err));
           }
+          try {
+            const me = telegramApi_('getMe', {});
+            push('tg_privacy', 'Telegram bot 隱私模式已關（群組裡 @bot 才收得到）', me.can_read_all_group_messages ? 'ok' : 'warn',
+              me.can_read_all_group_messages ? `@${me.username || ''} 可讀群組全部訊息` : `@${me.username || ''} 隱私模式開著：群組裡 @bot 的一般訊息不會送到 bot。只在私聊使用可忽略；要用群組請到 @BotFather /setprivacy → Disable，再把 bot 退群重加（或設成群組管理員）。`);
+          } catch (err) {
+            push('tg_privacy', 'Telegram bot 隱私模式已關（群組裡 @bot 才收得到）', 'warn', String(err && err.message || err));
+          }
         }
       }
       if (ccfg.emailEnabled) {
