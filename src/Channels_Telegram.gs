@@ -16,8 +16,8 @@ const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const TELEGRAM_MESSAGE_MAX = 3900;
 /** 每分鐘最多處理幾個 update（CacheService 計數，粗略即可）。 */
 const TELEGRAM_RATE_PER_MINUTE = 30;
-/** 收到訊息先回這句，再排隊。 */
-const TELEGRAM_ACK_TEXT = '收到，處理中…（每分鐘排程會接手，結果回在這裡）';
+/** Config telegram_ack 開著時，收到訊息先回這句再排隊（預設關：直接等結果）。 */
+const TELEGRAM_ACK_TEXT = '收到，處理中…';
 /** 審批按鈕的 callback_data：apr:<approval id>:approve|deny（≤ 64 bytes）。 */
 const TELEGRAM_CALLBACK_RE = /^apr:([A-Za-z0-9_-]+):(approve|deny)$/;
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
@@ -301,7 +301,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     if (cmd.rest) {
       const job = deps.enqueue('turn', telegramTurnPayload_(cmd.rest, u), fresh.id);
       report.jobId = job.id;
-      report.text = `已開新 session（${fresh.id}）。${TELEGRAM_ACK_TEXT}`;
+      report.text = `已開新 session（${fresh.id}），任務已排入。`;
     } else {
       report.text = `已開新 session（${fresh.id}）。`;
     }
@@ -332,10 +332,10 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     send(report.text); report.action = 'model_set'; return report;
   }
 
-  // 一般訊息（含 /<技能名>）：先回收到，再排隊
-  send(TELEGRAM_ACK_TEXT, { replyTo: u.messageId });
+  // 一般訊息（含 /<技能名>）：排隊；Config telegram_ack 開著才先回「收到」
+  if (deps.cfg.telegramAck) send(TELEGRAM_ACK_TEXT, { replyTo: u.messageId });
   const job = deps.enqueue('turn', telegramTurnPayload_(u.text, u), current ? current.id : '');
-  report.action = 'enqueued'; report.jobId = job.id; report.text = TELEGRAM_ACK_TEXT;
+  report.action = 'enqueued'; report.jobId = job.id; report.text = deps.cfg.telegramAck ? TELEGRAM_ACK_TEXT : '';
   return report;
 }
 

@@ -13,6 +13,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
   telegram_webhook_url: '',
   telegram_owner_chat_id: '',
   telegram_notify_approvals: true,
+  telegram_ack: false,
   email_enabled: false,
   email_inbox_label: 'agent/inbox',
   email_scan_every_minutes: 5,
@@ -20,7 +21,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
 
 /**
  * @typedef {{
- *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean,
+ *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean, telegramAck: boolean,
  *   emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
  * }} ChannelConfig
  */
@@ -39,6 +40,7 @@ function parseChannelConfig_(map) {
     telegramWebhookUrl: String(map.telegram_webhook_url || '').trim(),
     telegramOwnerChatId: String(map.telegram_owner_chat_id || '').trim(),
     telegramNotifyApprovals: map.telegram_notify_approvals === undefined ? d.telegram_notify_approvals : toBoolean_(map.telegram_notify_approvals),
+    telegramAck: map.telegram_ack === undefined ? d.telegram_ack : toBoolean_(map.telegram_ack),
     emailEnabled: map.email_enabled === undefined ? d.email_enabled : toBoolean_(map.email_enabled),
     emailInboxLabel: String(map.email_inbox_label || d.email_inbox_label).trim() || d.email_inbox_label,
     emailScanEveryMinutes: clampInt_(map.email_scan_every_minutes, d.email_scan_every_minutes, 1, 1440),

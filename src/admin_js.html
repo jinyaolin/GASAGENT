@@ -1405,6 +1405,7 @@
     const $allow = el('input', { type: 'text', placeholder: '1201905814, 987654321' }); $allow.value = cfg.telegramAllowedUserIds.join(', ');
     const $execUrl = el('input', { type: 'text', placeholder: 'https://script.google.com/macros/s/<部署 B 的 ID>/exec' }); $execUrl.value = cfg.telegramWebhookUrl;
     const $notify = el('input', { type: 'checkbox' }); $notify.checked = cfg.telegramNotifyApprovals;
+    const $ack = el('input', { type: 'checkbox' }); $ack.checked = cfg.telegramAck;
     const $regen = el('input', { type: 'checkbox' });
     const $tgMsg = el('div');
     const $webhookInfo = el('div', { class: 'meta' });
@@ -1416,6 +1417,7 @@
         field('白名單 user id', $allow, '純數字，逗號分隔。查自己的 id：對 @userinfobot 說話。私聊的 chat id = user id'),
         field('部署 B 網址（/exec）', $execUrl, '編輯器「部署 → 新增部署作業」：網頁應用程式、執行身分「我」、存取權「任何人」；或用 scripts/deploy.sh 建。管理頁（部署 A）維持「只限我」不要動'),
         field('審批通知', el('label', { class: 'checkbox' }, [$notify, ' 聊天台 / Email / 排程停在審批時，推一則帶「批准 / 拒絕」按鈕的訊息到 Telegram']), '從 Telegram 批准後，agent 的後續回覆仍回到原通道'),
+        field('先回「收到」', el('label', { class: 'checkbox' }, [$ack, ' 收到訊息先回一句「收到，處理中…」再排隊']), '預設關：安靜等結果（通常 1–2 分鐘）'),
         field('webhook secret', el('label', { class: 'checkbox' }, [$regen, ` 重新產生（目前 ${data.telegram.hasSecret ? data.telegram.secretHint : '尚未產生，儲存時自動產生'}）`]), '放在 webhook URL 的 ?key=；重新產生後要再按「設定 webhook」'),
       ]),
       data.telegram.webhookUrl ? el('div', { class: 'meta' }, `webhook URL：${data.telegram.webhookUrl.replace(/key=[^&]+/, 'key=…')}`) : (data.telegram.webhookUrlError ? el('div', { class: 'warn-text' }, data.telegram.webhookUrlError) : null),
@@ -1455,7 +1457,7 @@
       $tgMsg.innerHTML = ''; $emMsg.innerHTML = '';
       try {
         await call('adminSaveChannelSettings', {
-          telegram_enabled: $tgEnabled.checked, telegram_notify_approvals: $notify.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(), regenerateSecret: $regen.checked,
+          telegram_enabled: $tgEnabled.checked, telegram_notify_approvals: $notify.checked, telegram_ack: $ack.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(), regenerateSecret: $regen.checked,
           email_enabled: $emEnabled.checked, email_inbox_label: $label.value.trim(), email_scan_every_minutes: $every.value,
         });
         $token.value = '';

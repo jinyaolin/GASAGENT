@@ -92,7 +92,7 @@ function smokeTestTable_() {
     ['skills: 內建範例技能可解析；資料夾為空才寫入', testSkillBuiltins_, 'pure'],
     // M6
     ['telegram: update 解析、secret / 白名單驗證、保留指令解析、長文切段、審批鍵盤、webhook URL、通道設定解析', testTelegramParse_, 'pure'],
-    ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字先回收到再排隊（沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批', testTelegramHandle_, 'pure'],
+    ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字直接排隊（telegram_ack 開才先回收到；沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批', testTelegramHandle_, 'pure'],
     ['email: 內文去引用 / 簽名、掃描只處理 owner 未加星且非 agent 回覆的信並加星、thread 沿用 session、到期旗標', testEmailChannel_, 'pure'],
     ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；非 Telegram 來源停在審批時推 Telegram 通知；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
   ];
@@ -2275,13 +2275,18 @@ function testTelegramHandle_() {
   assertEqual_(handleTelegramUpdate_(tgMessage_('hi', 111), Object.assign({}, f.deps, { rateExceeded: () => true })).reason, 'rate_limited', '速率');
   // 一般文字：先回收到、排 turn job（沒有 session → session_id 空，runSessionTurn_ 會建帶 external_id 的新 session）
   const r1 = handleTelegramUpdate_(tgMessage_('找本週的信', 111, 111, 42), f.deps);
-  assertEqual_([r1.action, f.sent.length, f.sent[0].text, f.sent[0].opts.replyTo, f.jobs.length], ['enqueued', 1, TELEGRAM_ACK_TEXT, 42, 1], '收到 + 排隊');
+  assertEqual_([r1.action, f.sent.length, f.jobs.length], ['enqueued', 0, 1], '預設不回「收到」、直接排隊');
   assertEqual_([f.jobs[0].type, f.jobs[0].session_id, f.jobs[0].payload.message, f.jobs[0].payload.channel, f.jobs[0].payload.telegram_chat_id, f.jobs[0].payload.external_id, f.jobs[0].payload.mode], ['turn', '', '找本週的信', 'telegram', '111', '111', 'interactive'], 'payload');
   assertEqual_(f.deps._config, [{ telegram_owner_chat_id: '111' }], '第一次記下 owner chat id');
+  const ackDeps = Object.assign({}, f.deps, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '111', telegram_ack: 'TRUE' }) });
+  handleTelegramUpdate_(tgMessage_('再一個', 111, 111, 43), ackDeps);
+  assertEqual_([f.sent.length, f.sent[0].text, f.sent[0].opts.replyTo, f.jobs.length], [1, TELEGRAM_ACK_TEXT, 43, 2], 'telegram_ack 開著才先回收到');
+  f.jobs.pop(); f.sent.length = 0;
   // 有 active telegram session 就沿用
   const sess = f.ss.store.create({ channel: 'telegram', external_id: '111' });
   const r2 = handleTelegramUpdate_(tgMessage_('/weekly-report', 111), f.deps);
   assertEqual_([r2.action, f.jobs[1].session_id, f.jobs[1].payload.message], ['enqueued', sess.id, '/weekly-report'], '技能指令原樣排隊、沿用 session');
+  assertEqual_(f.sent.length, 0, '仍不回收到');
   // /status /help /skills
   assert_(/session s1：0 輪/.test(handleTelegramUpdate_(tgMessage_('/status', 111), f.deps).text), '/status');
   assert_(/\/model/.test(handleTelegramUpdate_(tgMessage_('/help', 111), f.deps).text), '/help');

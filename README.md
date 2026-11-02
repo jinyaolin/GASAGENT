@@ -472,7 +472,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 部署 B | 「以我執行 / **任何人**」的 Web App。Apps Script 的存取等級寫在 `appsscript.json` 的 `webapp.access`，一個版本只能一種，所以 `scripts/deploy.sh` 先以 `MYSELF` 更新部署 A，再把 manifest 翻成 `ANYONE_ANONYMOUS` 推一個版本給部署 B，最後翻回。目前的部署 B：`AKfycbypDGHfZ6Ez0HktdBY0WcysnAEePAyBuaLtDU_maOW5ovPtWvFhHcFlLEjqPpagkkqkug`（版本 18） |
 | webhook URL | `<部署 B /exec>?src=telegram&key=<32 字元 secret>`。GAS 的 `doPost` 拿不到 HTTP header，所以 secret 放 query；`doPost` 比對 `e.parameter.key` 與 Script Property `TELEGRAM_WEBHOOK_SECRET`，再比對 `message.from.id` 是否在 Config `telegram_allowed_user_ids`。不符一律丟掉、不回話、記 `AuditLog`（tool `telegram:webhook`） |
 | 回應 | 一律 `HtmlService.createHtmlOutput('ok')`，第一跳就是 200（`ContentService` 會 302，Telegram 會不斷重送）。每分鐘最多 30 個 update（CacheService 計數） |
-| 流程 | 文字訊息 → 回「收到，處理中…」→ `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
+| 流程 | 文字訊息 → `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`（預設不先回話；Config `telegram_ack` 開了才先回「收到，處理中…」）；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
 | 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼）、白名單 user id、部署 B 網址、secret（儲存時自動產生；可重新產生）、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
@@ -494,7 +494,7 @@ Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指�
 1. 更新：`scripts/deploy.sh "說明"` 已把部署 A（版本 17）與部署 B（版本 18）推上去。Doctor → 「重新安裝」（Config 補通道設定）→ 全綠 → smoke tests 60 項全過。
 2. Telegram 建 bot：手機 Telegram 找 **@BotFather** → `/newbot` → 取得 token。找 **@userinfobot** 取得自己的 user id（或用 telegram-assistant 已知的 `1201905814`）。
 3. 管理頁「通道」：勾啟用 Telegram、貼 token、白名單填 user id、部署 B 網址填 `https://script.google.com/macros/s/AKfycbypDGHfZ6Ez0HktdBY0WcysnAEePAyBuaLtDU_maOW5ovPtWvFhHcFlLEjqPpagkkqkug/exec` → 儲存（會產生 secret）→ 「設定 webhook」→ 「查 webhook 狀態」應顯示 URL 與待處理 0 → 「送測試訊息」手機應收到。
-4. 手機對 bot 說 `/help` → 立刻回指令說明。再說 `找出我 Drive 最近 5 個檔案，列出名稱與修改時間` → 立刻回「收到，處理中…」，1–2 分鐘內收到結果（trigger 每分鐘跑；或到管理頁「紀錄」按「處理一個 job」）。「記憶」分頁的 Sessions 應多一個 `[telegram]` session。
+4. 手機對 bot 說 `/help` → 立刻回指令說明。再說 `找出我 Drive 最近 5 個檔案，列出名稱與修改時間` → 1–2 分鐘內收到結果（不會先回「收到」，除非在「通道」開啟）（trigger 每分鐘跑；或到管理頁「紀錄」按「處理一個 job」）。「記憶」分頁的 Sessions 應多一個 `[telegram]` session。
 5. 審批按鈕：Telegram 說 `寄一封信給我自己，主旨 test，內文 hello`（gmail external 需開）→ 回覆附「✅ 批准 gmail_send / ❌ 拒絕」按鈕 → 按批准 → 回「已批准…agent 會接續回覆」→ 一分鐘內收到 agent 的收尾訊息、信件寄達。
 6. `/weekly-report` 在 Telegram 也能用（技能注入）；`/new` 開新 session；`/model` 列模型。
 7. Email：「通道」勾啟用 Email、間隔先設 1 → 儲存 → 「建立標籤」。用 Gmail 寄一封信給自己，主旨 `[agent] 測試`，內文 `列出我今天的行事曆事件`，寄出後到收件匣把這封信貼上標籤 `agent/inbox`（或先在 Gmail 設篩選器）→ 等 1–2 分鐘（或「通道」按「立刻掃一次」）→ 同一 thread 收到 GAS Agent 的回信；原信已加星。驗完把間隔調回 5。
