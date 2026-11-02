@@ -106,6 +106,26 @@ function adminReinstall() {
   return installAgent();
 }
 
+/**
+ * Doctor 分頁「紅隊」：用真模型跑注入案例（M7-A）。一次跑一個案例（前端逐案呼叫，避免撞 google.script.run 6 分鐘）；
+ * caseId 省略跑全部。結果寫 AuditLog `redteam:<id>`。
+ * @param {string=} caseId RED_TEAM_CASES 的 id
+ * @return {{ok: boolean, cases: !Array<!Object>, provider: string}}
+ */
+function adminRunRedTeam(caseId) {
+  assertOwner();
+  return runRedTeam(caseId ? String(caseId) : '');
+}
+
+/**
+ * Doctor 分頁「紅隊」：案例清單（給前端逐案呼叫）。
+ * @return {!Array<{id: string, title: string, principal: string}>}
+ */
+function adminListRedTeamCases() {
+  assertOwner();
+  return RED_TEAM_CASES.map((c) => ({ id: c.id, title: c.title, principal: c.principal || 'owner' }));
+}
+
 // ---- M1：模型分頁 ------------------------------------------------------------------
 
 /**
@@ -131,7 +151,10 @@ function adminSaveProvider(input) {
   }
   const p = saveProvider_(input);
   if (input && typeof input.apiKey === 'string' && input.apiKey.trim()) {
+    // M7-A：setProperty 直接覆寫，舊 key 立即失效（每次呼叫都即時讀 Script Properties，沒有快取）。只記事件不記值。
+    const had = !!getProviderKey_(p.id);
     setProviderKey_(p.id, input.apiKey);
+    securityAudit_('provider:key_set', `provider ${p.id} 的 API key 已${had ? '更換（舊值已覆寫）' : '設定'}`);
   }
   return publicProvider_(p);
 }
@@ -160,6 +183,7 @@ function adminClearProviderKey(id) {
   const p = getProvider_(id);
   if (!p) throw new Error(`找不到 provider「${id}」。`);
   setProviderKey_(id, '');
+  securityAudit_('provider:key_cleared', `provider ${id} 的 API key 已清除`);
   return publicProvider_(p);
 }
 
@@ -170,7 +194,9 @@ function adminClearProviderKey(id) {
  */
 function adminDeleteProvider(id) {
   assertOwner();
-  return { deleted: deleteProvider_(id) };
+  const deleted = deleteProvider_(id);
+  securityAudit_('provider:deleted', `provider ${id} 已刪除（含 API key）`);
+  return { deleted };
 }
 
 /**
@@ -487,6 +513,7 @@ function adminListAuditLog(limit) {
     result_preview: String(r.result_preview || ''),
     ok: toBoolean_(r.ok),
     ms: toNumber_(r.ms, 0),
+    principal: String(r.principal || ''),
   }));
 }
 
@@ -714,6 +741,11 @@ function adminGetChannelSettings() {
   return {
     config: cfg,
     defaults: CHANNEL_CONFIG_DEFAULTS,
+    // M7-A：群聊成員可用 toolset 的勾選清單（鎖定的不可放寬；Workspace 類勾了 Doctor 會提醒）
+    toolsets: listToolsets_(),
+    lockedToolsets: PRINCIPAL_LOCKED_TOOLSETS.group_member.slice(),
+    workspaceToolsets: WORKSPACE_TOOLSETS.slice(),
+    defaultMemberToolsets: PRINCIPAL_DEFAULT_TOOLSETS.group_member.slice(),
     telegram: { hasToken: !!token, tokenHint: keyHint_(token), hasSecret: !!secret, secretHint: secret ? secret.slice(0, 4) + '…' + secret.slice(-4) : '', webhookUrl, webhookUrlError },
     email: { owner: getOwnerEmail_(), nextScan: getProp_(PROP.EMAIL_NEXT_SCAN) },
     adminUrl: (() => { try { return ScriptApp.getService().getUrl() || ''; } catch (err) { return ''; } })(),
@@ -721,7 +753,7 @@ function adminGetChannelSettings() {
 }
 
 /**
- * 通道分頁：儲存（token 非空才寫；regenerateSecret 重新產生 secret，之後要重新 setWebhook）。
+ * 通道分頁：儲存（token 非空才寫，且先經 getMe 驗證；secret 沒有就產生）。
  * @param {!Object} input
  * @return {!Object} adminGetChannelSettings()
  */
@@ -738,7 +770,33 @@ function adminSaveChannelSettings(input) {
 function adminClearTelegramToken() {
   assertOwner();
   setTelegramToken_('');
+  securityAudit_('telegram:token_cleared', 'Telegram bot token 已清除');
   return adminGetChannelSettings();
+}
+
+/**
+ * 通道分頁（M7-A）：重新產生 webhook secret 並自動重打 setWebhook。
+ * @return {{secretHint: string, webhook: ?Object, webhookError: string, info: *}}
+ */
+function adminTelegramRotateSecret() {
+  assertOwner();
+  const r = telegramRotateSecret_();
+  let info = null;
+  try { info = adminTelegramWebhookInfo(); } catch (err) { info = null; }
+  return Object.assign(r, { info });
+}
+
+/**
+ * 通道分頁（M7-A）：更換 bot token（getMe 驗證成功才寫入、重打 setWebhook）。
+ * @param {string} token
+ * @return {{username: string, botId: string, replaced: boolean, webhook: ?Object, webhookError: string, info: *}}
+ */
+function adminTelegramReplaceToken(token) {
+  assertOwner();
+  const r = telegramReplaceToken_(String(token || ''));
+  let info = null;
+  try { info = adminTelegramWebhookInfo(); } catch (err) { info = null; }
+  return Object.assign(r, { info });
 }
 
 /**
@@ -748,7 +806,7 @@ function adminClearTelegramToken() {
 function adminTelegramSetWebhook() {
   assertOwner();
   const r = telegramSetWebhook_();
-  return { url: r.url.replace(/key=[^&]+/, 'key=…'), result: r.result, info: telegramGetWebhookInfo_() };
+  return { url: maskWebhookUrl_(r.url), result: r.result, info: telegramGetWebhookInfo_() };
 }
 
 /**
@@ -758,7 +816,7 @@ function adminTelegramSetWebhook() {
 function adminTelegramWebhookInfo() {
   assertOwner();
   const info = telegramGetWebhookInfo_() || {};
-  return Object.assign({}, info, { url: String(info.url || '').replace(/key=[^&]+/, 'key=…') });
+  return Object.assign({}, info, { url: maskWebhookUrl_(info.url) });
 }
 
 /**

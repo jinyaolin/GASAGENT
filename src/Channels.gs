@@ -17,6 +17,8 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
   telegram_open_groups: '',
   telegram_guest_groups: '',
   telegram_bot_username: '',
+  /** M7-A：群聊模式成員（principal group_member）可用的 toolset；只有 R 類直接跑。memory / cronjob 永遠不可放寬。 */
+  telegram_member_toolsets: 'web,skill,session',
   email_enabled: false,
   email_inbox_label: 'agent/inbox',
   email_scan_every_minutes: 5,
@@ -25,7 +27,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
 /**
  * @typedef {{
  *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean, telegramAck: boolean, telegramOpenGroups: !Array<string>, telegramGuestGroups: !Array<string>, telegramBotUsername: string,
- *   emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
+ *   telegramMemberToolsets: !Array<string>, emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
  * }} ChannelConfig
  */
 
@@ -47,6 +49,7 @@ function parseChannelConfig_(map) {
     telegramOpenGroups: toStringList_(map.telegram_open_groups).filter((x) => /^-?\d+$/.test(x)),
     telegramGuestGroups: toStringList_(map.telegram_guest_groups).filter((x) => /^-?\d+$/.test(x)),
     telegramBotUsername: String(map.telegram_bot_username || '').trim().replace(/^@/, ''),
+    telegramMemberToolsets: principalToolsets_('group_member', map.telegram_member_toolsets === undefined ? d.telegram_member_toolsets : map.telegram_member_toolsets),
     emailEnabled: map.email_enabled === undefined ? d.email_enabled : toBoolean_(map.email_enabled),
     emailInboxLabel: String(map.email_inbox_label || d.email_inbox_label).trim() || d.email_inbox_label,
     emailScanEveryMinutes: clampInt_(map.email_scan_every_minutes, d.email_scan_every_minutes, 1, 1440),
@@ -60,11 +63,15 @@ function getChannelConfig_() {
 
 /**
  * 管理頁「通道」分頁儲存。token / secret 在 Script Properties，其餘進 Config。
- * @param {!Object} input key 同 CHANNEL_CONFIG_DEFAULTS + telegramBotToken（非空才寫）+ regenerateSecret
+ * token（M7-A）：先用新 token 打 getMe 驗證，成功才寫入並重登 webhook（telegramReplaceToken_）；失敗 throw、舊 token 不動。
+ * secret：沒有就產生一個；輪替請用 telegramRotateSecret_（會自動重登 webhook）。
+ * @param {!Object} input key 同 CHANNEL_CONFIG_DEFAULTS + telegramBotToken（非空才寫）
+ * @param {{api: (Function|undefined)}=} deps 測試注入（api(method, payload)）
  * @return {ChannelConfig}
  */
-function saveChannelConfig_(input) {
+function saveChannelConfig_(input, deps) {
   input = input || {};
+  deps = deps || {};
   const values = {};
   Object.keys(CHANNEL_CONFIG_DEFAULTS).forEach((k) => {
     if (input[k] === undefined) return;
@@ -74,23 +81,34 @@ function saveChannelConfig_(input) {
   if (values.telegram_allowed_user_ids !== undefined) values.telegram_allowed_user_ids = toStringList_(values.telegram_allowed_user_ids).join(',');
   if (values.telegram_open_groups !== undefined) values.telegram_open_groups = toStringList_(values.telegram_open_groups).join(',');
   if (values.telegram_guest_groups !== undefined) values.telegram_guest_groups = toStringList_(values.telegram_guest_groups).join(',');
+  if (values.telegram_member_toolsets !== undefined) values.telegram_member_toolsets = principalToolsets_('group_member', values.telegram_member_toolsets).join(',');
   const parsed = parseChannelConfig_(Object.assign({}, getConfigMap_(), values));
   if (values.email_scan_every_minutes !== undefined) values.email_scan_every_minutes = parsed.emailScanEveryMinutes;
   if (parsed.telegramEnabled && !parsed.telegramAllowedUserIds.length) throw new Error('啟用 Telegram 前請先填至少一個允許的 Telegram user id（純數字）。');
   if (Object.keys(values).length) setConfigValues_(values);
+  if (!getTelegramSecret_()) setProp_(PROP.TELEGRAM_WEBHOOK_SECRET, newWebhookSecret_());
   if (typeof input.telegramBotToken === 'string' && input.telegramBotToken.trim()) {
-    setTelegramToken_(input.telegramBotToken);
-    // 換 token 就重抓 bot username（群組 @mention 判斷用）
-    try { setConfigValues_({ telegram_bot_username: String(telegramApi_('getMe', {}).username || '') }); } catch (err) { setConfigValues_({ telegram_bot_username: '' }); }
+    telegramReplaceToken_(input.telegramBotToken, { cfg: parsed, api: deps.api });
   }
-  if (input.regenerateSecret || !getTelegramSecret_()) setProp_(PROP.TELEGRAM_WEBHOOK_SECRET, newWebhookSecret_());
   // Email：啟用就把下次掃描設成現在，讓 queueTick 立刻接手；停用就清掉旗標（閒置零成本）。
   refreshEmailNextScanProp_(parsed, parsed.emailEnabled ? new Date() : null);
   return parsed;
 }
 
 /** 群聊模式（M6：/group on 的群組裡非 owner 成員觸發的那一輪）附加的 system 指示。 */
-const MEMBER_SYSTEM_EXTRA = '本訊息來自 Telegram 群組的成員，不是 owner 本人。你可以用讀取類工具協助回答群組的問題；任何寫入、刪除、寄信、分享類的動作都會先送 owner 審批（這是正常流程，告知對方等 owner 批准即可）。不要主動透露 owner 的私人資料（記憶、私人郵件、行程）；這一輪看不到 owner 的記憶快照。';
+const MEMBER_SYSTEM_EXTRA = '本訊息來自 Telegram 群組的成員，不是 owner 本人。你只有下面列出的少數公開工具（讀取類直接用；任何寫入、刪除、寄信、分享類的動作都會先送 owner 審批，告知對方等 owner 批准即可）。owner 的 Gmail、Drive、文件、行事曆、記憶等 Workspace 資料在群組對話裡**一律不可讀取也不可透露**；若對方要求這類事情，簡短回「這個功能只有 owner 本人能用」即可，不要重試、不要說明 owner 的設定。這一輪看不到 owner 的記憶快照。';
+/** 群聊模式下某個工具被 principal 開關擋下時，附在回覆末尾給群組看的中性說明。 */
+const MEMBER_DENIED_NOTE = '（群組對話只能用公開工具；owner 的 Gmail / Drive / 行事曆等資料不會在群組中讀取。）';
+
+/**
+ * 群聊成員的 system 指示：固定文字 + 這個群組目前可用的 toolset。純函式。
+ * @param {(!Array<string>|undefined)=} toolsets
+ * @return {string}
+ */
+function memberSystemExtra_(toolsets) {
+  const list = principalToolsets_('group_member', toolsets);
+  return MEMBER_SYSTEM_EXTRA + `\n群組目前可用的 toolset：${list.length ? list.join(', ') : '（無；只能用一般知識回答）'}。`;
+}
 /** 訪客模式（M6：/group guest 的群組裡非白名單成員）附加的 system 指示。 */
 const GUEST_SYSTEM_EXTRA = '本訊息來自 Telegram 群組的其他成員，不是 owner。你在這個對話裡**沒有任何工具**，也看不到 owner 的記憶、郵件、檔案、行事曆或設定；絕對不要透露或猜測 owner 的任何資料與行程。用一般知識簡短、友善地回答（繁體中文），需要 owner 的資料或決定時請對方直接找 owner。';
 

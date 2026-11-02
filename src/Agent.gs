@@ -31,8 +31,9 @@ const DEFAULT_PERSONA = [
 /**
  * @typedef {{
  *   tool: string, args: !Object, argsPreview: string, resultPreview: string, status: string, ok: boolean,
- *   ms: number, approvalId: string, spillFileId: string
+ *   ms: number, approvalId: string, spillFileId: string, error: string
  * }} TurnStep
+ * error：失敗 / 拒絕的代碼（principal_denied / rbac_denied / tool_error…），成功為空。
  */
 
 /**
@@ -125,13 +126,23 @@ function describeDisabledTools_(config, registry) {
 }
 
 /**
- * 工具結果包成資料區塊。
+ * 工具結果包成資料區塊。內容裡若出現偽造的區塊標記（郵件 / 網頁想「提早關閉」資料區塊再塞指令），
+ * 把 `<<` 換成 `‹‹` 讓它失效（M7-A 紅隊測試 (c)）。
  * @param {string} name
  * @param {ToolOutcome} outcome
  * @return {string}
  */
 function wrapToolResult_(name, outcome) {
-  return `<<tool_result name=${name} status=${outcome.status} untrusted>>\n${outcome.content}\n<<end>>`;
+  return `<<tool_result name=${name} status=${outcome.status} untrusted>>\n${defangDataBlockMarkers_(outcome.content)}\n<<end>>`;
+}
+
+/**
+ * 讓工具結果內容裡的 `<<tool_result` / `<<end>>` 失效。純函式。
+ * @param {*} text
+ * @return {string}
+ */
+function defangDataBlockMarkers_(text) {
+  return String(text === null || text === undefined ? '' : text).replace(/<<(tool_result|end)/g, '‹‹$1');
 }
 
 /**
@@ -181,8 +192,10 @@ function stopMessage_(stopped, detail, steps) {
  * 跑一輪。
  * @param {{message: string, history: (!Array<!Object>|undefined), providerId: (string|undefined),
  *   sessionId: (string|undefined), mode: (string|undefined), systemExtra: (string|undefined),
- *   contextBlocks: (!Array<string>|undefined), approveWrites: (boolean|undefined)}} input
- *   approveWrites（M6 群聊）：R 以外的工具一律送審批
+ *   contextBlocks: (!Array<string>|undefined), approveWrites: (boolean|undefined), principal: (string|undefined),
+ *   principalToolsets: (!Array<string>|undefined)}} input
+ *   approveWrites（M6 群聊）：R 以外的工具一律送審批；principal / principalToolsets（M7-A）：owner / group_member / guest，
+ *   group_member 只看得到也只能用 principalToolsets 內的工具（executor 再查一次）
  *   history：先前的訊息（中立格式，可含 assistant tool_calls 與 tool 訊息）；contextBlocks：附加到 system prompt 的區塊
  * @param {{chat: (Function|undefined), execute: (Function|undefined), registry: (ToolRegistry|undefined),
  *   config: (ToolConfig|undefined), executeDeps: (Object|undefined), now: (Function|undefined),
@@ -204,7 +217,9 @@ function runTurn_(input, deps) {
   const message = String(input.message || '').trim();
   if (!message) throw new Error('訊息不可為空。');
 
-  const tools = listToolsForProvider_(registry, config.rbac);
+  const principal = normalizePrincipal_(input.principal);
+  const principalToolsets = input.principalToolsets;
+  const tools = listToolsForProvider_(registry, config.rbac, (t) => !checkPrincipalAccess_(t, principal, principalToolsets));
   const messages = [{ role: 'system', content: buildSystemPrompt_(config, registry, input.systemExtra, input.contextBlocks) }]
     .concat((input.history || []).filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool'))
       .filter((m) => m.role !== 'assistant' || m.content || (m.tool_calls && m.tool_calls.length)))
@@ -261,7 +276,7 @@ function runTurn_(input, deps) {
       } else if (now() - started > budgetMs) {
         outcome = { name: tc.name, status: 'error', ok: false, ms: 0, approvalId: '', spill: null, result: null, error: 'time_budget', content: toolErrorText_('time_budget', '已達單輪時間預算，此呼叫未執行。') };
       } else {
-        outcome = execute(tc.name, tc.args || {}, { sessionId, mode, approveWrites: !!input.approveWrites }, deps.executeDeps);
+        outcome = execute(tc.name, tc.args || {}, { sessionId, mode, approveWrites: !!input.approveWrites, principal, principalToolsets }, deps.executeDeps);
       }
       if (outcome.status === 'pending_approval' && outcome.approvalId) pendingKeys[key] = outcome.approvalId;
 
@@ -275,6 +290,7 @@ function runTurn_(input, deps) {
         ms: outcome.ms,
         approvalId: outcome.approvalId || '',
         spillFileId: outcome.spill ? outcome.spill.fileId : '',
+        error: outcome.error || '',
       });
       messages.push({ role: 'tool', tool_call_id: tc.id, name: tc.name, content: wrapToolResult_(tc.name, outcome) });
 

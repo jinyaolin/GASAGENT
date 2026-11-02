@@ -20,11 +20,37 @@ clasp_u() { local acct="$1"; shift; clasp -u "$acct" "$@"; }
 
 account_dir() { echo "$REPO_DIR/accounts/$1"; }
 
-# 把帳號的 clasp.json 複製成根目錄 .clasp.json
+CLASP_JSON="$REPO_DIR/.clasp.json"
+CLASP_JSON_BACKUP=""
+
+# clasp_json_script_id <path>：讀 clasp.json 的 scriptId
+clasp_json_script_id() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("scriptId",""))' "$1" 2>/dev/null || true; }
+
+# 把帳號的 clasp.json 複製成根目錄 .clasp.json（M7-A 多帳號隔離）：
+#   1. clasp.json 與 deploy.json 的 scriptId 必須一致，且不得與其他帳號的 scriptId 相同 —— 否則拒絕，避免把程式推到別的帳號的專案；
+#   2. 先備份原本的根目錄 .clasp.json，腳本結束由 restore_clasp_json 還原，之後手動 `clasp push` 不會打到剛部署的那個帳號。
 use_account() {
-  local acct="$1" dir; dir="$(account_dir "$acct")"
+  local acct="$1" dir sid dsid other oname osid; dir="$(account_dir "$acct")"
   [[ -f "$dir/clasp.json" ]] || die "找不到 $dir/clasp.json；先跑 scripts/install.sh --account $acct"
-  cp "$dir/clasp.json" "$REPO_DIR/.clasp.json"
+  sid="$(clasp_json_script_id "$dir/clasp.json")"
+  [[ -n "$sid" ]] || die "accounts/$acct/clasp.json 沒有 scriptId"
+  if [[ -f "$dir/deploy.json" ]]; then
+    dsid="$(deploy_json_get "$acct" scriptId)"
+    [[ -z "$dsid" || "$dsid" == "$sid" ]] || die "accounts/$acct 的 clasp.json（$sid）與 deploy.json（$dsid）scriptId 不一致，拒絕推送：請確認這個資料夾沒有被別的帳號的檔案覆蓋"
+  fi
+  for other in "$REPO_DIR"/accounts/*/; do
+    oname="$(basename "$other")"
+    [[ "$oname" == "$acct" || ! -f "$other/deploy.json" ]] && continue
+    osid="$(deploy_json_get "$oname" scriptId)"
+    [[ -z "$osid" || "$osid" != "$sid" ]] || die "scriptId $sid 同時出現在 accounts/$acct 與 accounts/$oname：兩個帳號指到同一個 Apps Script 專案，請先釐清再部署"
+  done
+  if [[ -z "$CLASP_JSON_BACKUP" && -f "$CLASP_JSON" ]]; then CLASP_JSON_BACKUP="$(mktemp)"; cp "$CLASP_JSON" "$CLASP_JSON_BACKUP"; fi
+  cp "$dir/clasp.json" "$CLASP_JSON"
+}
+
+# 還原 use_account 之前的根目錄 .clasp.json（沒有備份就不動）。
+restore_clasp_json() {
+  if [[ -n "$CLASP_JSON_BACKUP" && -f "$CLASP_JSON_BACKUP" ]]; then cp "$CLASP_JSON_BACKUP" "$CLASP_JSON"; rm -f "$CLASP_JSON_BACKUP"; CLASP_JSON_BACKUP=""; fi
 }
 
 # deploy_json_get <account> <key>

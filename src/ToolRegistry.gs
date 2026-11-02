@@ -141,12 +141,14 @@ function validateToolDeclaration_(tool) {
  * 傳入 rbac 時只列出目前有權限的工具（模型看不到被關掉的工具就不會白呼叫；ToolExecutor 仍會再查一次）。
  * @param {ToolRegistry=} registry
  * @param {!Object<string, !Object<string, boolean>>=} rbac toolset → {read, write, delete, external}
+ * @param {(function(ToolDecl): boolean)=} allow 額外過濾（M7-A：principal 開關），回 false 的不列
  * @return {!Array<{name: string, description: string, parameters: !Object}>}
  */
-function listToolsForProvider_(registry, rbac) {
+function listToolsForProvider_(registry, rbac, allow) {
   const reg = registry || getToolRegistry_();
   return reg.list
     .filter((tool) => !rbac || isToolAllowed_(tool, rbac))
+    .filter((tool) => !allow || allow(tool))
     .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
 }
 

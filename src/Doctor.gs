@@ -231,6 +231,12 @@ function runDoctor() {
         const token = getTelegramToken_();
         push('tg_token', 'Telegram bot token 已設定', token ? 'ok' : 'fail', token ? keyHint_(token) : '到「通道」分頁貼上 BotFather 給的 token。');
         push('tg_allow', 'Telegram 白名單至少一個 user id', ccfg.telegramAllowedUserIds.length ? 'ok' : 'fail', ccfg.telegramAllowedUserIds.join(', ') || '沒有白名單，所有訊息都會被丟掉。');
+        // M7-A：secret 長度、群聊成員放寬的 toolset
+        const secret = getTelegramSecret_();
+        push('tg_secret', 'Telegram webhook secret 已產生（32 字元）', secret && secret.length >= 32 ? 'ok' : 'warn', secret ? `${secret.slice(0, 4)}…（${secret.length} 字元）；可在「通道」分頁重新產生` : '尚未產生：到「通道」分頁儲存一次。');
+        const openedWorkspace = ccfg.telegramMemberToolsets.filter((t) => WORKSPACE_TOOLSETS.indexOf(t) !== -1);
+        push('tg_member_toolsets', '群聊模式成員只能用公開工具（未放寬 Workspace）', openedWorkspace.length ? 'warn' : 'ok',
+          openedWorkspace.length ? `群組成員可讀 owner 的 ${openedWorkspace.join(', ')}（telegram_member_toolsets）。只有信得過的群組才建議放寬；到「通道」分頁調整。` : `成員可用：${ccfg.telegramMemberToolsets.join(', ') || '（無）'}；memory / cronjob 永遠不開放`);
         if (token) {
           try {
             const info = telegramGetWebhookInfo_();
@@ -238,7 +244,7 @@ function runDoctor() {
             const url = String(info.url || '');
             push('tg_webhook', 'Telegram webhook 已登記且指向部署 B', !url ? 'fail' : url === expected ? 'ok' : 'warn',
               !url ? '尚未登記：到「通道」分頁填部署 B 網址後按「設定 webhook」。' : (url === expected ? '' : '登記的 URL 與設定不同（secret 或網址變了？按「設定 webhook」重登）。') +
-              `${url.replace(/key=[^&]+/, 'key=…')}；待處理 ${info.pending_update_count || 0}${info.last_error_message ? `；最後錯誤 ${info.last_error_date ? fmtDate_(new Date(info.last_error_date * 1000)) : ''} ${info.last_error_message}` : ''}`);
+              `${maskWebhookUrl_(url)}；待處理 ${info.pending_update_count || 0}${info.last_error_message ? `；最後錯誤 ${info.last_error_date ? fmtDate_(new Date(info.last_error_date * 1000)) : ''} ${info.last_error_message}` : ''}`);
           } catch (err) {
             push('tg_webhook', 'Telegram webhook 已登記且指向部署 B', 'fail', String(err && err.message || err));
           }

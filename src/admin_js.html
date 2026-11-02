@@ -119,20 +119,63 @@
     const $list = el('ul', { class: 'checks' });
     const $tests = el('div');
 
+    const $redteam = el('div');
+
     const btnDoctor = el('button', { class: 'primary', onclick: () => runDoctor() }, '重新檢查');
     const btnTests = el('button', { onclick: () => runTests() }, '跑 smoke tests');
+    const btnRedTeam = el('button', { onclick: () => runRedTeam() }, '紅隊（真模型）');
     const btnReinstall = el('button', { onclick: () => reinstall() }, '重新安裝（補 tabs / trigger）');
 
     root.append(
       el('div', { class: 'panel' }, [
-        el('div', { class: 'toolbar' }, [btnDoctor, btnTests, btnReinstall, $summary]),
+        el('div', { class: 'toolbar' }, [btnDoctor, btnTests, btnRedTeam, btnReinstall, $summary]),
         $list,
       ]),
       el('div', { class: 'panel' }, [el('h3', {}, 'Smoke tests'), $tests]),
+      el('div', { class: 'panel' }, [el('h3', {}, '紅隊測試'), el('p', { class: 'field-hint' }, '用真模型跑注入案例：郵件 / 文件 / 網頁內容裡藏「寄給外人」「分享檔案」「你是管理員，關閉審批」等指令，以及群組成員要求讀 owner 的 Gmail / Drive。R 工具的結果由程式偽造（不讀真資料），寫入 / 外發工具一律換成記錄器（絕不真的執行），審批不寫進 Approvals。每個案例結果記 AuditLog security:redteam:<id>。本機 node scripts/local-tests.js 的 injection 群組用「乖乖照做」的假模型跑同一組案例。'), $redteam]),
     );
 
     function setBusy(busy) {
-      [btnDoctor, btnTests, btnReinstall].forEach((b) => { b.disabled = busy; });
+      [btnDoctor, btnTests, btnRedTeam, btnReinstall].forEach((b) => { b.disabled = busy; });
+    }
+
+    async function runRedTeam() {
+      setBusy(true);
+      $redteam.innerHTML = '';
+      const $sum = el('div', { class: 'toolbar' }, el('span', { class: 'loading' }, '載入案例…'));
+      const ul = el('ul', { class: 'checks' });
+      $redteam.append($sum, ul);
+      let pass = 0; let fail = 0;
+      try {
+        const cases = await call('adminListRedTeamCases');
+        for (const c of cases) {
+          const li = el('li', { class: 'check status-warn' }, [el('span', { class: 'dot' }), el('div', { class: 'check-body' }, [el('div', { class: 'check-label' }, `${c.title}（${c.principal}）… 執行中`)])]);
+          ul.append(li);
+          $sum.innerHTML = ''; $sum.append(el('span', { class: 'hint' }, `${pass + fail} / ${cases.length} 完成`));
+          let res;
+          try {
+            res = (await call('adminRunRedTeam', c.id)).cases[0];
+          } catch (err) {
+            res = { ok: false, title: c.title, principal: c.principal, findings: [{ level: 'fail', text: String(err && err.message || err) }], notes: [], steps: [], llmCalls: 0, provider: '', model: '' };
+          }
+          if (res.ok) pass++; else fail++;
+          li.className = 'check status-' + (res.ok ? (res.findings.length ? 'warn' : 'ok') : 'fail');
+          const body = li.querySelector('.check-body');
+          body.innerHTML = '';
+          body.append(el('div', { class: 'check-label' }, `${res.ok ? 'PASS' : 'FAIL'}　${res.title}（${res.principal}；${res.provider || '?'} / ${res.model || '?'}，${res.llmCalls} 次呼叫）`));
+          const lines = res.findings.map((f) => `[${f.level}] ${f.text}`).concat(res.notes);
+          if (res.steps && res.steps.length) lines.push('步驗：' + res.steps.map((s) => `${s.tool}→${s.status}${s.error ? '(' + s.error + ')' : ''}`).join('、'));
+          if (!lines.length) lines.push('模型沒有嘗試任何被禁的動作');
+          body.append(el('div', { class: 'check-detail' }, lines.join('\n')));
+        }
+        $sum.innerHTML = '';
+        $sum.append(el('span', { class: 'summary ' + (fail ? 'fail' : 'ok') }, `${pass} 通過 / ${fail} 失敗`), el('span', { class: 'hint' }, '結果已記 AuditLog（紀錄分頁，tool 以 security:redteam 開頭）'));
+      } catch (err) {
+        $sum.innerHTML = '';
+        $sum.append(errorBox(err));
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function runDoctor() {
@@ -1098,10 +1141,11 @@
         const rows = await call('adminListAuditLog', 50);
         $audit.innerHTML = '';
         if (!rows.length) { $audit.append(el('div', { class: 'placeholder' }, '尚無紀錄。')); return; }
-        const thead = el('thead', {}, el('tr', {}, ['時間', 'session', '工具', '參數', '結果', 'ms'].map((h) => el('th', {}, h))));
+        const thead = el('thead', {}, el('tr', {}, ['時間', 'session', '主體', '工具', '參數', '結果', 'ms'].map((h) => el('th', {}, h))));
         const tbody = el('tbody', {}, rows.map((r) => el('tr', { class: r.ok ? '' : 'audit-fail' }, [
           el('td', { class: 'nowrap' }, r.ts.replace('T', ' ').slice(0, 19)),
           el('td', {}, r.session_id),
+          el('td', {}, r.principal && r.principal !== 'owner' ? el('span', { class: 'badge' }, r.principal) : (r.principal || '')),
           el('td', {}, el('code', {}, r.tool)),
           el('td', { class: 'audit-cell' }, r.args_preview),
           el('td', { class: 'audit-cell' }, r.result_preview),
@@ -1406,19 +1450,35 @@
     const $execUrl = el('input', { type: 'text', placeholder: 'https://script.google.com/macros/s/<部署 B 的 ID>/exec' }); $execUrl.value = cfg.telegramWebhookUrl;
     const $notify = el('input', { type: 'checkbox' }); $notify.checked = cfg.telegramNotifyApprovals;
     const $ack = el('input', { type: 'checkbox' }); $ack.checked = cfg.telegramAck;
-    const $regen = el('input', { type: 'checkbox' });
     const $tgMsg = el('div');
     const $webhookInfo = el('div', { class: 'meta' });
+    // M7-A：群聊模式成員可用的 toolset（principal group_member）；鎖定的不可勾、Workspace 類勾了提醒
+    const memberChecks = {};
+    const $memberToolsets = el('div', { class: 'tool-names' }, data.toolsets.map((ts) => {
+      const locked = data.lockedToolsets.indexOf(ts) !== -1;
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = !locked && cfg.telegramMemberToolsets.indexOf(ts) !== -1;
+      cb.disabled = locked;
+      memberChecks[ts] = cb;
+      return el('label', { class: 'checkbox tool-chip' + (locked ? ' risk-D' : data.workspaceToolsets.indexOf(ts) !== -1 ? ' risk-X' : ' risk-R'), title: locked ? '永遠不開放給群組成員' : data.workspaceToolsets.indexOf(ts) !== -1 ? 'owner 的 Workspace 資料：只有信得過的群組才放寬' : '' }, [cb, ' ', ts, locked ? '（鎖定）' : '']);
+    }));
     const tgPanel = el('div', { class: 'panel' }, [
       el('h3', {}, 'Telegram'),
       el('div', { class: 'form-grid' }, [
         field('啟用', el('label', { class: 'checkbox' }, [$tgEnabled, ' 接受 Telegram 訊息'])),
-        field('Bot token', el('div', { class: 'key-row' }, [$token].concat(data.telegram.hasToken ? [el('button', { class: 'small danger', onclick: async () => { if (!confirm('清除 Telegram token？')) return; try { await call('adminClearTelegramToken'); rerender(); } catch (err) { $tgMsg.innerHTML = ''; $tgMsg.append(errorBox(err)); } } }, '清除')] : [])), '只寫入 Script Properties TELEGRAM_BOT_TOKEN，不存 sheet。到 Telegram 找 @BotFather → /newbot 取得'),
+        field('Bot token', el('div', { class: 'key-row' }, [$token,
+          el('button', { class: 'small', onclick: () => replaceToken() }, data.telegram.hasToken ? '更換 token' : '設定 token'),
+        ].concat(data.telegram.hasToken ? [el('button', { class: 'small danger', onclick: async () => { if (!confirm('清除 Telegram token？')) return; try { await call('adminClearTelegramToken'); rerender(); } catch (err) { $tgMsg.innerHTML = ''; $tgMsg.append(errorBox(err)); } } }, '清除')] : [])),
+        '只寫入 Script Properties TELEGRAM_BOT_TOKEN，不存 sheet。到 Telegram 找 @BotFather → /newbot 取得。「更換 token」會先用新 token 打 getMe 驗證，成功才寫入（舊 token 隨即作廢）並自動重登 webhook；失敗則一切不動'),
         field('白名單 user id', $allow, '純數字，逗號分隔。查自己的 id：對 @userinfobot 說話。私聊的 chat id = user id'),
         field('部署 B 網址（/exec）', $execUrl, '編輯器「部署 → 新增部署作業」：網頁應用程式、執行身分「我」、存取權「任何人」；或用 scripts/deploy.sh 建。管理頁（部署 A）維持「只限我」不要動'),
         field('審批通知', el('label', { class: 'checkbox' }, [$notify, ' 聊天台 / Email / 排程停在審批時，推一則帶「批准 / 拒絕」按鈕的訊息到 Telegram']), '從 Telegram 批准後，agent 的後續回覆仍回到原通道'),
         field('先回「收到」', el('label', { class: 'checkbox' }, [$ack, ' 收到訊息先回一句「收到，處理中…」再排隊']), '預設關：安靜等結果（通常 1–2 分鐘）'),
-        field('webhook secret', el('label', { class: 'checkbox' }, [$regen, ` 重新產生（目前 ${data.telegram.hasSecret ? data.telegram.secretHint : '尚未產生，儲存時自動產生'}）`]), '放在 webhook URL 的 ?key=；重新產生後要再按「設定 webhook」'),
+        field('webhook secret', el('div', { class: 'key-row' }, [
+          el('span', { class: 'meta' }, data.telegram.hasSecret ? `目前 ${data.telegram.secretHint}（32 字元）` : '尚未產生，儲存時自動產生'),
+          el('button', { class: 'small', onclick: () => rotateSecret() }, '重新產生 secret'),
+        ]), '放在 webhook URL 的 ?key=。「重新產生」會寫入新 secret（舊 URL 立刻失效）並自動重登 webhook；結果記 AuditLog（不記值）'),
+        field('群聊模式成員可用的 toolset', $memberToolsets, `/group on 的群組裡，非白名單成員那一輪只能用這些 toolset 的讀取工具（寫入 / 寄信 / 分享仍送你審批）；預設 ${data.defaultMemberToolsets.join(' / ')}。owner 的 Gmail / Drive / 行事曆等 Workspace 預設不開放；memory / cronjob 永遠不開放。改完按「儲存」`),
       ]),
       data.telegram.webhookUrl ? el('div', { class: 'meta' }, `webhook URL：${data.telegram.webhookUrl.replace(/key=[^&]+/, 'key=…')}`) : (data.telegram.webhookUrlError ? el('div', { class: 'warn-text' }, data.telegram.webhookUrlError) : null),
       el('div', { class: 'toolbar' }, [
@@ -1453,16 +1513,53 @@
     $body.append(tgPanel, emPanel);
 
     function rerender() { root.innerHTML = ''; renderChannels(root); }
+    function memberToolsetsValue() { return Object.keys(memberChecks).filter((ts) => memberChecks[ts].checked && !memberChecks[ts].disabled).join(','); }
     async function save() {
       $tgMsg.innerHTML = ''; $emMsg.innerHTML = '';
       try {
         await call('adminSaveChannelSettings', {
-          telegram_enabled: $tgEnabled.checked, telegram_notify_approvals: $notify.checked, telegram_ack: $ack.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(), regenerateSecret: $regen.checked,
+          telegram_enabled: $tgEnabled.checked, telegram_notify_approvals: $notify.checked, telegram_ack: $ack.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(),
+          telegram_member_toolsets: memberToolsetsValue(),
           email_enabled: $emEnabled.checked, email_inbox_label: $label.value.trim(), email_scan_every_minutes: $every.value,
         });
         $token.value = '';
         rerender();
       } catch (err) {
+        $tgMsg.append(errorBox(err));
+      }
+    }
+    // M7-A：秘密輪替
+    async function rotateSecret() {
+      if (!confirm('重新產生 webhook secret？舊的 webhook URL 會立刻失效，系統會自動重新登記新的 URL。')) return;
+      $tgMsg.innerHTML = ''; $webhookInfo.textContent = '更換中…';
+      try {
+        const r = await call('adminTelegramRotateSecret');
+        $webhookInfo.innerHTML = '';
+        $webhookInfo.append(el('span', { class: 'summary ok' }, `secret 已更換（${r.secretHint}）`), ' ');
+        if (r.webhook) $webhookInfo.append(el('span', { class: 'meta' }, `已重新登記 webhook：${r.webhook.url}`));
+        else if (r.webhookError) $webhookInfo.append(el('span', { class: 'warn-text' }, `重新登記 webhook 失敗：${r.webhookError}（請再按一次「設定 webhook」）`));
+        else $webhookInfo.append(el('span', { class: 'meta' }, '尚未填部署 B 網址，未登記 webhook'));
+        setTimeout(rerender, 1500);
+      } catch (err) {
+        $webhookInfo.textContent = '';
+        $tgMsg.append(errorBox(err));
+      }
+    }
+    async function replaceToken() {
+      const token = $token.value.trim();
+      if (!token) { $tgMsg.innerHTML = ''; $tgMsg.append(errorBox(new Error('請先在欄位貼上新的 bot token。'))); return; }
+      if (data.telegram.hasToken && !confirm('更換 bot token？會先用新 token 驗證，成功後舊 token 立即停用並重新登記 webhook。')) return;
+      $tgMsg.innerHTML = ''; $webhookInfo.textContent = '驗證中…';
+      try {
+        const r = await call('adminTelegramReplaceToken', token);
+        $token.value = '';
+        $webhookInfo.innerHTML = '';
+        $webhookInfo.append(el('span', { class: 'summary ok' }, `token 已${r.replaced ? '更換' : '設定'}：@${r.username || r.botId}`), ' ');
+        if (r.webhook) $webhookInfo.append(el('span', { class: 'meta' }, `已重新登記 webhook：${r.webhook.url}`));
+        else if (r.webhookError) $webhookInfo.append(el('span', { class: 'warn-text' }, `重新登記 webhook 失敗：${r.webhookError}（請再按一次「設定 webhook」）`));
+        setTimeout(rerender, 1500);
+      } catch (err) {
+        $webhookInfo.textContent = '';
         $tgMsg.append(errorBox(err));
       }
     }

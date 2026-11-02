@@ -1,5 +1,5 @@
 {
-  "scriptId": "1qmILUmQmLUTsLiWCvUGWe8kgf0EcBEBdAbacXuWwxUKsC97I970BDdCA",
+  "scriptId": "<你的 Apps Script scriptId；用 scripts/install.sh 會自動產生在 accounts/<代號>/clasp.json>",
   "rootDir": "src",
   "scriptExtensions": [
     ".js",

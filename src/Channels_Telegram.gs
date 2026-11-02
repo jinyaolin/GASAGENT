@@ -10,7 +10,8 @@
  * 指令：/new（新 session）/status /model [provider id] /skills /help；其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
  * 群組：只在「@bot 提到它」「回覆它的訊息」或「/指令」時反應（私聊不變）。白名單成員在群組裡用 /group 切模式：
  *   /group on    群聊模式（Config telegram_open_groups）：全群共用一個 session，非白名單成員 @bot 也能用工具，但那一輪
- *                R 以外的工具一律送審批、不注入 owner 記憶快照、不 curation（payload.member → Sessions.gs）
+ *                是 principal group_member（M7-A）：只能用 Config telegram_member_toolsets（預設 web / skill / session）的 R 工具、
+ *                owner 的 Workspace 一律不可讀，R 以外的工具一律送審批、不注入 owner 記憶快照、不 curation（payload.member → Sessions.gs）
  *   /group guest 訪客模式（Config telegram_guest_groups）：非白名單成員獨立 session（<chat id>:guest）、沒有工具、不注入記憶 / 技能
  *   /group off   只有白名單成員叫得到
  * 成員（非白名單）的 /指令一律忽略；訪客的附件不處理，群聊成員的附件照常存 Drive。
@@ -43,6 +44,8 @@ const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容�
 const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group']);
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
 const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
+/** setWebhook 要收的 update 類型。 */
+const TELEGRAM_ALLOWED_UPDATES = Object.freeze(['message', 'edited_message', 'callback_query']);
 /** 隱私模式開著時 /group 與 Doctor 的提醒。 */
 const TELEGRAM_PRIVACY_WARNING = '⚠️ 這個 bot 的「隱私模式」還開著：Telegram 不會把群組裡 @bot 的一般訊息送給它（只有 /指令和回覆 bot 的訊息會到），所以 @bot 不會有反應。請到 @BotFather → /setprivacy → 選這個 bot → Disable，然後把 bot 退出群組再加回來（或直接把 bot 設成群組管理員）。';
 
@@ -469,7 +472,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
       '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
-      '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員也能用工具，寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
+      '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
     report.text = lines.join('\n'); send(report.text); report.action = 'help'; return report;
   }
@@ -486,7 +489,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
       deps.cfg.telegramOpenGroups = open;
       deps.cfg.telegramGuestGroups = guestList;
       report.text = want === 'on'
-        ? `此群組已切成群聊模式：全群共用一個對話，任何成員 @${bot} 都能請它用工具幫忙；非 owner 觸發的寫入 / 寄信 / 分享會先送審批（按鈕只有白名單能按），且那一輪不帶 owner 的記憶。/group guest 改訪客模式、/group off 關閉。`
+        ? `此群組已切成群聊模式：全群共用一個對話，任何成員 @${bot} 都能請它幫忙。非 owner 觸發時只能用公開工具（${(deps.cfg.telegramMemberToolsets || PRINCIPAL_DEFAULT_TOOLSETS.group_member).join(' / ') || '無'}），owner 的 Gmail / Drive / 行事曆等資料不會在群組裡讀取；寫入 / 寄信 / 分享會先送審批（按鈕只有白名單能按），且那一輪不帶 owner 的記憶。owner 可在管理頁「通道」放寬工具。/group guest 改訪客模式、/group off 關閉。`
         : want === 'guest'
           ? `此群組已切成訪客模式：任何成員 @${bot} 都會得到回答，但不帶工具、不會透露 owner 的資料。/group on 改群聊模式、/group off 關閉。`
           : '此群組已關閉開放：只有白名單成員 @bot 或回覆 bot 時會回答。';
@@ -494,7 +497,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
       const warn = telegramPrivacyWarning_(deps.api);
       if (warn && want !== 'off') report.text += '\n\n' + warn;
     } else {
-      const mode = deps.cfg.telegramOpenGroups.indexOf(here) !== -1 ? '群聊模式（成員可用工具，寫入送審）' : deps.cfg.telegramGuestGroups.indexOf(here) !== -1 ? '訪客模式（成員無工具）' : '未開放（只有白名單）';
+      const mode = deps.cfg.telegramOpenGroups.indexOf(here) !== -1 ? '群聊模式（成員只能用公開工具，寫入送審）' : deps.cfg.telegramGuestGroups.indexOf(here) !== -1 ? '訪客模式（成員無工具）' : '未開放（只有白名單）';
       report.text = `此群組目前：${mode}。/group on 群聊、/group guest 訪客、/group off 關閉。bot 只在被 @ 提到、被回覆或收到 /指令時反應。`;
       const warn = telegramPrivacyWarning_(deps.api);
       if (warn) report.text += '\n\n' + warn;
@@ -686,16 +689,99 @@ function telegramWebhookUrl_(execUrl, secret) {
 
 /**
  * 向 Telegram 登記 webhook。
- * @param {Object=} deps telegramApi_ deps
+ * @param {{cfg: (ChannelConfig|undefined), secret: (string|undefined), api: (Function|undefined), token: (string|undefined), fetch: (Function|undefined)}=} deps
+ *   cfg / secret 省略時讀目前設定；api(method, payload) 省略時用 telegramApi_（可帶 token / fetch）
  * @return {{url: string, result: *}}
  */
 function telegramSetWebhook_(deps) {
-  const cfg = getChannelConfig_();
-  const secret = getTelegramSecret_();
+  deps = deps || {};
+  const cfg = deps.cfg || getChannelConfig_();
+  const secret = deps.secret !== undefined ? deps.secret : getTelegramSecret_();
   if (!secret) throw new Error('webhook secret 尚未產生：先在「通道」分頁儲存一次。');
   const url = telegramWebhookUrl_(cfg.telegramWebhookUrl, secret);
-  const result = telegramApi_('setWebhook', { url, allowed_updates: ['message', 'edited_message', 'callback_query'], drop_pending_updates: false }, deps);
+  const api = deps.api || ((method, payload) => telegramApi_(method, payload, deps));
+  const result = api('setWebhook', { url, allowed_updates: TELEGRAM_ALLOWED_UPDATES.slice(), drop_pending_updates: false });
   return { url, result };
+}
+
+/**
+ * 遮掉 webhook URL 裡的 secret（給 UI / AuditLog）。純函式。
+ * @param {string} url
+ * @return {string}
+ */
+function maskWebhookUrl_(url) {
+  return String(url || '').replace(/key=[^&]+/, 'key=…');
+}
+
+// ---- 秘密輪替（M7-A）------------------------------------------------------------------------------------
+
+/**
+ * 重新產生 webhook secret：寫新 TELEGRAM_WEBHOOK_SECRET（舊的隨即作廢）→ 已填部署 B 網址就立刻重打 setWebhook → AuditLog（不記值）。
+ * 重登失敗不回滾（新 secret 已生效，舊 URL 的請求會被 bad_secret 擋掉），回傳 webhookError 讓 UI 提示再按一次「設定 webhook」。
+ * @param {{cfg: (ChannelConfig|undefined), api: (Function|undefined), setSecret: (Function|undefined), audit: (Function|undefined)}=} deps
+ * @return {{secretHint: string, webhook: ?{url: string, result: *}, webhookError: string}} webhook.url 已遮 secret
+ */
+function telegramRotateSecret_(deps) {
+  deps = deps || {};
+  const cfg = deps.cfg || getChannelConfig_();
+  const secret = newWebhookSecret_();
+  (deps.setSecret || ((s) => setProp_(PROP.TELEGRAM_WEBHOOK_SECRET, s)))(secret);
+  const out = { secretHint: secret.slice(0, 4) + '…' + secret.slice(-4), webhook: null, webhookError: '' };
+  if (cfg.telegramWebhookUrl) {
+    try {
+      const r = telegramSetWebhook_({ cfg, secret, api: deps.api });
+      out.webhook = { url: maskWebhookUrl_(r.url), result: r.result };
+    } catch (err) {
+      out.webhookError = String(err && err.message || err);
+    }
+  }
+  securityAudit_('telegram:rotate_secret',
+    out.webhook ? 'webhook secret 已更換並重新登記 webhook' : out.webhookError ? `webhook secret 已更換；重新登記 webhook 失敗：${out.webhookError}` : 'webhook secret 已更換（尚未填部署 B 網址，未登記 webhook）',
+    deps.audit);
+  return out;
+}
+
+/**
+ * 更換 bot token：先用**新 token** 打 getMe，成功才寫入 Script Properties（舊 token 隨即不再使用）、更新 Config telegram_bot_username、
+ * 已填部署 B 網址且有 secret 就重打 setWebhook。驗證失敗 throw，舊 token 完全不動。AuditLog 只記 bot username，不記 token。
+ * @param {string} token
+ * @param {{cfg: (ChannelConfig|undefined), api: (Function|undefined), fetch: (Function|undefined), getToken: (Function|undefined),
+ *   setToken: (Function|undefined), getSecret: (Function|undefined), setConfig: (Function|undefined), audit: (Function|undefined)}=} deps
+ *   api(method, payload) 省略時用新 token 打 telegramApi_
+ * @return {{username: string, botId: string, replaced: boolean, webhook: ?{url: string, result: *}, webhookError: string}}
+ * @throws {Error} 格式不對或 getMe 失敗
+ */
+function telegramReplaceToken_(token, deps) {
+  deps = deps || {};
+  const t = String(token || '').trim();
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(t)) throw new Error('Telegram bot token 格式不對（應像 123456789:AAH…）。');
+  const api = deps.api || ((method, payload) => telegramApi_(method, payload, { token: t, fetch: deps.fetch }));
+  let me = null;
+  try {
+    me = api('getMe', {});
+  } catch (err) {
+    throw new Error(`新 token 驗證失敗（getMe）：${err && err.message || err}。舊 token 未更動。`);
+  }
+  if (!me || !me.id) throw new Error('新 token 驗證失敗：getMe 沒有回 bot 資料。舊 token 未更動。');
+  const previous = (deps.getToken || getTelegramToken_)();
+  (deps.setToken || setTelegramToken_)(t);
+  const username = String(me.username || '');
+  try { (deps.setConfig || setConfigValues_)({ telegram_bot_username: username }); } catch (err) { /* 忽略：username 只影響群組 @mention 判斷 */ }
+  const out = { username, botId: String(me.id), replaced: !!previous && previous !== t, webhook: null, webhookError: '' };
+  const cfg = deps.cfg || getChannelConfig_();
+  const secret = (deps.getSecret || getTelegramSecret_)();
+  if (cfg.telegramWebhookUrl && secret) {
+    try {
+      const r = telegramSetWebhook_({ cfg, secret, api });
+      out.webhook = { url: maskWebhookUrl_(r.url), result: r.result };
+    } catch (err) {
+      out.webhookError = String(err && err.message || err);
+    }
+  }
+  securityAudit_('telegram:replace_token',
+    `bot @${username || '?'}（${out.replaced ? '更換 token' : '設定 token'}）${out.webhook ? '；已重新登記 webhook' : out.webhookError ? `；重新登記 webhook 失敗：${out.webhookError}` : ''}`,
+    deps.audit);
+  return out;
 }
 
 /**

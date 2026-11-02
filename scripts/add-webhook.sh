@@ -9,7 +9,7 @@ ACCOUNT="$2"
 need_tools
 use_account "$ACCOUNT"
 [[ -z "$(deploy_json_get "$ACCOUNT" deployB)" ]] || die "accounts/$ACCOUNT 已有部署 B：$(deploy_json_get "$ACCOUNT" deployB)"
-trap manifest_restore EXIT
+trap 'manifest_restore; restore_clasp_json' EXIT
 [[ "$(manifest_access)" == "MYSELF" ]] || die "manifest 的 webapp.access 不是 MYSELF"
 step "帳號 ${ACCOUNT}：建立部署 B（任何人）"
 manifest_set_access ANYONE_ANONYMOUS

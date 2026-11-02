@@ -1,5 +1,5 @@
 /**
- * @fileoverview 工具執行：參數驗證 → RBAC → 審批策略 → 執行 handler → AuditLog → 輸出溢寫。
+ * @fileoverview 工具執行：參數驗證 → 主體（principal）開關 → RBAC → 審批策略 → 執行 handler → AuditLog → 輸出溢寫。
  *
  * 設定全部來自 Config sheet（見 TOOL_CONFIG_KEYS）：
  * - `rbac.<toolset>` = JSON {read, write, delete, external}；**沒有這一列的 toolset 一律拒絕**。
@@ -35,6 +35,23 @@ const RBAC_PERMISSIONS = Object.freeze(['read', 'write', 'delete', 'external']);
 
 /** 審批策略。 */
 const APPROVAL_POLICIES = Object.freeze(['always', 'autonomous_only', 'never']);
+
+/**
+ * 主體（principal；M7-A）：RBAC 之外的第二層開關，依「誰觸發這一輪」決定可用的 toolset。
+ * - owner：白名單本人（管理頁 / Email / Telegram 私聊 / 群組裡的白名單成員）—— 只看 RBAC 與審批策略。
+ * - group_member：Telegram 群聊模式（/group on）裡的非白名單成員 —— 只能用 PRINCIPAL_DEFAULT_TOOLSETS.group_member
+ *   （owner 可在管理頁「通道」分頁逐 toolset 放寬，Config telegram_member_toolsets），而且只有 R 類直接跑，
+ *   W / D / X 一律送 owner 審批（不看 approval_policy）。PRINCIPAL_LOCKED_TOOLSETS 裡的 toolset 永遠拒絕、不可放寬。
+ * - guest：訪客模式（/group guest）—— 沒有任何工具。
+ * 不認得的 principal 一律當 guest（fail closed）；未指定（舊呼叫端）當 owner。
+ */
+const PRINCIPALS = Object.freeze(['owner', 'group_member', 'guest']);
+/** 各 principal 預設可用的 toolset（owner 不限）。 */
+const PRINCIPAL_DEFAULT_TOOLSETS = Object.freeze({ group_member: Object.freeze(['web', 'skill', 'session']) });
+/** 各 principal 永遠拒絕、owner 也無法放寬的 toolset（記憶是 owner 的長期記憶、cronjob 會留下常駐自動化）。 */
+const PRINCIPAL_LOCKED_TOOLSETS = Object.freeze({ group_member: Object.freeze(['memory', 'cronjob']) });
+/** Workspace 類 toolset（群組放寬這些時 Doctor 會提醒）。 */
+const WORKSPACE_TOOLSETS = Object.freeze(['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar']);
 
 /** 新 toolset 的預設開關。 */
 const DEFAULT_TOOLSET_PERMS = Object.freeze({ read: true, write: true, delete: false, external: false });
@@ -282,6 +299,48 @@ function checkToolAccess_(tool, rbac) {
 }
 
 /**
+ * @param {*} principal
+ * @return {string} 合法的 principal：空 / undefined → owner；不認得 → guest
+ */
+function normalizePrincipal_(principal) {
+  if (principal === undefined || principal === null || principal === '') return 'owner';
+  return PRINCIPALS.indexOf(String(principal)) === -1 ? 'guest' : String(principal);
+}
+
+/**
+ * 某 principal 實際可用的 toolset 清單：省略 toolsets 用預設；一律去掉鎖定的、小寫、去重。純函式。
+ * @param {string} principal
+ * @param {(!Array<string>|string|undefined)=} toolsets
+ * @return {!Array<string>}
+ */
+function principalToolsets_(principal, toolsets) {
+  const p = normalizePrincipal_(principal);
+  const locked = PRINCIPAL_LOCKED_TOOLSETS[p] || [];
+  const base = toolsets === undefined || toolsets === null ? (PRINCIPAL_DEFAULT_TOOLSETS[p] || []) : toolsets;
+  return toStringList_(base).map((t) => t.toLowerCase()).filter((t, i, arr) => locked.indexOf(t) === -1 && arr.indexOf(t) === i);
+}
+
+/**
+ * 主體開關：owner 不限；guest 全拒；group_member 只能用允許清單內（且不在鎖定清單）的 toolset。純函式。
+ * 拒絕理由是給模型看的，要求它對群組回一句中性說明、不要重試、不要透露 owner 設定。
+ * @param {ToolDecl} tool
+ * @param {string} principal
+ * @param {(!Array<string>|undefined)=} toolsets group_member 可用的 toolset（省略用預設）
+ * @return {string} 空字串 = 允許；否則為拒絕原因
+ */
+function checkPrincipalAccess_(tool, principal, toolsets) {
+  const p = normalizePrincipal_(principal);
+  if (p === 'owner') return '';
+  if (p === 'guest') return '訪客對話沒有任何工具。請用一般知識回答，需要 owner 的資料請對方直接找 owner。';
+  const allowed = principalToolsets_(p, toolsets);
+  if (allowed.indexOf(tool.toolset) === -1) {
+    return `toolset「${tool.toolset}」在群組對話中不開放（群組成員目前可用：${allowed.join(', ') || '（無）'}）。` +
+      '請簡短告知對方「這個功能只有 owner 本人能用」即可，不要重試、不要說明 owner 的設定。';
+  }
+  return '';
+}
+
+/**
  * X 類工具是否要送審批。純函式。
  * @param {ToolDecl} tool
  * @param {string} policy always / autonomous_only / never
@@ -339,6 +398,23 @@ function defaultToolSink_() {
 }
 
 /**
+ * 安全事件寫 AuditLog（M7-A：secret / token / key 輪替、紅隊）。只記動作與結果，**絕不記值**。不 throw。
+ * @param {string} action 例 telegram:rotate_secret → tool 欄為 security:<action>
+ * @param {string} detail 說明（會截長）
+ * @param {Function=} audit 注入的寫入函式（測試用）；省略寫 DB
+ */
+function securityAudit_(action, detail, audit) {
+  try {
+    (audit || ((entry) => appendTableRow_('AuditLog', entry)))({
+      ts: new Date(), session_id: '', tool: 'security:' + action, args_preview: truncateText_(detail || '', AUDIT_PREVIEW_CHARS).text,
+      result_preview: '', ok: true, ms: 0, principal: 'owner',
+    });
+  } catch (err) {
+    console.warn('寫安全事件失敗：' + (err && err.message || err));
+  }
+}
+
+/**
  * 溢寫檔的 Drive 儲存：`GAS Agent/spill/<name>`。
  * @return {{write: function(string, string): string, read: function(string): string}}
  */
@@ -391,8 +467,10 @@ function spillRead_(store, fileId, offset, limit) {
  * @param {string} name 工具名
  * @param {*} args 模型給的參數
  * @param {{sessionId: (string|undefined), mode: (string|undefined), jobId: (string|undefined),
- *   approved: (boolean|undefined), approveWrites: (boolean|undefined)}=} ctx approved=true 表示 owner 已批准（略過審批判斷；RBAC 仍檢）；
- *   approveWrites=true（M6 群聊模式：非 owner 觸發）表示 R 以外的工具一律送審批
+ *   approved: (boolean|undefined), approveWrites: (boolean|undefined), principal: (string|undefined),
+ *   principalToolsets: (!Array<string>|undefined)}=} ctx approved=true 表示 owner 已批准（略過審批判斷；RBAC / principal 仍檢）；
+ *   approveWrites=true 表示 R 以外的工具一律送審批；principal（M7-A）owner / group_member / guest，group_member 等同 approveWrites
+ *   且只能用 principalToolsets（省略用 PRINCIPAL_DEFAULT_TOOLSETS）內的 toolset
  * @param {{registry: (ToolRegistry|undefined), config: (ToolConfig|undefined),
  *   sink: ({audit: Function, approval: Function}|undefined), spill: ({write: Function, read: Function}|undefined)}=} deps
  * @return {ToolOutcome}
@@ -404,6 +482,8 @@ function executeTool_(name, args, ctx, deps) {
   const config = deps.config || getToolConfig_();
   const sink = deps.sink || defaultToolSink_();
   const mode = ctx.mode || 'interactive';
+  const principal = normalizePrincipal_(ctx.principal);
+  const approveWrites = !!ctx.approveWrites || principal === 'group_member';
   const t0 = Date.now();
   let normalizedArgs = args;
 
@@ -426,6 +506,7 @@ function executeTool_(name, args, ctx, deps) {
         result_preview: truncateText_((status === 'ok' ? '' : `[${status}] `) + content, AUDIT_PREVIEW_CHARS).text,
         ok: status === 'ok',
         ms: outcome.ms,
+        principal,
       });
     } catch (err) {
       console.warn('寫 AuditLog 失敗：' + (err && err.message || err));
@@ -442,8 +523,12 @@ function executeTool_(name, args, ctx, deps) {
     return finish('invalid', toolErrorText_('invalid_args', err.message));
   }
 
+  // 主體開關先於 RBAC：群組成員被擋時只看到中性訊息，不會看到 owner 的 RBAC 設定說明。
+  const principalDenied = checkPrincipalAccess_(tool, principal, ctx.principalToolsets);
+  if (principalDenied) return finish('denied', toolErrorText_('principal_denied', principalDenied), { error: 'principal_denied' });
+
   const denied = checkToolAccess_(tool, config.rbac);
-  if (denied) return finish('denied', toolErrorText_('rbac_denied', denied));
+  if (denied) return finish('denied', toolErrorText_('rbac_denied', denied), { error: 'rbac_denied' });
 
   // deps 裡除了 executor 自己用的四個，其餘（memoryStore / sessionStore / agentConfig / skillStore / embed…）都透給 handler，測試可注入假 store。
   const extras = {};
@@ -460,7 +545,7 @@ function executeTool_(name, args, ctx, deps) {
     }
   } else if (!ctx.approved && needsApproval_(tool, config.approvalPolicy, mode)) {
     reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；審批策略 ${config.approvalPolicy}；模式 ${mode}`;
-  } else if (!ctx.approved && ctx.approveWrites && tool.risk !== 'R') {
+  } else if (!ctx.approved && approveWrites && tool.risk !== 'R') {
     reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；由群組成員（非 owner）觸發，寫入類動作一律送審`;
   }
   if (reason) {

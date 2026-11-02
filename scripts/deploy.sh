@@ -3,6 +3,9 @@
 #   部署 A（管理頁）：appsscript.json 的 webapp.access = MYSELF（只限我）
 #   部署 B（Telegram webhook）：webapp.access = ANYONE_ANONYMOUS（任何人）
 # Apps Script 的存取等級寫在 manifest 裡、一個版本一種，所以 B 要在翻轉 manifest 後另推一個版本；trap 保證翻回。
+# 多帳號隔離（M7-A）：use_account 會檢查 accounts/<name>/clasp.json 與 deploy.json 的 scriptId 一致、且不與其他帳號重複；
+# 根目錄 .clasp.json 只在執行期間暫時換成該帳號，結束後還原（trap）。Script Properties（token / secret / key）在各帳號自己的
+# Apps Script 專案裡，本腳本只推程式碼，不會把任何帳號的 secret 推到另一個帳號。
 # 用法：scripts/deploy.sh [--account <name>] "說明"      # 預設帳號 default；部署 ID 讀 accounts/<name>/deploy.json
 #       scripts/deploy.sh --all "說明"                     # accounts/ 底下每個有 deploy.json 的帳號各推一次
 #       DRY=1 scripts/deploy.sh "說明"                    # 只印出會執行的 clasp 指令
@@ -34,7 +37,7 @@ DEPLOY_B="$(deploy_json_get "$ACCOUNT" deployB)"
 [[ -n "$DEPLOY_A" ]] || die "accounts/$ACCOUNT/deploy.json 沒有 deployA"
 
 run() { if [[ -n "${DRY:-}" ]]; then echo "  (dry) $*"; else "$@"; fi; }
-trap manifest_restore EXIT
+trap 'manifest_restore; restore_clasp_json' EXIT
 [[ "$(manifest_access)" == "MYSELF" ]] || die "manifest 的 webapp.access 不是 MYSELF，先手動確認 $MANIFEST"
 
 step "本機 pure 測試"

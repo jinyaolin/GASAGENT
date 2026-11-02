@@ -469,8 +469,9 @@ function closeSession_(s, deps) {
  *   systemExtra: (string|undefined), mode: (string|undefined), skills: (string|undefined), externalId: (string|undefined)}} input
  *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt；externalId（M6）：通道識別，新建 session 時寫入 external_id；
  *   guest（M6）：訪客模式——工具全關、不注入記憶與技能、附 GUEST_SYSTEM_EXTRA、不 curation、不自動提案；
- *   member（M6）：群聊模式的非 owner 成員——工具可用但 R 以外送審批、不注入記憶快照、附 MEMBER_SYSTEM_EXTRA、不 curation、不自動提案
- * @param {{store: (Object|undefined), cfg: (AgentConfig|undefined), toolConfig: (ToolConfig|undefined),
+ *   member（M6）：群聊模式的非 owner 成員——principal group_member（M7-A）：只能用 Config telegram_member_toolsets 內的 R 工具、
+ *   R 以外送審批、不注入記憶快照、附 memberSystemExtra_、不 curation、不自動提案；被 principal 擋下時回覆末尾附 MEMBER_DENIED_NOTE
+ * @param {{store: (Object|undefined), cfg: (AgentConfig|undefined), toolConfig: (ToolConfig|undefined), channelCfg: (ChannelConfig|undefined),
  *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), skillStore: (Object|undefined), chat: (Function|undefined),
  *   summarize: (Function|undefined), curate: (Function|undefined), now: (Function|undefined), turnDeps: (Object|undefined)}=} deps
  * @return {!Object} runTurn_ 結果 + {sessionId, sessionCreated, sessionReason, turns, compacted, curation, command,
@@ -512,6 +513,12 @@ function runSessionTurn_(input, deps) {
 
   const guest = !!input.guest;
   const member = !guest && !!input.member;
+  // M7-A：主體。群聊成員可用的 toolset 來自通道設定；讀不到（例如本機測試）就退回預設清單（fail closed）。
+  const principal = guest ? 'guest' : member ? 'group_member' : 'owner';
+  let principalToolsets;
+  if (member) {
+    try { principalToolsets = (deps.channelCfg || getChannelConfig_()).telegramMemberToolsets; } catch (err) { principalToolsets = PRINCIPAL_DEFAULT_TOOLSETS.group_member.slice(); }
+  }
   const toolConfig = guest ? guestToolConfig_(deps.toolConfig || getToolConfig_()) : (deps.toolConfig || getToolConfig_());
   // 訪客用空 registry：模型沒有工具清單，system prompt 也不會有記憶 / 技能規則與「目前未開放」清單。
   const registry = guest ? buildToolRegistry_([]) : (deps.registry || getToolRegistry_());
@@ -586,10 +593,16 @@ function runSessionTurn_(input, deps) {
     providerId: input.providerId || session.model_override || '',
     sessionId: session.id,
     mode: input.mode || 'interactive',
-    systemExtra: (guest ? GUEST_SYSTEM_EXTRA + '\n' : member ? MEMBER_SYSTEM_EXTRA + '\n' : '') + (input.systemExtra || ''),
+    systemExtra: (guest ? GUEST_SYSTEM_EXTRA + '\n' : member ? memberSystemExtra_(principalToolsets) + '\n' : '') + (input.systemExtra || ''),
     contextBlocks,
     approveWrites: member,
+    principal,
+    principalToolsets,
   }, turnDeps);
+  // 群聊成員被 principal 開關擋下（例如要讀 owner 的 Gmail）：回覆末尾固定附一句中性說明，不靠模型自己講。
+  if (member && r.steps.some((s) => s.error === 'principal_denied') && String(r.text || '').indexOf(MEMBER_DENIED_NOTE) === -1) {
+    r.text = (r.text ? String(r.text).trim() + '\n\n' : '') + MEMBER_DENIED_NOTE;
+  }
 
   // 4. 寫回這輪新增的訊息（system 與 history 之外的）
   const newMessages = r.messages.slice(1 + history.length);
@@ -654,6 +667,6 @@ function runSessionTurn_(input, deps) {
 
   return Object.assign(r, {
     sessionId: session.id, sessionCreated: resolved.created, sessionReason: resolved.reason, turns: session.turns,
-    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal, approvalNotice, guest, member,
+    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal, approvalNotice, guest, member, principal,
   });
 }
