@@ -104,15 +104,18 @@ function runDoctor() {
         const missing = mains.filter((p) => !providerHasCredential_(p)).map((p) => p.id);
         push('provider_main_key', 'main provider 的 API key / 憑證已設定',
           missing.length === mains.length ? 'fail' : missing.length ? 'warn' : 'ok',
-          missing.length ? `缺：${missing.join(', ')}（API key 在 Script Property PROVIDER_KEY_<id>；chatgpt 協定要貼 siwc-login 憑證），請到管理頁「模型」填入。` : `${mains.length} 個皆已設定`);
-        // M7：chatgpt 協定的憑證狀態（失效 / refresh token 快到 30 天）
-        listProviders_().filter((p) => p.enabled && p.protocol === 'chatgpt').forEach((p) => {
-          const s = chatgptCredentialSummary_(getProviderOAuth_(p.id));
-          if (!s) { push(`chatgpt_${p.id}`, `ChatGPT provider ${p.id} 憑證`, 'fail', '尚未貼上 scripts/siwc-login.js 的憑證。'); return; }
-          const stale = s.refreshAgeDays >= 25;
-          push(`chatgpt_${p.id}`, `ChatGPT provider ${p.id} 憑證可用`, s.invalid ? 'fail' : (stale || !s.scopesOk) ? 'warn' : 'ok',
-            s.invalid ? `已失效（${s.invalid}）：重跑 scripts/siwc-login.js 並貼上新憑證。`
-              : `${s.email || s.subject}；access token ${s.expiresInMin > 0 ? s.expiresInMin + ' 分鐘後到期（會自動 refresh）' : '已過期，下次呼叫會 refresh'}；refresh token 已 ${s.refreshAgeDays} 天${stale ? '，超過 25 天沒成功 refresh，30 天會失效' : ''}${s.scopesOk ? '' : '；缺 chatgpt.tokens.use.direct scope'}`);
+          missing.length ? `缺：${missing.join(', ')}（API key 在 Script Property PROVIDER_KEY_<id>；chatgpt / gemini_cli 協定要貼本機登入腳本的憑證），請到管理頁「模型」填入。` : `${mains.length} 個皆已設定`);
+        // M7：OAuth 協定（chatgpt / gemini_cli）的憑證狀態（失效 / chatgpt 的 refresh token 快到 30 天 / gemini_cli 的 Code Assist 專案）
+        listProviders_().filter((p) => p.enabled && isOAuthProtocol_(p.protocol)).forEach((p) => {
+          const label = p.protocol === 'gemini_cli' ? 'Gemini CLI' : 'ChatGPT';
+          const login = oauthLoginScript_(p.protocol);
+          const s = oauthCredentialSummary_(p, getProviderOAuth_(p.id));
+          if (!s) { push(`${p.protocol}_${p.id}`, `${label} provider ${p.id} 憑證`, 'fail', `尚未貼上 ${login} 的憑證。`); return; }
+          const stale = p.protocol === 'chatgpt' && s.refreshAgeDays >= 25;
+          const extra = p.protocol === 'gemini_cli' ? `；Code Assist 專案 ${s.projectId || '（第一次呼叫時自動開通）'}${s.tier ? ' / ' + s.tier : ''}` : `；refresh token 已 ${s.refreshAgeDays} 天${stale ? '，超過 25 天沒成功 refresh，30 天會失效' : ''}`;
+          push(`${p.protocol}_${p.id}`, `${label} provider ${p.id} 憑證可用`, s.invalid ? 'fail' : (stale || !s.scopesOk) ? 'warn' : 'ok',
+            s.invalid ? `已失效（${s.invalid}）：重跑 ${login} 並貼上新憑證。`
+              : `${s.email || s.subject}；access token ${s.expiresInMin > 0 ? s.expiresInMin + ' 分鐘後到期（會自動 refresh）' : '已過期，下次呼叫會 refresh'}${extra}${s.scopesOk ? '' : (p.protocol === 'gemini_cli' ? '；缺 cloud-platform scope' : '；缺 chatgpt.tokens.use.direct scope')}`);
         });
       }
     } catch (err) {

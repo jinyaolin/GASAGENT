@@ -14,8 +14,13 @@
  * 絕不寫進 sheet、不回傳前端（只回末 4 碼）。
  */
 
-/** 支援的協定。chatgpt（M7）= Sign in with ChatGPT 方案額度打 Responses API，見 Providers_ChatGPT.gs。 */
-const PROVIDER_PROTOCOLS = Object.freeze(['openai', 'anthropic', 'gemini', 'chatgpt']);
+/**
+ * 支援的協定。chatgpt（M7）= Sign in with ChatGPT 方案額度打 Responses API，見 Providers_ChatGPT.gs；
+ * gemini_cli（M7）= Google 帳號登入（Gemini CLI 方案）打 Code Assist API，見 Providers_GeminiCli.gs。
+ */
+const PROVIDER_PROTOCOLS = Object.freeze(['openai', 'anthropic', 'gemini', 'chatgpt', 'gemini_cli']);
+/** 用 OAuth 憑證（PROVIDER_OAUTH_<id>、本機登入腳本）而非 API key 的協定；都是 owner 個人方案，只服務 principal=owner。 */
+const OAUTH_PROTOCOLS = Object.freeze(['chatgpt', 'gemini_cli']);
 
 /** 模型角色：main 主模型、fast 快模型（摘要 / curation）、embed 嵌入（M3）。 */
 const PROVIDER_ROLES = Object.freeze(['main', 'fast', 'embed']);
@@ -141,6 +146,10 @@ function validateProvider_(input) {
     if (!p.base_url) p.base_url = CHATGPT_DEFAULT_BASE_URL;
     if (p.role === 'embed') throw new Error('chatgpt 協定沒有嵌入 API，role 不能是 embed。');
   }
+  if (p.protocol === 'gemini_cli') {
+    if (!p.base_url) p.base_url = GEMINI_CLI_ENDPOINT;
+    if (p.role === 'embed') throw new Error('gemini_cli 協定沒有嵌入 API，role 不能是 embed。');
+  }
   if (PROVIDER_ROLES.indexOf(p.role) === -1) throw new Error(`role 必須是 ${PROVIDER_ROLES.join(' / ')}。`);
   if (!/^https:\/\/[^\s/]+/.test(p.base_url)) throw new Error('base_url 必須是 https:// 開頭的網址。');
   if (!p.model) throw new Error('model 不可為空。');
@@ -247,12 +256,11 @@ function providerChain_(role, providers) {
 function publicProvider_(p) {
   const out = Object.assign({}, p);
   delete out._row;
-  if (p.protocol === 'chatgpt') {
+  if (isOAuthProtocol_(p.protocol)) {
     const creds = getProviderOAuth_(p.id);
-    const summary = chatgptCredentialSummary_(creds);
     out.hasKey = !!(creds && !creds.invalid);
-    out.keyHint = creds ? (creds.invalid ? `失效（${creds.invalid}）` : (creds.email || 'ChatGPT')) : '';
-    out.oauth = summary;
+    out.keyHint = creds ? (creds.invalid ? `失效（${creds.invalid}）` : (creds.email || (p.protocol === 'gemini_cli' ? 'Google' : 'ChatGPT'))) : '';
+    out.oauth = oauthCredentialSummary_(p, creds);
     return out;
   }
   const key = getProviderKey_(p.id);
@@ -721,6 +729,7 @@ const PROVIDER_ADAPTERS_ = Object.freeze({
   anthropic: { buildRequest: anthropicBuildRequest_, parseResponse: anthropicParseResponse_ },
   gemini: { buildRequest: geminiBuildRequest_, parseResponse: geminiParseResponse_ },
   chatgpt: { buildRequest: chatgptBuildRequest_, parseResponse: chatgptParseResponse_, finalize: chatgptFinalFromSse_ },
+  gemini_cli: { buildRequest: geminiCliBuildRequest_, parseResponse: geminiCliParseResponse_ },
 });
 
 /**
@@ -801,8 +810,8 @@ function defaultProviderFetch_(url, options) {
 function callProvider_(provider, req, deps) {
   deps = deps || {};
   const fetchFn = deps.fetch || defaultProviderFetch_;
-  // chatgpt 協定的「key」是會自動 refresh 的 OAuth access token（chatgptAccessToken_ 失敗會自己 throw providerError_）
-  const apiKey = deps.keyFor ? deps.keyFor(provider.id) : provider.protocol === 'chatgpt' ? chatgptAccessToken_(provider, { fetch: deps.fetch }) : getProviderKey_(provider.id);
+  // OAuth 協定的「key」是會自動 refresh 的 access token（失敗會自己 throw providerError_）；gemini_cli 還帶 Code Assist 專案（{token, project}）
+  const apiKey = deps.keyFor ? deps.keyFor(provider.id) : providerCredential_(provider, deps.fetch);
   if (!apiKey) throw providerError_(provider, 0, `API key 未設定（Script Property ${providerKeyProp_(provider.id)}），請到管理頁「模型」填入。`);
 
   const adapter = getAdapter_(provider.protocol);
@@ -838,6 +847,18 @@ function callProvider_(provider, req, deps) {
   result.ms = ms;
   result.costEst = estimateCost_(provider, result.usage);
   return result;
+}
+
+/**
+ * 呼叫 provider 要用的憑證：API key、chatgpt access token、或 gemini_cli 的 {token, project}。
+ * @param {Provider} provider
+ * @param {Function=} fetchFn
+ * @return {string|{token: string, project: string}}
+ */
+function providerCredential_(provider, fetchFn) {
+  if (provider.protocol === 'chatgpt') return chatgptAccessToken_(provider, { fetch: fetchFn });
+  if (provider.protocol === 'gemini_cli') return geminiCliAuth_(provider, { fetch: fetchFn });
+  return getProviderKey_(provider.id);
 }
 
 /**
@@ -1066,8 +1087,8 @@ function runChatTurn_(input) {
 
 /**
  * 這次請求要用的備援鏈：指定 providerId 就只用它，否則依 role。純函式。
- * M7：protocol=chatgpt 只服務 principal=owner（SIWC 條款：請求必須為已驗證的使用者本人）——群組成員 / 訪客那一輪從鏈裡剔除；
- * 明確指定 chatgpt provider 又不是 owner 就直接報錯。
+ * M7：OAuth 方案協定（chatgpt / gemini_cli）只服務 principal=owner（SIWC 條款：請求必須為已驗證的使用者本人；Gemini CLI 是 owner 的個人方案）
+ * ——群組成員 / 訪客那一輪從鏈裡剔除；明確指定又不是 owner 就直接報錯。
  * @param {!Array<Provider>} providers
  * @param {{providerId: (string|undefined), role: (string|undefined), principal: (string|undefined)}} input
  * @return {!Array<Provider>}
@@ -1079,11 +1100,11 @@ function chainForRequest_(providers, input) {
     const p = providers.find((x) => x.id === input.providerId);
     if (!p) throw new Error(`找不到 provider「${input.providerId}」。`);
     if (p.role === 'embed') throw new Error('embed 角色的 provider 不能聊天（M3 才接嵌入 API）。');
-    if (p.protocol === 'chatgpt' && principal !== 'owner') throw new Error(`provider「${p.id}」用 owner 的 ChatGPT 方案，只服務 owner 本人，群組成員 / 訪客不能指定它。`);
+    if (isOAuthProtocol_(p.protocol) && principal !== 'owner') throw new Error(`provider「${p.id}」用 owner 的${p.protocol === 'gemini_cli' ? ' Google 帳號（Gemini CLI）' : ' ChatGPT'}方案，只服務 owner 本人，群組成員 / 訪客不能指定它。`);
     return [p];
   }
   const chain = providerChain_(input.role || 'main', providers);
-  return principal === 'owner' ? chain : chain.filter((p) => p.protocol !== 'chatgpt');
+  return principal === 'owner' ? chain : chain.filter((p) => !isOAuthProtocol_(p.protocol));
 }
 
 /**
@@ -1107,11 +1128,11 @@ function testProvider_(id) {
   } catch (err) {
     recordProviderCall_({ provider, ok: false, error: err, ms: err.ms || (Date.now() - t0), sessionId: 'admin-test' });
     let message = String(err.message || err);
-    // M7 chatgpt：模型不在這條路的清單 → 直接附上可用模型，省得找
-    if (provider.protocol === 'chatgpt' && /not supported|unsupported|model/i.test(message)) {
+    // M7 OAuth 協定：模型不在這條路的清單 → 直接附上可用模型，省得找
+    if (isOAuthProtocol_(provider.protocol) && /not supported|unsupported|not found|model/i.test(message)) {
       try {
-        const models = chatgptListModels_(provider);
-        if (models.length) message += `\n\n這個 ChatGPT 帳號可用的模型（按列上的「可用模型」可一鍵設定）：${models.map((m) => m.slug).join(', ')}`;
+        const models = oauthListModels_(provider);
+        if (models.length) message += `\n\n這個${provider.protocol === 'gemini_cli' ? ' Gemini CLI 帳號可能' : ' ChatGPT 帳號'}可用的模型（按列上的「可用模型」可一鍵設定）：${models.map((m) => m.slug).join(', ')}`;
       } catch (err2) { /* 列不到就算了 */ }
     }
     return { ok: false, ms: err.ms || (Date.now() - t0), text: '', model: provider.model, usage: null, stop: '', error: message };

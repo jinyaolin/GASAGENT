@@ -21,7 +21,8 @@ src/
   Config.gs         # Script Properties 封裝、APP_VERSION、REQUIRED_SCOPES、assertOwner()、Config sheet 讀寫
   Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫
   Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()；M7：chainForRequest_（chatgpt 只服務 owner）
-  Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh、Responses API + SSE adapter、模型清單、登出
+  Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh（oauthAccessToken_，兩種 OAuth 協定共用）、Responses API + SSE adapter、模型清單、登出
+  Providers_GeminiCli.gs  # M7：protocol gemini_cli —— Google 帳號登入（Gemini CLI 方案）憑證、Google token refresh、Code Assist 開通（loadCodeAssist / onboardUser）、generateContent 包層 adapter、登出
   ToolRegistry.gs   # M2：工具宣告 {name, toolset, description, parameters, risk, handler}、無重名檢查、轉中立工具格式
   ToolExecutor.gs   # M2：參數驗證 → principal（M7-A）→ RBAC → 審批策略 → 執行 → AuditLog → 溢寫；Config 設定讀寫；Approvals 決定；securityAudit_
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
@@ -46,6 +47,7 @@ src/
   Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項 + M6 5 項 + M7-A 5 項（principal / injection / secrets）；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 scripts/siwc-login.js    # M7：在本機完成 Sign in with ChatGPT（動態註冊、PKCE、驗 ID token），印出要貼到管理頁的憑證 JSON
+scripts/gemini-login.js  # M7：在本機用 Gemini CLI 的 OAuth client 完成 Google 登入並開通 Code Assist，印出要貼到管理頁的憑證 JSON（--from-cli 可沿用 ~/.gemini/oauth_creds.json）
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
@@ -212,6 +214,23 @@ clasp deploy -i <deploymentId> -d "說明"
 | 條款 | [Sign in with ChatGPT Terms](https://openai.com/policies/sign-in-with-chatgpt-terms/)：token 須存在使用者本機或自己控制的環境、不得共享方案額度、請求須為本人。GAS 跑在你自己的 Google 帳號但 Script Properties 是 Google 代管，屬灰色地帶；本人 2026-11-03 知情後決定採用 |
 
 Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 25 天沒續期、scope 齊。
+
+### Gemini CLI 方案（protocol `gemini_cli`，Google 帳號登入）
+
+用你 **Google 帳號的 Gemini CLI 方案額度**（免費個人方案，或 Gemini Code Assist Standard / Enterprise）跑 agent，不用 Gemini API key。走的是 Gemini CLI「Login with Google」背後的 Code Assist API（`https://cloudcode-pa.googleapis.com/v1internal`），用它原始碼裡公開的 OAuth client；Google 沒有公開這條 API 給第三方，屬自用的灰色地帶（見「條款」）。
+
+| 項目 | 說明 |
+|---|---|
+| 登入 | 在 **Mac 上**跑 `node scripts/gemini-login.js --account <代號>`（node ≥ 18，零依賴）：開瀏覽器 → 選 Google 帳號 → 全部允許 → 腳本換 token、取 email、呼叫 `loadCodeAssist` /（第一次）`onboardUser` 開通並拿到專案 ID → 印出一段憑證 JSON。憑證同時存在 `~/.config/gas-agent/gemini-cli/<代號>.json`（0600；`--print` 可重印）。已裝 Gemini CLI 且登入過的，`--from-cli` 直接沿用 `~/.gemini/oauth_creds.json` 不用開瀏覽器。Standard / Enterprise 方案加 `--project <GCP 專案 ID>` |
+| 設定 | 管理頁「模型」→ 新增 provider → 範本「Gemini CLI」（protocol `gemini_cli`、base_url `https://cloudcode-pa.googleapis.com`、model `gemini-2.5-pro`）→ 儲存 → 編輯 → 把那段 JSON 貼進「Gemini CLI 憑證」→ 儲存 →「測試連線」。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 `cloud-platform` scope 才收），不存 sheet、不回傳 token |
+| 模型 | Code Assist 沒有列模型 API；「可用模型」按鈕列的是 Gemini CLI 原始碼裡的模型名（`gemini-2.5-pro` / `gemini-2.5-flash` / `gemini-3-pro-preview`…），哪些真的能用看帳號方案，測試連線不過就換一個 |
+| 續期 | access token 1 小時；剩不到 5 分鐘就用 refresh token 向 `oauth2.googleapis.com/token` 換新（帶 client_secret；與 chatgpt 共用 `oauthAccessToken_`：LockService 序列化、終端錯誤 `invalid_grant` → 標失效、推 Telegram、Doctor 紅燈）。Google 的 refresh token 不會定期到期，撤銷存取權或改密碼才失效，重跑 `gemini-login.js` 貼新憑證即可 |
+| 請求 | `POST {endpoint}/v1internal:generateContent`，body `{model, project, user_prompt_id, request: <標準 generateContent body>}`；回應 `{response: <標準回應>}`——內層直接沿用 gemini 協定的 adapter（contents / functionDeclarations / thoughtSignature 都一樣）。不走串流。憑證裡沒有 `project_id`（例如 `--no-setup`）第一次呼叫會自己 `loadCodeAssist` → `onboardUser` → 輪詢 LRO（每 5 秒、最多 8 次）寫回。429 額度用完 → 自動換備援鏈的下一個 |
+| **只服務 owner** | 與 chatgpt 一樣：`chainForRequest_` 會把 gemini_cli provider 從群聊成員 / 訪客那一輪剔除（指定它會報錯），群組要能用就得另外有一個 API key 的 main provider。每個帳號各自登入自己的 Google 帳號 |
+| 登出 | 編輯 provider →「登出」：向 Google 撤銷 refresh token 並清憑證；或到 [Google 帳號 → 第三方存取權](https://myaccount.google.com/permissions) 移除「Gemini CLI」 |
+| 條款 | Gemini Code Assist 個人方案的[條款](https://developers.google.com/gemini-code-assist/resources/privacy-notice-gemini-code-assist-individuals)允許個人使用；但 Code Assist API 與 Gemini CLI 的 OAuth client 都沒公開給第三方程式用，Google 可能隨時改 API 或擋掉。本人 2026-11-03 知情後決定自用 |
+
+Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、Code Assist 專案是否已開通。
 
 ### 驗證
 
@@ -602,7 +621,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（67 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（70 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。

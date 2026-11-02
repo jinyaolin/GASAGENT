@@ -254,20 +254,31 @@ function chatgptCredentialSummary_(creds, now) {
 // ---- 取 access token（含 refresh）--------------------------------------------------------------
 
 /**
+ * @typedef {{name: string, login: string, refreshRequest: function(Object): {url: string, payload: string, headers: !Object}, terminalErrors: !Array<string>}} OAuthSpec
+ * 一種 OAuth 方案 provider 的差異處：name 給訊息用、login 是本機登入腳本、refreshRequest 組 refresh 請求、terminalErrors 是「要重新登入」的錯誤碼。
+ */
+
+/** @type {OAuthSpec} */
+const CHATGPT_OAUTH_SPEC = Object.freeze({ name: 'ChatGPT', login: 'scripts/siwc-login.js', refreshRequest: chatgptRefreshRequest_, terminalErrors: CHATGPT_TERMINAL_REFRESH_ERRORS });
+
+/**
  * 回可用的 access token；快到期就 refresh（LockService 序列化）。refresh 終端錯誤 → 標 invalid、通知 owner、throw（401，不 fallback 重試同一個）。
+ * chatgpt 與 gemini_cli 共用（spec 決定 token endpoint 與錯誤碼；token 回應格式都是標準 OAuth）。
  * @param {Provider} provider
  * @param {{fetch: (Function|undefined), now: (Function|undefined), store: (Object|undefined), lock: (Object|undefined), notify: (Function|undefined)}=} deps
  *   store {get, set}；lock {waitLock(ms), releaseLock()}；notify(text) 通知 owner
+ * @param {OAuthSpec=} spec 預設 chatgpt
  * @return {string}
  * @throws {Error} providerError_
  */
-function chatgptAccessToken_(provider, deps) {
+function oauthAccessToken_(provider, deps, spec) {
   deps = deps || {};
+  spec = spec || CHATGPT_OAUTH_SPEC;
   const now = deps.now || (() => Date.now());
   const store = deps.store || chatgptPropStore_(provider.id);
   let creds = store.get();
-  if (!creds) throw providerError_(provider, 0, `尚未登入 ChatGPT：在本機執行 node scripts/siwc-login.js，把印出的憑證貼到管理頁「模型」→ 編輯 ${provider.id}。`);
-  if (creds.invalid) throw providerError_(provider, 401, `ChatGPT 憑證已失效（${creds.invalid}）：請重新執行 scripts/siwc-login.js 並貼上新憑證。`);
+  if (!creds) throw providerError_(provider, 0, `尚未登入 ${spec.name}：在本機執行 node ${spec.login}，把印出的憑證貼到管理頁「模型」→ 編輯 ${provider.id}。`);
+  if (creds.invalid) throw providerError_(provider, 401, `${spec.name} 憑證已失效（${creds.invalid}）：請重新執行 ${spec.login} 並貼上新憑證。`);
   if (!chatgptNeedsRefresh_(creds, now())) return creds.access_token;
 
   const lock = deps.lock || (() => { try { return LockService.getScriptLock(); } catch (err) { return null; } })();
@@ -277,10 +288,10 @@ function chatgptAccessToken_(provider, deps) {
     if (locked) {
       // 等鎖期間可能已被別的執行 refresh 過
       creds = store.get() || creds;
-      if (creds.invalid) throw providerError_(provider, 401, `ChatGPT 憑證已失效（${creds.invalid}）：請重新登入。`);
+      if (creds.invalid) throw providerError_(provider, 401, `${spec.name} 憑證已失效（${creds.invalid}）：請重新登入。`);
       if (!chatgptNeedsRefresh_(creds, now())) return creds.access_token;
     }
-    const req = chatgptRefreshRequest_(creds);
+    const req = spec.refreshRequest(creds);
     const fetchFn = deps.fetch || defaultProviderFetch_;
     let res;
     try {
@@ -298,9 +309,9 @@ function chatgptAccessToken_(provider, deps) {
       return next.access_token;
     }
     const errCode = chatgptErrorCode_(json);
-    if (CHATGPT_TERMINAL_REFRESH_ERRORS.indexOf(errCode) !== -1 || code === 400 || code === 401) {
+    if (spec.terminalErrors.indexOf(errCode) !== -1 || code === 400 || code === 401) {
       store.set(Object.assign({}, creds, { invalid: errCode || ('http_' + code) }));
-      const msg = `ChatGPT 憑證失效（${errCode || 'HTTP ' + code}），provider ${provider.id} 已停用，請重新執行 scripts/siwc-login.js 並到管理頁貼上新憑證。`;
+      const msg = `${spec.name} 憑證失效（${errCode || 'HTTP ' + code}），provider ${provider.id} 已停用，請重新執行 ${spec.login} 並到管理頁貼上新憑證。`;
       try { (deps.notify || telegramNotifyOwner_)(`⚠️ ${msg}`); } catch (err) { /* 忽略 */ }
       securityAudit_('provider:oauth_invalid', `${provider.id}：${errCode || 'HTTP ' + code}`);
       throw providerError_(provider, 401, msg);
@@ -310,6 +321,14 @@ function chatgptAccessToken_(provider, deps) {
     if (locked) { try { lock.releaseLock(); } catch (err) { /* 忽略 */ } }
   }
 }
+
+/**
+ * chatgpt 的 access token（oauthAccessToken_ 的 chatgpt 殼）。
+ * @param {Provider} provider
+ * @param {Object=} deps 同 oauthAccessToken_
+ * @return {string}
+ */
+function chatgptAccessToken_(provider, deps) { return oauthAccessToken_(provider, deps, CHATGPT_OAUTH_SPEC); }
 
 // ---- Adapter：Responses API ------------------------------------------------------------------
 
@@ -522,6 +541,6 @@ function chatgptRevoke_(provider, deps) {
  * @return {boolean}
  */
 function providerHasCredential_(p) {
-  if (p.protocol === 'chatgpt') { const c = getProviderOAuth_(p.id); return !!(c && !c.invalid); }
+  if (isOAuthProtocol_(p.protocol)) { const c = getProviderOAuth_(p.id); return !!(c && !c.invalid); }
   return !!getProviderKey_(p.id);
 }

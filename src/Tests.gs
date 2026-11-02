@@ -54,6 +54,10 @@ function smokeTestTable_() {
     ['chatgpt: 憑證解析（必要欄位、scope、expires_at 三種來源、JWT exp）、refresh 判斷 / 請求 / 套用滾動 token、摘要', testChatgptCredentials_, 'pure'],
     ['chatgpt: Responses 請求（instructions / input 項目 / tools / store:false stream:true / 拿掉不支援欄位）、SSE 解析、response.completed → ChatResult、response.failed → 帶 status 的錯誤、模型清單解析', testChatgptAdapter_, 'pure'],
     ['chatgpt: callProvider_ 走 SSE finalize 與備援（429 額度用完換下一個）；chatgptAccessToken_ 到期自動 refresh（鎖、滾動 token 寫回）、終端錯誤標 invalid 並通知；chainForRequest_ 非 owner 剔除 chatgpt', testChatgptFlow_, 'pure'],
+    // M7 gemini_cli（Google 帳號登入，Gemini CLI 方案）
+    ['gemini_cli: 憑證解析（登入腳本 JSON 與 ~/.gemini/oauth_creds.json 兩種格式、預設 client、scope、數字專案拒絕）、Google refresh 請求、摘要', testGeminiCliCredentials_, 'pure'],
+    ['gemini_cli: Code Assist 請求包一層（model / project / request = 標準 Gemini body）、回應 {response} → ChatResult、loadCodeAssist / onboardUser 純函式', testGeminiCliAdapter_, 'pure'],
+    ['gemini_cli: 第一次呼叫自動開通（loadCodeAssist → onboardUser → 輪詢 LRO → project 寫回）、已開通直接用、不合格報 403；refresh 走 Google token endpoint；chainForRequest_ 非 owner 剔除；撤銷清憑證', testGeminiCliFlow_, 'pure'],
     // M2
     ['registry: 全部工具無重名、schema 合法、名稱以 toolset 開頭', testRegistryValid_, 'pure'],
     ['registry: 重名 / 壞 schema 的宣告被拒；listToolsForProvider_ 依 RBAC 過濾', testRegistryRejectsBad_, 'pure'],
@@ -3111,4 +3115,154 @@ function testChatgptFlow_() {
   stub = fetchStub_([fakeResponse_(200, { models: [{ slug: 'gpt-5', display_name: 'GPT-5', visibility: 'list' }] })]);
   assertEqual_(chatgptListModels_(gpt, { token: 'T', fetch: stub.fetch }).map((m) => m.slug), ['gpt-5'], '列模型');
   assertEqual_(stub.calls[0].options.headers.Authorization, 'Bearer T', '模型清單帶 bearer');
+}
+
+// ---- M7 gemini_cli（Google 帳號登入，Gemini CLI 方案）----------------------------------------------
+
+/** @return {!Object} 合法憑證（gemini-login.js 的輸出） */
+function fakeGeminiCliCreds_(overrides) {
+  return Object.assign({
+    client_id: GEMINI_CLI_CLIENT_ID, client_secret: GEMINI_CLI_CLIENT_SECRET, access_token: 'ya29.a', refresh_token: '1//rt_1',
+    id_token: fakeJwt_({ sub: 'g1', email: 'me@gmail.com' }), expires_at: 1900000000000, scopes: ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'openid'],
+    email: 'me@gmail.com', saved_at: '2026-11-03T00:00:00.000Z',
+  }, overrides || {});
+}
+
+function testGeminiCliCredentials_() {
+  const now = 1800000000000;
+  const c = parseGeminiCliCredentials_(JSON.stringify(fakeGeminiCliCreds_()), now);
+  assertEqual_([c.client_id, c.client_secret, c.refresh_token, c.expires_at, c.email, c.subject, c.project_id, c.invalid], [GEMINI_CLI_CLIENT_ID, GEMINI_CLI_CLIENT_SECRET, '1//rt_1', 1900000000000, 'me@gmail.com', 'g1', '', ''], '登入腳本 JSON');
+  // Gemini CLI 自己的 ~/.gemini/oauth_creds.json（google-auth-library 格式）
+  const cli = parseGeminiCliCredentials_({ access_token: 'ya29.b', refresh_token: '1//rt_2', scope: 'https://www.googleapis.com/auth/cloud-platform openid', token_type: 'Bearer', id_token: fakeJwt_({ sub: 'g2', email: 'cli@gmail.com' }), expiry_date: 1850000000000 }, now);
+  assertEqual_([cli.client_id, cli.expires_at, cli.email, cli.scopes.length, cli.saved_at], [GEMINI_CLI_CLIENT_ID, 1850000000000, 'cli@gmail.com', 2, new Date(now).toISOString()], 'oauth_creds.json 格式：預設 client、expiry_date、email 從 id_token');
+  assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ expires_at: undefined, saved_at: undefined }), now).expires_at, now, '不知道到期就當已過期');
+  assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ project_id: 'my-proj-1', tier: 'free-tier', project_hint: 'x' }), now).project_id, 'my-proj-1', 'project_id 帶入');
+  assertThrows_(() => parseGeminiCliCredentials_('nope'), '非 JSON');
+  assertThrows_(() => parseGeminiCliCredentials_(fakeGeminiCliCreds_({ refresh_token: '' })), '缺 refresh');
+  assert_(/cloud-platform/.test(assertThrows_(() => parseGeminiCliCredentials_(fakeGeminiCliCreds_({ scopes: ['openid'] })), '缺 scope').message), '缺 scope 訊息');
+  assert_(/專案編號/.test(assertThrows_(() => parseGeminiCliCredentials_(fakeGeminiCliCreds_({ project_id: '123456' })), '數字專案').message), '數字專案拒絕');
+  // refresh 請求：Google token endpoint、帶 client_secret
+  const req = geminiCliRefreshRequest_(c);
+  assertEqual_(req.url, GEMINI_CLI_TOKEN_URL, 'token url');
+  assert_(/grant_type=refresh_token/.test(req.payload) && /client_secret=GOCSPX/.test(req.payload) && /refresh_token=1%2F%2Frt_1/.test(req.payload), 'refresh form：' + req.payload);
+  // 摘要
+  const sum = geminiCliCredentialSummary_(Object.assign({}, c, { project_id: 'p1', tier: 'free-tier' }), now);
+  assertEqual_([sum.email, sum.scopesOk, sum.projectId, sum.tier, sum.refreshExpiresAt, sum.invalid], ['me@gmail.com', true, 'p1', 'free-tier', '', ''], '摘要');
+  assertEqual_(geminiCliCredentialSummary_(null), null, '沒憑證');
+  assertEqual_(geminiCliCredentialSummary_(Object.assign({}, c, { scopes: ['openid'] }), now).scopesOk, false, 'scope 不齊');
+  // validateProvider_：預設 base_url、不能 embed；分派 helpers
+  const p = validateProvider_(fakeProviderInput_({ id: 'gcli', protocol: 'gemini_cli', base_url: '' }));
+  assertEqual_(p.base_url, GEMINI_CLI_ENDPOINT, '預設 endpoint');
+  assertThrows_(() => validateProvider_(fakeProviderInput_({ protocol: 'gemini_cli', role: 'embed' })), '不能 embed');
+  assertEqual_([isOAuthProtocol_('gemini_cli'), isOAuthProtocol_('chatgpt'), isOAuthProtocol_('gemini')], [true, true, false], 'isOAuthProtocol_');
+  assertEqual_(parseOAuthCredentials_('gemini_cli', fakeGeminiCliCreds_()).client_id, GEMINI_CLI_CLIENT_ID, '分派解析');
+  assertEqual_(oauthLoginScript_('gemini_cli'), 'scripts/gemini-login.js', '登入腳本名');
+  assert_(oauthListModels_(p).length > 3 && oauthListModels_(p)[0].slug === 'gemini-2.5-pro', '模型清單（靜態）');
+}
+
+function testGeminiCliAdapter_() {
+  const provider = validateProvider_(fakeProviderInput_({ id: 'gcli', protocol: 'gemini_cli', base_url: '', model: 'gemini-2.5-pro', max_tokens: 100, extra_body: '{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}' }));
+  const r = geminiCliBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7, sessionId: 's_1' }, { token: 'TOKEN', project: 'proj-1' });
+  assertEqual_(r.url, 'https://cloudcode-pa.googleapis.com/v1internal:generateContent', 'url');
+  assertEqual_(r.headers.Authorization, 'Bearer TOKEN', 'bearer');
+  assertEqual_([r.body.model, r.body.project, typeof r.body.user_prompt_id, r.body.user_prompt_id.indexOf('s_1-')], ['gemini-2.5-pro', 'proj-1', 'string', 0], '外層 model / project / user_prompt_id');
+  const inner = r.body.request;
+  const plain = geminiBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7 }, 'K').body;
+  assertEqual_([inner.contents, inner.systemInstruction, inner.tools, inner.generationConfig, inner.session_id], [plain.contents, plain.systemInstruction, plain.tools, plain.generationConfig, 's_1'], '內層 = 標準 Gemini body（extra_body 套在內層）+ session_id');
+  assertEqual_(r.body.request.generationConfig.thinkingConfig, { thinkingBudget: 0 }, 'extra_body 進內層');
+  assertEqual_(geminiCliBuildRequest_(provider, { messages: [{ role: 'user', content: 'x' }] }, 'T').body.project, '', '只給 token 字串 → project 空');
+  // 回應包一層
+  const resp = { response: { candidates: [{ content: { role: 'model', parts: [{ text: 'Hi' }, { functionCall: { name: 'fake_echo', args: { text: 'x' } } }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3 } }, traceId: 't' };
+  const parsed = geminiCliParseResponse_(resp);
+  assertEqual_([parsed.text, parsed.toolCalls.length, parsed.toolCalls[0].name, parsed.usage, parsed.stop, parsed.raw.traceId], ['Hi', 1, 'fake_echo', { prompt: 7, completion: 3 }, 'tool_calls', 't'], 'ChatResult');
+  assertEqual_(geminiCliParseResponse_({ candidates: [{ content: { parts: [{ text: 'bare' }] }, finishReason: 'STOP' }] }).text, 'bare', '沒包層也接受');
+  // Code Assist 純函式
+  const notOnboarded = { allowedTiers: [{ id: 'free-tier', isDefault: true, name: 'Free' }, { id: 'standard-tier' }] };
+  assertEqual_(geminiCliProjectFromLoad_(notOnboarded, ''), null, '沒 currentTier → 要 onboard');
+  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'free-tier' }, cloudaicompanionProject: 'managed-1' }, ''), { project: 'managed-1', tier: 'free-tier' }, '已 onboard：用 cloudaicompanionProject');
+  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' }, paidTier: { id: 'standard-tier' } }, 'my-gcp'), { project: 'my-gcp', tier: 'standard-tier' }, '沒回專案就用使用者指定的');
+  assert_(/驗證/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'x' }, ineligibleTiers: [{ tierId: 'free-tier', reasonCode: 'VALIDATION_REQUIRED', reasonMessage: 'verify', validationUrl: 'https://v' }] }, ''), '不合格').message), '不合格訊息含驗證網址');
+  assert_(/--project/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' } }, ''), '要專案').message), '要 GCP 專案');
+  const ob = geminiCliOnboardRequest_(notOnboarded, 'my-gcp');
+  assertEqual_([ob.tierId, ob.body.cloudaicompanionProject, ob.body.metadata.duetProject, ob.body.metadata.pluginType], ['free-tier', undefined, undefined, 'GEMINI'], 'free-tier 不帶專案');
+  const ob2 = geminiCliOnboardRequest_({ allowedTiers: [{ id: 'standard-tier', isDefault: true }] }, 'my-gcp');
+  assertEqual_([ob2.tierId, ob2.body.cloudaicompanionProject, ob2.body.metadata.duetProject], ['standard-tier', 'my-gcp', 'my-gcp'], 'standard 帶專案');
+  assertEqual_(geminiCliOnboardRequest_({}, '').tierId, 'legacy-tier', '沒 default tier → legacy');
+}
+
+function testGeminiCliFlow_() {
+  const now = 1800000000000;
+  const gcli = validateProvider_(fakeProviderInput_({ id: 'gcli', protocol: 'gemini_cli', base_url: '', model: 'gemini-2.5-pro', priority: 1 }));
+  const backup = validateProvider_(fakeProviderInput_({ id: 'backup', priority: 2 }));
+  const mem = (initial) => { let c = initial; return { get: () => (c ? Object.assign({}, c) : null), set: (v) => { c = v; }, peek: () => c }; };
+  const lock = { waitLock: () => {}, releaseLock: () => {} };
+  const sleeps = [];
+  const sleep = (ms) => sleeps.push(ms);
+  const fresh = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ expires_at: now + 3600000 }), now);
+  // 第一次呼叫：loadCodeAssist（未開通）→ onboardUser（LRO 未完成）→ getOperation（完成）→ project 寫回
+  let store = mem(fresh);
+  let stub = fetchStub_([
+    fakeResponse_(200, { allowedTiers: [{ id: 'free-tier', isDefault: true }] }),
+    fakeResponse_(200, { name: 'operations/op1', done: false }),
+    fakeResponse_(200, { name: 'operations/op1', done: true, response: { cloudaicompanionProject: { id: 'managed-proj' } } }),
+  ]);
+  const auth = geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: stub.fetch, sleep });
+  assertEqual_([auth.token, auth.project, store.peek().project_id, store.peek().tier, sleeps], ['ya29.a', 'managed-proj', 'managed-proj', 'free-tier', [5000]], '開通並寫回專案');
+  assertEqual_(stub.calls.map((c) => c.url), ['https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist', 'https://cloudcode-pa.googleapis.com/v1internal:onboardUser', 'https://cloudcode-pa.googleapis.com/v1internal/operations/op1'], 'Code Assist 網址');
+  assertEqual_([stub.calls[0].options.method, stub.calls[2].options.method, stub.calls[0].options.headers.Authorization, JSON.parse(stub.calls[1].options.payload).tierId], ['post', 'get', 'Bearer ya29.a', 'free-tier'], 'method / bearer / tier');
+  assertEqual_(JSON.parse(stub.calls[1].options.payload).cloudaicompanionProject, undefined, 'free-tier onboard 不帶專案');
+  // 已有 project → 不再打 Code Assist
+  assertEqual_(geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: () => { throw new Error('不該打'); } }).project, 'managed-proj', '已開通直接用');
+  // 已 onboard（currentTier）→ 直接拿 cloudaicompanionProject
+  store = mem(fresh);
+  stub = fetchStub_([fakeResponse_(200, { currentTier: { id: 'free-tier' }, cloudaicompanionProject: 'existing-proj' })]);
+  assertEqual_(geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: stub.fetch, sleep }).project, 'existing-proj', 'currentTier 直接用');
+  // 不合格 → 403（不 fallback 到同一個，但備援鏈會換下一個）
+  store = mem(fresh);
+  stub = fetchStub_([fakeResponse_(200, { currentTier: { id: 'x' }, ineligibleTiers: [{ tierId: 'free-tier', reasonMessage: 'not eligible' }] })]);
+  const e403 = assertThrows_(() => geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: stub.fetch, sleep }), '不合格');
+  assertEqual_([e403.status, /not eligible/.test(e403.message), store.peek().project_id], [403, true, ''], '不合格 403、不寫專案');
+  // LRO 一直沒完成 → 503
+  store = mem(fresh);
+  const pending = [fakeResponse_(200, { allowedTiers: [{ id: 'free-tier', isDefault: true }] }), fakeResponse_(200, { name: 'operations/op2', done: false })];
+  for (let i = 0; i < 10; i++) pending.push(fakeResponse_(200, { name: 'operations/op2', done: false }));
+  assertEqual_(assertThrows_(() => geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: fetchStub_(pending).fetch, sleep: () => {} }), 'LRO 未完').status, 503, 'LRO 超時 503');
+  // Code Assist 回 401 → providerError_ 帶狀態
+  store = mem(fresh);
+  assertEqual_(assertThrows_(() => geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: fetchStub_([fakeResponse_(401, { error: { message: 'bad token' } })]).fetch }), '401').status, 401, 'Code Assist HTTP 錯誤');
+  // callProvider_：keyFor 給 {token, project}，回應 {response}
+  stub = fetchStub_([fakeResponse_(200, { response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } } })]);
+  const r1 = callProvider_(gcli, { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => ({ token: 'T', project: 'P' }) });
+  assertEqual_([r1.text, r1.provider, r1.model, r1.usage], ['hi', 'gcli', 'gemini-2.5-pro', { prompt: 3, completion: 2 }], 'callProvider_');
+  const sent = JSON.parse(stub.calls[0].options.payload);
+  assertEqual_([sent.project, sent.model, sent.request.contents[0].parts[0].text, stub.calls[0].options.headers.Authorization], ['P', 'gemini-2.5-pro', 'x', 'Bearer T'], '送出 Code Assist body');
+  // 429 → 換備援
+  stub = fetchStub_([fakeResponse_(429, { error: { message: 'quota' } }), fakeResponse_(200, { choices: [{ message: { content: 'from backup' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })]);
+  const r2 = chatWithChain_([gcli, backup], { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => 'TOK', record: () => {} });
+  assertEqual_([r2.text, r2.provider, r2.fallbacks[0].status], ['from backup', 'backup', 429], '429 fallback');
+  // refresh 走 Google token endpoint（沒回 refresh_token 就保留）
+  const expiring = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ expires_at: now + 60000, project_id: 'P' }), now);
+  store = mem(expiring);
+  stub = fetchStub_([fakeResponse_(200, { access_token: 'ya29.new', expires_in: 3599, scope: 'https://www.googleapis.com/auth/cloud-platform openid', token_type: 'Bearer' })]);
+  assertEqual_(geminiCliAccessToken_(gcli, { store, now: () => now, lock, fetch: stub.fetch }), 'ya29.new', 'refresh 後的 token');
+  assertEqual_([stub.calls[0].url, store.peek().refresh_token, store.peek().expires_at, store.peek().project_id], [GEMINI_CLI_TOKEN_URL, '1//rt_1', now + 3599000, 'P'], 'refresh 寫回、保留 refresh token 與專案');
+  assert_(/client_secret=/.test(stub.calls[0].options.payload), 'refresh 帶 client_secret');
+  // 終端錯誤 invalid_grant → invalid、通知
+  store = mem(expiring);
+  const notes = [];
+  const warn = console.warn; console.warn = () => {};
+  const e = assertThrows_(() => geminiCliAccessToken_(gcli, { store, now: () => now, lock, fetch: fetchStub_([fakeResponse_(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' })]).fetch, notify: (t) => notes.push(t) }), 'invalid_grant');
+  console.warn = warn;
+  assertEqual_([e.status, store.peek().invalid, notes.length, /gemini-login\.js/.test(e.message)], [401, 'invalid_grant', 1, true], '終端錯誤提示重跑 gemini-login.js');
+  assert_(/gemini-login/.test(assertThrows_(() => geminiCliAccessToken_(gcli, { store: mem(null) }), '沒憑證').message), '沒憑證提示登入');
+  // chainForRequest_：非 owner 剔除 gemini_cli
+  const providers = [gcli, backup];
+  assertEqual_(chainForRequest_(providers, { role: 'main' }).map((p) => p.id), ['gcli', 'backup'], 'owner 全鏈');
+  assertEqual_(chainForRequest_(providers, { role: 'main', principal: 'group_member' }).map((p) => p.id), ['backup'], '群組成員剔除 gemini_cli');
+  assert_(/Google/.test(assertThrows_(() => chainForRequest_(providers, { providerId: 'gcli', principal: 'guest' }), '訪客指定').message), '訪客指定報錯');
+  // 撤銷
+  store = mem(fresh);
+  stub = fetchStub_([fakeResponse_(200, '')]);
+  const rr = geminiCliRevoke_(gcli, { store, fetch: stub.fetch });
+  assertEqual_([rr.revoked, rr.cleared, store.peek(), stub.calls[0].url, /token=1%2F%2Frt_1/.test(stub.calls[0].options.payload)], [true, true, null, GEMINI_CLI_REVOKE_URL, true], '撤銷並清憑證');
 }
