@@ -193,6 +193,11 @@ function getConfigMap_() {
  * @return {!Array<string>} 寫入的 key
  */
 function setConfigValues_(values) {
+  const sheet = getDbSheet_('Config');
+  const headers = readHeaders_(sheet);
+  const col = {};
+  headers.forEach((h, i) => { col[h] = i + 1; });
+  if (!col.key || !col.value) throw new Error('Config tab 缺 key / value 欄，請執行 installAgent()。');
   const rows = readTable_('Config').rows;
   const now = new Date();
   Object.keys(values).forEach((key) => {
@@ -201,13 +206,16 @@ function setConfigValues_(values) {
     else if (typeof v === 'object') v = JSON.stringify(v);
     else v = String(v);
     const existing = rows.find((r) => String(r.key || '').trim() === key);
-    if (existing) {
-      writeTableRow_('Config', existing._row, { key, value: v, updated: now });
-      existing.value = v;
-    } else {
-      const rowIndex = appendTableRow_('Config', { key, value: v, updated: now });
-      rows.push({ _row: rowIndex, key, value: v, updated: now });
-    }
+    const rowIndex = existing ? existing._row : sheet.getLastRow() + 1;
+    // value 欄先設成純文字格式再寫：否則 Sheets 會把 "111,222" 當千分位數字、"TRUE" 當布林、"09:00" 當時間，
+    // 讀回來就變形（Telegram 白名單兩個 id 以上就是這樣消失的）。
+    const valueCell = sheet.getRange(rowIndex, col.value);
+    valueCell.setNumberFormat('@');
+    sheet.getRange(rowIndex, col.key).setValue(key);
+    valueCell.setValue(v);
+    if (col.updated) sheet.getRange(rowIndex, col.updated).setValue(now);
+    if (existing) existing.value = v;
+    else rows.push({ _row: rowIndex, key, value: v, updated: now });
   });
   return Object.keys(values);
 }

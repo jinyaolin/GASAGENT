@@ -561,6 +561,7 @@ node scripts/local-tests.js
 | agent 說「skill_manage 只能以提案方式進行」 | 刻意限制：技能新建 / 修補一律進審批，到「紀錄 → 審批」批准 |
 | 複雜任務做完沒有技能提案 | 觸發條件是 ≥ 5 步、順利結束、同 session 第一次；或模型評估為不值得（meta 會顯示評估文字）。開新 session 再試，或直接要求「把這個流程存成技能」 |
 | 升到 M5 後 Doctor 說 `Sessions` 缺 `skill_proposed_turn` / 缺 `rbac.skill` | 按「重新安裝」 |
+| Telegram 白名單填了兩個以上 id，儲存後只剩一個或變怪數字 | 舊版 Config 寫入被 Sheets 當千分位數字轉型；已改成 value 欄純文字格式。更新後到「通道」重新填一次白名單儲存即可 |
 | Telegram 說了話沒反應 | 依序看：「通道」→「查 webhook 狀態」有沒有 URL 與最後錯誤；Doctor 的 Telegram 三項；「紀錄 → AuditLog」有無 `telegram:webhook` 列（`rejected user_not_allowed` = 白名單沒填對、`bad_secret` = 重新「設定 webhook」）；「紀錄 → Queue」有沒有 job |
 | Telegram 回「收到」但一直沒結果 | trigger 沒跑或 job 失敗：Doctor 看 trigger、「紀錄 → Queue」看該 job 的狀態與錯誤；Telegram 回覆失敗會記在 job 的 error（例如 token 失效） |
 | Telegram webhook 狀態顯示 `Wrong response from the webhook: 302` | 部署 B 不是「任何人」或網址填成部署 A 的；用 `scripts/deploy.sh` 重推 B，確認「通道」填的是部署 B 的 `/exec` |
