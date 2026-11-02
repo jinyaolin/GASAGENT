@@ -242,6 +242,8 @@ function driveSkillStore_(folder) {
     },
     /** @return {GoogleAppsScript.Drive.Folder} */
     folder: root,
+    /** 只有 Drive store 走 CacheService 索引快取；測試注入的記憶體 store 沒有這個旗標，getSkillIndex_ 一律直接 list。 */
+    cacheable: true,
   };
 }
 
@@ -274,13 +276,13 @@ function skillCache_() {
 }
 
 /**
- * 取索引：先看 CacheService，沒有就 store.list() 並快取。
- * @param {{list: Function}=} store
+ * 取索引：store 可快取（Drive store）時先看 CacheService，沒有就 store.list() 並快取；注入的記憶體 store 不碰快取。
+ * @param {{list: Function, cacheable: (boolean|undefined)}=} store 省略 = Drive store
  * @param {{force: (boolean|undefined)}=} opts force=true 跳過快取
  * @return {!Array<SkillIndexEntry>}
  */
 function getSkillIndex_(store, opts) {
-  const c = skillCache_();
+  const c = (!store || store.cacheable) ? skillCache_() : null;
   if (c && !(opts && opts.force)) {
     try {
       const cached = c.get(SKILL_INDEX_CACHE_KEY);
