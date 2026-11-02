@@ -4,7 +4,7 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M5 技能程式完成，待本人驗收；之後 M6 通道**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M5 完成並驗收，下一步 M6 通道**。
 
 ## 設計要點
 
@@ -504,6 +504,6 @@ node scripts/local-tests.js
 - [x] M2 工具與 RBAC（八個 toolset、registry / executor、審批、溢寫、工具迴圈、工具 / 紀錄分頁）—— 批准後續跑對話留到 M3/M4
 - [x] M3 記憶：Sessions / Messages 持久化、context 壓縮、Memory / UserProfile 上限與快照、memory_manage、session_search（可選向量）、curation 進審批、記憶 / 設定分頁
 - [x] M4 排程與非同步 Queue：job 狀態機、checkpoint 續跑、審批後續跑、Cron 解析與到期掃描、`cronjob_manage`、投遞 doc / email、排程 / Queue 分頁、背景執行
-- [x] M5 技能：Drive `skills/<name>/SKILL.md`、索引快取、system prompt 只放名稱 + 描述、`skill_load` / `/<skill>` / cron skills 全文注入、`skill_manage` 提案進審批、≥ 5 步自動提案、技能分頁 —— 程式完成，待本人驗收
+- [x] M5 技能：Drive `skills/<name>/SKILL.md`、索引快取、system prompt 只放名稱 + 描述、`skill_load` / `/<skill>` / cron skills 全文注入、`skill_manage` 提案進審批、≥ 5 步自動提案、技能分頁
 - [ ] M6 通道（Telegram webhook 部署 B、Email 指令信）
 - [ ] M7 加固與維運
