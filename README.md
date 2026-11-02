@@ -48,6 +48,7 @@ src/
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 scripts/siwc-login.js    # M7：在本機完成 Sign in with ChatGPT（動態註冊、PKCE、驗 ID token），印出要貼到管理頁的憑證 JSON
 scripts/gemini-login.js  # M7：在本機用 Antigravity（預設）或 Gemini CLI 的 OAuth client 完成 Google 登入、開通 Code Assist、列可用模型，印出要貼到管理頁的憑證 JSON（--from-cli 可沿用 agy / gemini 的 token 檔）
+scripts/gemini-probe.js  # 診斷：用存好的憑證以不同 User-Agent 打一次 Code Assist，比對哪個條件被 403
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
@@ -230,7 +231,7 @@ Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 2
 | 設定 | 管理頁「模型」→ 新增 provider → 範本「Google 帳號」（protocol `gemini_cli`、base_url `https://daily-cloudcode-pa.googleapis.com`、model `gemini-3-flash`）→ 儲存 → 編輯 → 把那段 JSON 貼進「Google 帳號憑證」→ 儲存 →「可用模型」挑一個 →「測試連線」。base_url 留在任一預設值時會依憑證的 client 自動選 host；填別的就照填的打（例如自架 proxy）。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 `cloud-platform` scope 才收），不存 sheet、不回傳 token |
 | 續期 | access token 1 小時；剩不到 5 分鐘就用 refresh token 向 `oauth2.googleapis.com/token` 換新（帶 client_secret；與 chatgpt 共用 `oauthAccessToken_`：LockService 序列化、終端錯誤 `invalid_grant` → 標失效、推 Telegram、Doctor 紅燈）。Google 的 refresh token 不會定期到期，撤銷存取權或改密碼才失效，重跑 `gemini-login.js` 貼新憑證即可 |
 | 請求 | `POST {endpoint}/v1internal:generateContent`，body `{model, project, request: <標準 generateContent body + sessionId>}`，antigravity 再加 `requestType: "agent"`、`userAgent: "antigravity"`、`requestId`；回應 `{response: <標準回應>}`——內層直接沿用 gemini 協定的 adapter（contents / functionDeclarations / thoughtSignature 都一樣）。不走串流。憑證裡沒有 `project_id`（例如 `--no-setup`）第一次呼叫會自己 `loadCodeAssist` → `onboardUser`（antigravity 重送到 done、沒專案用社群實作的 fallback 專案；gemini_cli 輪詢 LRO）寫回。429 額度用完 → 自動換備援鏈的下一個 |
-| **User-Agent 限制** | GAS 的 `UrlFetchApp` 不能改 User-Agent（固定 `Google-Apps-Script`），而 Antigravity 後端用 Hub 的 User-Agent 版本決定要不要給**最新**模型。所以登入腳本列出的模型不一定都能從 GAS 打通；`gemini-2.5-*`、`gemini-3-flash`、`claude-sonnet-4-6` 這類較穩，測試連線回 400 / 404 就換一個 |
+| **User-Agent 限制（2026-11-03 實測）** | GAS 的 `UrlFetchApp` 不能改 User-Agent（固定 `Google-Apps-Script`），而 Antigravity 後端**只看 User-Agent 放行**：同一個 token、同一個 body，帶 Antigravity 的 User-Agent 回 200，帶 GAS 的 User-Agent 回 `403 You do not have a valid license of this product (#3501)`（`scripts/gemini-probe.js` 可在本機重現比對）。所以 **GAS 直接打 daily-cloudcode-pa 一定 403**，要能用得在中間放一個你自己控制、會補 User-Agent 的 relay（例如 Cloudflare Worker），provider 的 base_url 指到 relay、`extra_headers` 放 relay 的共用密鑰；目前 repo 沒有附 relay |
 | **只服務 owner** | 與 chatgpt 一樣：`chainForRequest_` 會把 gemini_cli provider 從群聊成員 / 訪客那一輪剔除（指定它會報錯），群組要能用就得另外有一個 API key 的 main provider。每個帳號各自登入自己的 Google 帳號 |
 | 登出 | 編輯 provider →「登出」：向 Google 撤銷 refresh token 並清憑證；或到 [Google 帳號 → 第三方存取權](https://myaccount.google.com/permissions) 移除「Antigravity」/「Gemini CLI」 |
 | 條款 | Antigravity / Gemini Code Assist 個人方案的條款允許個人使用；但 Code Assist API 與這些 OAuth client 都沒公開給第三方程式用，Google 可能隨時改 API、擋 User-Agent 或封帳號（社群實作都這樣警告）。本人 2026-11-03 知情後決定自用 |
