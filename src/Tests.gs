@@ -105,7 +105,7 @@ function smokeTestTable_() {
     ['channels: telegram_member_toolsets 解析（預設 / 鎖定剔除 / 空 = 無）、儲存正規化、memberSystemExtra_ 列出清單、/group on 文字提到公開工具', testMemberToolsetsConfig_, 'pure'],
     // M7 寄信白名單
     ['whitelist: 白名單解析（*@domain / 不合法丟棄）、收件人抽取、比對；gmail_send / gmail_forward 收件人全在名單內 owner 免審直接寄（AuditLog 標白名單免審），部分不在 / 草稿 / 回覆 / 群組成員仍送審；system prompt 列名單', testGmailWhitelist_, 'pure'],
-    ['telegram: /white list / add / delete 讀寫 Config gmail_send_whitelist、重複與不合法處理、AuditLog 記事件；/help 有說明', testTelegramWhitelistCommand_, 'pure'],
+    ['telegram: /white 與 /web 名單指令 list / add / delete 讀寫 Config（gmail_send_whitelist / web_allowed_domains）、重複與不合法處理、AuditLog 記事件；/help 有說明；群組成員不能改', testTelegramWhitelistCommand_, 'pure'],
   ];
 }
 
@@ -2928,10 +2928,22 @@ function testTelegramWhitelistCommand_() {
   r = t('/white rm nobody@x.io');
   assertEqual_([f.deps._config.length, /名單裡沒有/.test(r.text)], [2, true], '刪不存在的不寫');
   assert_(/不認得「foo」/.test(t('/white foo').text), '未知子指令');
-  assert_(/\/white \[list/.test(t('/help').text), '/help 有說明');
+  assert_(/\/white \[list/.test(t('/help').text) && /\/web \[list/.test(t('/help').text), '/help 有說明');
+  // /web：web_fetch 域名白名單（同一個 helper）
+  f.deps.toolCfg.webAllowedDomains = ['example.com'];
+  r = t('/web');
+  assert_(r.action === 'web' && /web_fetch 域名白名單（1 筆）/.test(r.text) && /• example\.com/.test(r.text), '/web list：' + r.text);
+  r = t('/web add https://Docs.Example.com/path, *.wikipedia.org example.com');
+  assertEqual_([f.deps._config[f.deps._config.length - 1], f.deps.toolCfg.webAllowedDomains], [{ web_allowed_domains: 'example.com\ndocs.example.com\n*.wikipedia.org' }, ['example.com', 'docs.example.com', '*.wikipedia.org']], '/web add：去 scheme / 路徑、略過已存在');
+  assertEqual_(f.audits[f.audits.length - 1].tool, 'security:web_domains:add', 'AuditLog web add');
+  r = t('/web delete docs.example.com');
+  assertEqual_([f.deps._config[f.deps._config.length - 1], /已移除：docs\.example\.com/.test(r.text)], [{ web_allowed_domains: 'example.com\n*.wikipedia.org' }, true], '/web delete');
+  assert_(/web_fetch 全部拒絕/.test(handleTelegramUpdate_(tgMessage_('/web', 111), Object.assign({}, f.deps, { toolCfg: fakeToolConfig_() })).text), '空名單提示');
+  assertEqual_(parseTelegramCommand_('/web add x.com'), { command: 'web', rest: 'add x.com' }, '/web 指令解析');
   // 群組成員 / 訪客的 /white 一律忽略（既有規則）
   const g = fakeTelegramDeps_({ botUsername: 'MyAgentBot', botId: '999', cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_open_groups: '-100' }) });
   assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/white add evil@x.io', 555, -100), g.deps).reason, 'member_command', '群組成員不能改白名單');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/web add evil.example', 555, -100), g.deps).reason, 'member_command', '群組成員不能改域名白名單');
   assertEqual_(g.deps._config.length, 0, '沒寫 Config');
   assertEqual_(parseTelegramCommand_('/white add a@b.co'), { command: 'white', rest: 'add a@b.co' }, '指令解析');
 }

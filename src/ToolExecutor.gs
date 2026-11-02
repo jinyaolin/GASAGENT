@@ -236,7 +236,9 @@ function saveToolConfig_(input) {
   const steps = toNumber_(input.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
   if (steps < 1 || steps > 200) throw new Error('max_tool_steps 必須在 1 到 200 之間。');
   values[TOOL_CONFIG_KEYS.MAX_TOOL_STEPS] = Math.floor(steps);
-  values[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = parseAllowedDomains_(input.web_allowed_domains).join('\n');
+  const webNext = parseAllowedDomains_(input.web_allowed_domains);
+  values[TOOL_CONFIG_KEYS.WEB_ALLOWED_DOMAINS] = webNext.join('\n');
+  if (webNext.join(',') !== getToolConfig_().webAllowedDomains.join(',')) securityAudit_('web_domains:set', `web_fetch 域名白名單由管理頁改為 ${webNext.length} 筆：${webNext.join(', ') || '（空）'}`);
   values[TOOL_CONFIG_KEYS.PERSONA] = String(input.persona || '').trim();
   values[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = parseDriveId_(input.slides_template_id);
   // skills_folder_id 由「技能」分頁管理；工具分頁沒送就不動。
@@ -244,7 +246,7 @@ function saveToolConfig_(input) {
   // 寄信白名單：沒送就不動（Telegram /white 也會改它）；有變動記 AuditLog（記 email，不是秘密）。
   if (input.gmail_send_whitelist !== undefined) {
     const next = parseEmailWhitelist_(input.gmail_send_whitelist);
-    const prev = getToolConfig_().gmailSendWhitelist;
+    const prev = parseToolConfig_(getConfigMap_()).gmailSendWhitelist;
     values[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = next.join('\n');
     if (next.join(',') !== prev.join(',')) securityAudit_('whitelist:set', `寄信白名單由管理頁改為 ${next.length} 筆：${next.join(', ') || '（空）'}`);
   }
