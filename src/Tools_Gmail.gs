@@ -23,6 +23,10 @@ function gmailTools_() {
   const threadId = { type: 'string', description: 'Gmail 討論串 id（來自 gmail_search）' };
   const addr = (desc) => ({ type: 'string', description: desc + '；多個以逗號分隔' });
   const attachmentIds = { type: 'array', items: { type: 'string' }, description: `要附加的 Drive 檔案 id（gmail_save_attachments / drive_search 取得；Google 文件會轉成 PDF），最多 ${GMAIL_ATTACHMENT_MAX_COUNT} 個、總量 25 MB` };
+  const htmlBody = {
+    type: 'string',
+    description: 'HTML 內文（選填）。給了就以 HTML 寄出，body 仍作純文字備援。只用簡單標籤（p / br / b / i / a / ul / ol / li / h1-h3 / table / img），行內 style 可；不要 script / iframe / 外部表單。',
+  };
   return [
     {
       name: 'gmail_search', toolset: 'gmail', risk: 'R',
@@ -74,7 +78,8 @@ function gmailTools_() {
         properties: {
           to: addr('收件人'),
           subject: { type: 'string' },
-          body: { type: 'string', description: '純文字內文' },
+          body: { type: 'string', description: '純文字內文（有 html_body 時作為不支援 HTML 的客戶端備援）' },
+          html_body: htmlBody,
           cc: addr('副本'),
           bcc: addr('密件副本'),
           reply_to_thread_id: { type: 'string', description: '要回覆的討論串 id（選填）' },
@@ -93,7 +98,8 @@ function gmailTools_() {
           draft_id: { type: 'string', description: 'gmail_create_draft 回傳的 draft_id' },
           to: addr('收件人'),
           subject: { type: 'string' },
-          body: { type: 'string' },
+          body: { type: 'string', description: '純文字內文（有 html_body 時作為備援）' },
+          html_body: htmlBody,
           cc: addr('副本'),
           bcc: addr('密件副本'),
           reply_to_thread_id: { type: 'string' },
@@ -113,6 +119,7 @@ function gmailTools_() {
           to: addr('收件人'),
           message_id: { type: 'string', description: '要轉寄的訊息 id；省略 = 該串最後一封' },
           body: { type: 'string', description: '附在前面的說明（選填）' },
+          html_body: { type: 'string', description: '以 HTML 取代整封轉寄內文（選填；原信內容請自行包含）' },
           cc: addr('副本'),
           bcc: addr('密件副本'),
         },
@@ -210,7 +217,26 @@ function gmailOptions_(args) {
   if (args.bcc) opts.bcc = String(args.bcc);
   const ids = toStringList_(args.attachment_file_ids);
   if (ids.length) opts.attachments = gmailAttachmentBlobs_(ids);
+  const html = gmailHtmlBody_(args.html_body);
+  if (html) opts.htmlBody = html;
   return opts;
+}
+
+/**
+ * html_body 清理：去掉 script / iframe / object / embed / form 與 on* 事件屬性；空字串回 ''。純函式。
+ * Gmail 本身也會濾，這裡是第一道，避免模型被注入內容牽著走。
+ * @param {*} raw
+ * @return {string}
+ */
+function gmailHtmlBody_(raw) {
+  if (raw == null) return '';
+  let html = String(raw).trim();
+  if (!html) return '';
+  html = html.replace(/<\s*(script|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  html = html.replace(/<\s*(script|iframe|object|embed|form)\b[^>]*\/?>/gi, '');
+  html = html.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  html = html.replace(/\s+href\s*=\s*("javascript:[^"]*"|'javascript:[^']*')/gi, '');
+  return html;
 }
 
 /**
@@ -356,6 +382,8 @@ function gmailForward_(args) {
   const opts = { attachments };
   if (args.cc) opts.cc = String(args.cc);
   if (args.bcc) opts.bcc = String(args.bcc);
+  const html = gmailHtmlBody_(args.html_body);
+  if (html) opts.htmlBody = html;
   GmailApp.sendEmail(to, subject, body, opts);
   return { sent: true, via: 'forward', to, subject, message_id: m.getId(), thread_id: thread.getId(), attachments: attachments.map((a) => ({ name: a.getName(), size: a.getSize() })) };
 }
