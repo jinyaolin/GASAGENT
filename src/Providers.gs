@@ -1106,6 +1106,14 @@ function testProvider_(id) {
     return { ok: true, ms: result.ms, text: result.text, model: result.model, usage: result.usage, stop: result.stop, error: '' };
   } catch (err) {
     recordProviderCall_({ provider, ok: false, error: err, ms: err.ms || (Date.now() - t0), sessionId: 'admin-test' });
-    return { ok: false, ms: err.ms || (Date.now() - t0), text: '', model: provider.model, usage: null, stop: '', error: String(err.message || err) };
+    let message = String(err.message || err);
+    // M7 chatgpt：模型不在這條路的清單 → 直接附上可用模型，省得找
+    if (provider.protocol === 'chatgpt' && /not supported|unsupported|model/i.test(message)) {
+      try {
+        const models = chatgptListModels_(provider);
+        if (models.length) message += `\n\n這個 ChatGPT 帳號可用的模型（按列上的「可用模型」可一鍵設定）：${models.map((m) => m.slug).join(', ')}`;
+      } catch (err2) { /* 列不到就算了 */ }
+    }
+    return { ok: false, ms: err.ms || (Date.now() - t0), text: '', model: provider.model, usage: null, stop: '', error: message };
   }
 }

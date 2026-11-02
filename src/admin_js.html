@@ -329,6 +329,7 @@
         .forEach((p) => {
           const $result = el('tr', { class: 'row-detail', style: 'display:none' }, el('td', { colspan: 9 }));
           const btnTest = el('button', { class: 'small', onclick: () => test(p, btnTest, $result) }, '測試連線');
+          const btnModels = p.protocol === 'chatgpt' ? el('button', { class: 'small', onclick: () => listModels(p, btnModels, $result) }, '可用模型') : null;
           const btnToggle = el('button', { class: 'small', onclick: () => toggle(p, btnToggle) }, p.enabled ? '停用' : '啟用');
           const btnEdit = el('button', { class: 'small', onclick: () => openForm(p) }, '編輯');
           const btnDelete = el('button', { class: 'small danger', onclick: () => remove(p) }, '刪除');
@@ -343,7 +344,7 @@
             el('td', {}, p.protocol === 'chatgpt'
               ? (p.hasKey ? el('span', { class: 'badge', title: p.oauth ? `refresh token 已 ${p.oauth.refreshAgeDays} 天；access token ${p.oauth.expiresInMin} 分鐘後到期` : '' }, `ChatGPT ${p.keyHint}`) : el('span', { class: 'warn-text' }, p.keyHint ? `憑證${p.keyHint}` : '未登入'))
               : (p.hasKey ? el('code', {}, p.keyHint) : el('span', { class: 'warn-text' }, '未設定'))),
-            el('td', { class: 'actions' }, [btnTest, btnEdit, btnToggle, btnDelete]),
+            el('td', { class: 'actions' }, [btnTest, btnModels, btnEdit, btnToggle, btnDelete]),
           ]), $result);
         });
       $table.append(el('table', { class: 'table' }, [thead, tbody]));
@@ -367,6 +368,29 @@
         } else {
           td.append(el('span', { class: 'summary fail' }, `失敗 ${r.ms} ms`), el('div', { class: 'error' }, r.error));
         }
+      } catch (err) {
+        td.innerHTML = '';
+        td.append(errorBox(err));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // M7 chatgpt：這個 ChatGPT 帳號能用的模型（在列下方顯示，點一個就寫進 model 並儲存）
+    async function listModels(p, btn, $result) {
+      btn.disabled = true;
+      const td = $result.firstChild;
+      td.innerHTML = '';
+      td.append(el('span', { class: 'loading-inline' }, `查詢 ${p.id} 可用模型…`));
+      $result.style.display = '';
+      try {
+        const list = await call('adminListProviderModels', p.id);
+        td.innerHTML = '';
+        if (!list.length) { td.append(el('span', { class: 'warn-text' }, '這個帳號沒有可列的模型')); return; }
+        td.append(el('span', { class: 'meta' }, `可用模型（${list.length}）：點一個設成 ${p.id} 的 model → `));
+        list.forEach((m) => td.append(el('button', { class: 'small', title: m.slug, onclick: async () => {
+          try { await call('adminSaveProvider', Object.assign({}, p, { model: m.slug, apiKey: '', oauthCredentials: '', isNew: false })); await load(); } catch (err) { td.append(errorBox(err)); }
+        } }, `${m.display_name}（${m.slug}）`), ' '));
       } catch (err) {
         td.innerHTML = '';
         td.append(errorBox(err));
