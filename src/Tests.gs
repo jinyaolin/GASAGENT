@@ -55,9 +55,9 @@ function smokeTestTable_() {
     ['chatgpt: Responses 請求（instructions / input 項目 / tools / store:false stream:true / 拿掉不支援欄位）、SSE 解析、response.completed → ChatResult、response.failed → 帶 status 的錯誤、模型清單解析', testChatgptAdapter_, 'pure'],
     ['chatgpt: callProvider_ 走 SSE finalize 與備援（429 額度用完換下一個）；chatgptAccessToken_ 到期自動 refresh（鎖、滾動 token 寫回）、終端錯誤標 invalid 並通知；chainForRequest_ 非 owner 剔除 chatgpt', testChatgptFlow_, 'pure'],
     // M7 gemini_cli（Google 帳號登入，Gemini CLI 方案）
-    ['gemini_cli: 憑證解析（登入腳本 JSON 與 ~/.gemini/oauth_creds.json 兩種格式、預設 client、scope、數字專案拒絕）、Google refresh 請求、摘要', testGeminiCliCredentials_, 'pure'],
-    ['gemini_cli: Code Assist 請求包一層（model / project / request = 標準 Gemini body）、回應 {response} → ChatResult、loadCodeAssist / onboardUser 純函式', testGeminiCliAdapter_, 'pure'],
-    ['gemini_cli: 第一次呼叫自動開通（loadCodeAssist → onboardUser → 輪詢 LRO → project 寫回）、已開通直接用、不合格報 403；refresh 走 Google token endpoint；chainForRequest_ 非 owner 剔除；撤銷清憑證', testGeminiCliFlow_, 'pure'],
+    ['gemini_cli: 憑證解析（登入腳本 JSON 與 ~/.gemini/oauth_creds.json 兩種格式、client 判斷 antigravity / gemini_cli、預設 client id、scope、數字專案拒絕）、Google refresh 請求、摘要', testGeminiCliCredentials_, 'pure'],
+    ['gemini_cli: Code Assist 請求包一層（antigravity：requestType / userAgent / requestId、daily host；gemini_cli：user_prompt_id）、回應 {response} → ChatResult、loadCodeAssist / onboardUser 兩種 client 的純函式、fetchAvailableModels 解析', testGeminiCliAdapter_, 'pure'],
+    ['gemini_cli: 第一次呼叫自動開通（gemini_cli：onboardUser → GET LRO；antigravity：重送 onboardUser、沒專案用 fallback）→ project 寫回、已開通直接用、不合格報 403；refresh 走 Google token endpoint；chainForRequest_ 非 owner 剔除；撤銷清憑證', testGeminiCliFlow_, 'pure'],
     // M2
     ['registry: 全部工具無重名、schema 合法、名稱以 toolset 開頭', testRegistryValid_, 'pure'],
     ['registry: 重名 / 壞 schema 的宣告被拒；listToolsForProvider_ 依 RBAC 過濾', testRegistryRejectsBad_, 'pure'],
@@ -3122,7 +3122,7 @@ function testChatgptFlow_() {
 /** @return {!Object} 合法憑證（gemini-login.js 的輸出） */
 function fakeGeminiCliCreds_(overrides) {
   return Object.assign({
-    client_id: GEMINI_CLI_CLIENT_ID, client_secret: GEMINI_CLI_CLIENT_SECRET, access_token: 'ya29.a', refresh_token: '1//rt_1',
+    client: 'gemini_cli', client_id: GEMINI_CLI_CLIENT_ID, client_secret: GEMINI_CLI_CLIENT_SECRET, access_token: 'ya29.a', refresh_token: '1//rt_1',
     id_token: fakeJwt_({ sub: 'g1', email: 'me@gmail.com' }), expires_at: 1900000000000, scopes: ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'openid'],
     email: 'me@gmail.com', saved_at: '2026-11-03T00:00:00.000Z',
   }, overrides || {});
@@ -3131,10 +3131,17 @@ function fakeGeminiCliCreds_(overrides) {
 function testGeminiCliCredentials_() {
   const now = 1800000000000;
   const c = parseGeminiCliCredentials_(JSON.stringify(fakeGeminiCliCreds_()), now);
-  assertEqual_([c.client_id, c.client_secret, c.refresh_token, c.expires_at, c.email, c.subject, c.project_id, c.invalid], [GEMINI_CLI_CLIENT_ID, GEMINI_CLI_CLIENT_SECRET, '1//rt_1', 1900000000000, 'me@gmail.com', 'g1', '', ''], '登入腳本 JSON');
+  assertEqual_([c.client, c.client_id, c.client_secret, c.refresh_token, c.expires_at, c.email, c.subject, c.project_id, c.invalid], ['gemini_cli', GEMINI_CLI_CLIENT_ID, GEMINI_CLI_CLIENT_SECRET, '1//rt_1', 1900000000000, 'me@gmail.com', 'g1', '', ''], '登入腳本 JSON（gemini_cli client）');
+  // antigravity：明寫 client、或只給 access/refresh（登入腳本預設）、或 client_id 對得上
+  const ag = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: undefined, client_secret: undefined }), now);
+  assertEqual_([ag.client, ag.client_id, ag.client_secret, ag.scopes.length], ['antigravity', GEMINI_CLI_CLIENTS.antigravity.clientId, GEMINI_CLI_CLIENTS.antigravity.clientSecret, 4], 'antigravity 明寫 client → 補 client id / secret');
+  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r' }, now).client, 'antigravity', '沒 client / client_id → 預設 antigravity');
+  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client_id: GEMINI_CLI_CLIENTS.antigravity.clientId }, now).client, 'antigravity', 'client_id 對到 antigravity');
+  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client: 'gemini-cli' }, now).client, 'gemini_cli', 'client 寫 gemini-cli 也認');
+  assertThrows_(() => parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client: 'nope' }), '不認識的 client');
   // Gemini CLI 自己的 ~/.gemini/oauth_creds.json（google-auth-library 格式）
   const cli = parseGeminiCliCredentials_({ access_token: 'ya29.b', refresh_token: '1//rt_2', scope: 'https://www.googleapis.com/auth/cloud-platform openid', token_type: 'Bearer', id_token: fakeJwt_({ sub: 'g2', email: 'cli@gmail.com' }), expiry_date: 1850000000000 }, now);
-  assertEqual_([cli.client_id, cli.expires_at, cli.email, cli.scopes.length, cli.saved_at], [GEMINI_CLI_CLIENT_ID, 1850000000000, 'cli@gmail.com', 2, new Date(now).toISOString()], 'oauth_creds.json 格式：預設 client、expiry_date、email 從 id_token');
+  assertEqual_([cli.client, cli.client_id, cli.expires_at, cli.email, cli.scopes.length, cli.saved_at], ['gemini_cli', GEMINI_CLI_CLIENT_ID, 1850000000000, 'cli@gmail.com', 2, new Date(now).toISOString()], 'oauth_creds.json 格式（expiry_date）→ gemini_cli client、email 從 id_token');
   assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ expires_at: undefined, saved_at: undefined }), now).expires_at, now, '不知道到期就當已過期');
   assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ project_id: 'my-proj-1', tier: 'free-tier', project_hint: 'x' }), now).project_id, 'my-proj-1', 'project_id 帶入');
   assertThrows_(() => parseGeminiCliCredentials_('nope'), '非 JSON');
@@ -3145,32 +3152,38 @@ function testGeminiCliCredentials_() {
   const req = geminiCliRefreshRequest_(c);
   assertEqual_(req.url, GEMINI_CLI_TOKEN_URL, 'token url');
   assert_(/grant_type=refresh_token/.test(req.payload) && /client_secret=GOCSPX/.test(req.payload) && /refresh_token=1%2F%2Frt_1/.test(req.payload), 'refresh form：' + req.payload);
+  assert_(geminiCliRefreshRequest_(ag).payload.indexOf('client_id=' + encodeURIComponent(GEMINI_CLI_CLIENTS.antigravity.clientId)) !== -1, 'antigravity refresh 用自己的 client');
   // 摘要
   const sum = geminiCliCredentialSummary_(Object.assign({}, c, { project_id: 'p1', tier: 'free-tier' }), now);
-  assertEqual_([sum.email, sum.scopesOk, sum.projectId, sum.tier, sum.refreshExpiresAt, sum.invalid], ['me@gmail.com', true, 'p1', 'free-tier', '', ''], '摘要');
+  assertEqual_([sum.email, sum.scopesOk, sum.projectId, sum.tier, sum.refreshExpiresAt, sum.invalid, sum.client], ['me@gmail.com', true, 'p1', 'free-tier', '', '', 'gemini_cli'], '摘要');
   assertEqual_(geminiCliCredentialSummary_(null), null, '沒憑證');
   assertEqual_(geminiCliCredentialSummary_(Object.assign({}, c, { scopes: ['openid'] }), now).scopesOk, false, 'scope 不齊');
   // validateProvider_：預設 base_url、不能 embed；分派 helpers
   const p = validateProvider_(fakeProviderInput_({ id: 'gcli', protocol: 'gemini_cli', base_url: '' }));
-  assertEqual_(p.base_url, GEMINI_CLI_ENDPOINT, '預設 endpoint');
+  assertEqual_(p.base_url, ANTIGRAVITY_ENDPOINT, '預設 base_url 是 Antigravity host');
+  assertEqual_([geminiCliEndpoint_(p, { client: 'gemini_cli' }), geminiCliEndpoint_(p, { client: 'antigravity' }), geminiCliEndpoint_(Object.assign({}, p, { base_url: 'https://my-proxy.example.com/' }), { client: 'antigravity' })], [GEMINI_CLI_ENDPOINT, ANTIGRAVITY_ENDPOINT, 'https://my-proxy.example.com'], 'endpoint 依 client；自訂 base_url 尊重');
   assertThrows_(() => validateProvider_(fakeProviderInput_({ protocol: 'gemini_cli', role: 'embed' })), '不能 embed');
   assertEqual_([isOAuthProtocol_('gemini_cli'), isOAuthProtocol_('chatgpt'), isOAuthProtocol_('gemini')], [true, true, false], 'isOAuthProtocol_');
   assertEqual_(parseOAuthCredentials_('gemini_cli', fakeGeminiCliCreds_()).client_id, GEMINI_CLI_CLIENT_ID, '分派解析');
   assertEqual_(oauthLoginScript_('gemini_cli'), 'scripts/gemini-login.js', '登入腳本名');
-  assert_(oauthListModels_(p).length > 3 && oauthListModels_(p)[0].slug === 'gemini-2.5-pro', '模型清單（靜態）');
+  assert_(geminiCliListModels_(p, { store: { get: () => null } }).length > 3 && geminiCliListModels_(p, { store: { get: () => null } })[0].slug === 'gemini-3-flash', '沒憑證 → antigravity 靜態名單');
+  assertEqual_(geminiCliListModels_(p, { store: { get: () => c } })[0].slug, 'gemini-2.5-pro', 'gemini_cli client → 靜態名單');
 }
 
 function testGeminiCliAdapter_() {
   const provider = validateProvider_(fakeProviderInput_({ id: 'gcli', protocol: 'gemini_cli', base_url: '', model: 'gemini-2.5-pro', max_tokens: 100, extra_body: '{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}' }));
-  const r = geminiCliBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7, sessionId: 's_1' }, { token: 'TOKEN', project: 'proj-1' });
-  assertEqual_(r.url, 'https://cloudcode-pa.googleapis.com/v1internal:generateContent', 'url');
+  const r = geminiCliBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7, sessionId: 's_1' }, { token: 'TOKEN', project: 'proj-1', client: 'gemini_cli' });
+  assertEqual_(r.url, 'https://cloudcode-pa.googleapis.com/v1internal:generateContent', 'gemini_cli url');
   assertEqual_(r.headers.Authorization, 'Bearer TOKEN', 'bearer');
-  assertEqual_([r.body.model, r.body.project, typeof r.body.user_prompt_id, r.body.user_prompt_id.indexOf('s_1-')], ['gemini-2.5-pro', 'proj-1', 'string', 0], '外層 model / project / user_prompt_id');
+  assertEqual_([r.body.model, r.body.project, typeof r.body.user_prompt_id, r.body.user_prompt_id.indexOf('s_1-'), r.body.requestType], ['gemini-2.5-pro', 'proj-1', 'string', 0, undefined], 'gemini_cli 外層 model / project / user_prompt_id');
+  const ra = geminiCliBuildRequest_(provider, { messages: [{ role: 'user', content: 'x' }], sessionId: 's_2' }, { token: 'T', project: 'P', client: 'antigravity', endpoint: ANTIGRAVITY_ENDPOINT });
+  assertEqual_([ra.url, ra.body.requestType, ra.body.userAgent, ra.body.requestId.indexOf('agent-s_2-'), ra.body.user_prompt_id, ra.body.request.sessionId, ra.body.project], ['https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent', 'agent', 'antigravity', 0, undefined, 's_2', 'P'], 'antigravity 外層 requestType / userAgent / requestId、daily host');
   const inner = r.body.request;
   const plain = geminiBuildRequest_(provider, { messages: fakeConversation_(), tools: fakeTools_(), maxTokens: 50, temperature: 0.7 }, 'K').body;
-  assertEqual_([inner.contents, inner.systemInstruction, inner.tools, inner.generationConfig, inner.session_id], [plain.contents, plain.systemInstruction, plain.tools, plain.generationConfig, 's_1'], '內層 = 標準 Gemini body（extra_body 套在內層）+ session_id');
+  assertEqual_([inner.contents, inner.systemInstruction, inner.tools, inner.generationConfig, inner.sessionId], [plain.contents, plain.systemInstruction, plain.tools, plain.generationConfig, 's_1'], '內層 = 標準 Gemini body（extra_body 套在內層）+ sessionId');
   assertEqual_(r.body.request.generationConfig.thinkingConfig, { thinkingBudget: 0 }, 'extra_body 進內層');
-  assertEqual_(geminiCliBuildRequest_(provider, { messages: [{ role: 'user', content: 'x' }] }, 'T').body.project, '', '只給 token 字串 → project 空');
+  const rs = geminiCliBuildRequest_(provider, { messages: [{ role: 'user', content: 'x' }] }, 'T');
+  assertEqual_([rs.body.project, rs.body.requestType, rs.url.indexOf(ANTIGRAVITY_ENDPOINT)], ['', 'agent', 0], '只給 token 字串 → project 空、預設 antigravity');
   // 回應包一層
   const resp = { response: { candidates: [{ content: { role: 'model', parts: [{ text: 'Hi' }, { functionCall: { name: 'fake_echo', args: { text: 'x' } } }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3 } }, traceId: 't' };
   const parsed = geminiCliParseResponse_(resp);
@@ -3178,16 +3191,27 @@ function testGeminiCliAdapter_() {
   assertEqual_(geminiCliParseResponse_({ candidates: [{ content: { parts: [{ text: 'bare' }] }, finishReason: 'STOP' }] }).text, 'bare', '沒包層也接受');
   // Code Assist 純函式
   const notOnboarded = { allowedTiers: [{ id: 'free-tier', isDefault: true, name: 'Free' }, { id: 'standard-tier' }] };
-  assertEqual_(geminiCliProjectFromLoad_(notOnboarded, ''), null, '沒 currentTier → 要 onboard');
-  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'free-tier' }, cloudaicompanionProject: 'managed-1' }, ''), { project: 'managed-1', tier: 'free-tier' }, '已 onboard：用 cloudaicompanionProject');
-  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' }, paidTier: { id: 'standard-tier' } }, 'my-gcp'), { project: 'my-gcp', tier: 'standard-tier' }, '沒回專案就用使用者指定的');
-  assert_(/驗證/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'x' }, ineligibleTiers: [{ tierId: 'free-tier', reasonCode: 'VALIDATION_REQUIRED', reasonMessage: 'verify', validationUrl: 'https://v' }] }, ''), '不合格').message), '不合格訊息含驗證網址');
-  assert_(/--project/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' } }, ''), '要專案').message), '要 GCP 專案');
-  const ob = geminiCliOnboardRequest_(notOnboarded, 'my-gcp');
-  assertEqual_([ob.tierId, ob.body.cloudaicompanionProject, ob.body.metadata.duetProject, ob.body.metadata.pluginType], ['free-tier', undefined, undefined, 'GEMINI'], 'free-tier 不帶專案');
-  const ob2 = geminiCliOnboardRequest_({ allowedTiers: [{ id: 'standard-tier', isDefault: true }] }, 'my-gcp');
-  assertEqual_([ob2.tierId, ob2.body.cloudaicompanionProject, ob2.body.metadata.duetProject], ['standard-tier', 'my-gcp', 'my-gcp'], 'standard 帶專案');
-  assertEqual_(geminiCliOnboardRequest_({}, '').tierId, 'legacy-tier', '沒 default tier → legacy');
+  const G = 'gemini_cli';
+  assertEqual_(geminiCliProjectFromLoad_(notOnboarded, '', G), null, 'gemini_cli：沒 currentTier → 要 onboard');
+  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'free-tier' }, cloudaicompanionProject: 'managed-1' }, '', G), { project: 'managed-1', tier: 'free-tier' }, 'gemini_cli：已 onboard 用 cloudaicompanionProject');
+  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' }, paidTier: { id: 'standard-tier' } }, 'my-gcp', G), { project: 'my-gcp', tier: 'standard-tier' }, 'gemini_cli：沒回專案就用使用者指定的');
+  assert_(/驗證/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'x' }, ineligibleTiers: [{ tierId: 'free-tier', reasonCode: 'VALIDATION_REQUIRED', reasonMessage: 'verify', validationUrl: 'https://v' }] }, '', G), '不合格').message), '不合格訊息含驗證網址');
+  assert_(/--project/.test(assertThrows_(() => geminiCliProjectFromLoad_({ currentTier: { id: 'standard-tier' } }, '', G), '要專案').message), '要 GCP 專案');
+  // antigravity：只看 cloudaicompanionProject（字串或 {id}），沒有就 onboard
+  assertEqual_(geminiCliProjectFromLoad_({ cloudaicompanionProject: { id: 'ag-proj' }, currentTier: { id: 'free-tier' } }, '', 'antigravity'), { project: 'ag-proj', tier: 'free-tier' }, 'antigravity：{id} 形式');
+  assertEqual_(geminiCliProjectFromLoad_({ currentTier: { id: 'free-tier' } }, 'hint', 'antigravity'), null, 'antigravity：沒專案就 onboard（不報錯）');
+  const ob = geminiCliOnboardRequest_(notOnboarded, 'my-gcp', G);
+  assertEqual_([ob.tierId, ob.body.cloudaicompanionProject, ob.body.metadata.duetProject, ob.body.metadata.pluginType], ['free-tier', undefined, undefined, 'GEMINI'], 'gemini_cli free-tier 不帶專案');
+  const ob2 = geminiCliOnboardRequest_({ allowedTiers: [{ id: 'standard-tier', isDefault: true }] }, 'my-gcp', G);
+  assertEqual_([ob2.tierId, ob2.body.cloudaicompanionProject, ob2.body.metadata.duetProject], ['standard-tier', 'my-gcp', 'my-gcp'], 'gemini_cli standard 帶專案');
+  assertEqual_(geminiCliOnboardRequest_({}, '', G).tierId, 'legacy-tier', 'gemini_cli 沒 default tier → legacy');
+  const oba = geminiCliOnboardRequest_(notOnboarded, '', 'antigravity');
+  assertEqual_([oba.tierId, oba.body.tier_id, oba.body.metadata.ide_type, oba.body.metadata.ide_name, oba.body.tierId], ['free-tier', 'free-tier', 'ANTIGRAVITY', 'antigravity', undefined], 'antigravity onboard snake_case');
+  assertEqual_(geminiCliOnboardRequest_({ allowedTiers: [{ id: 'g1-tier' }] }, '', 'antigravity').tierId, 'g1-tier', 'antigravity 沒 isDefault 取第一個');
+  assertEqual_(geminiCliOnboardRequest_({}, '', 'antigravity').tierId, 'free-tier', 'antigravity 沒 tier → free');
+  // fetchAvailableModels 解析
+  assertEqual_(geminiCliParseModels_({ models: { 'gemini-3-flash': { displayName: 'Gemini 3 Flash', quotaInfo: { remainingFraction: 0.5 } }, 'old': { displayName: 'Old', disabled: true }, 'claude-sonnet-4-6': {} } }), [{ slug: 'gemini-3-flash', display_name: 'Gemini 3 Flash，額度剩 50%' }, { slug: 'claude-sonnet-4-6', display_name: 'claude-sonnet-4-6' }], 'models map → 名單（停用剔除、額度附註）');
+  assertEqual_(geminiCliParseModels_({}), [], '沒 models');
 }
 
 function testGeminiCliFlow_() {
@@ -3232,10 +3256,31 @@ function testGeminiCliFlow_() {
   assertEqual_(assertThrows_(() => geminiCliAuth_(gcli, { store, now: () => now, lock, fetch: fetchStub_([fakeResponse_(401, { error: { message: 'bad token' } })]).fetch }), '401').status, 401, 'Code Assist HTTP 錯誤');
   // callProvider_：keyFor 給 {token, project}，回應 {response}
   stub = fetchStub_([fakeResponse_(200, { response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } } })]);
-  const r1 = callProvider_(gcli, { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => ({ token: 'T', project: 'P' }) });
+  const r1 = callProvider_(gcli, { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => ({ token: 'T', project: 'P', client: 'antigravity', endpoint: ANTIGRAVITY_ENDPOINT }) });
   assertEqual_([r1.text, r1.provider, r1.model, r1.usage], ['hi', 'gcli', 'gemini-2.5-pro', { prompt: 3, completion: 2 }], 'callProvider_');
   const sent = JSON.parse(stub.calls[0].options.payload);
-  assertEqual_([sent.project, sent.model, sent.request.contents[0].parts[0].text, stub.calls[0].options.headers.Authorization], ['P', 'gemini-2.5-pro', 'x', 'Bearer T'], '送出 Code Assist body');
+  assertEqual_([sent.project, sent.model, sent.request.contents[0].parts[0].text, sent.requestType, stub.calls[0].options.headers.Authorization, stub.calls[0].url], ['P', 'gemini-2.5-pro', 'x', 'agent', 'Bearer T', ANTIGRAVITY_ENDPOINT + '/v1internal:generateContent'], '送出 Antigravity 包層 body');
+  // antigravity 開通流程：loadCodeAssist 沒專案 → onboardUser（第一次沒 done，重送）→ done 帶專案
+  const agFresh = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: undefined, client_secret: undefined, expires_at: now + 3600000 }), now);
+  let agStore = mem(agFresh);
+  stub = fetchStub_([fakeResponse_(200, { allowedTiers: [{ id: 'free-tier', isDefault: true }] }), fakeResponse_(200, { done: false }), fakeResponse_(200, { done: true, response: { cloudaicompanionProject: { id: 'ag-managed' } } })]);
+  const agAuth = geminiCliAuth_(gcli, { store: agStore, now: () => now, lock, fetch: stub.fetch, sleep });
+  assertEqual_([agAuth.project, agAuth.client, agAuth.endpoint, agStore.peek().project_id, agStore.peek().tier], ['ag-managed', 'antigravity', ANTIGRAVITY_ENDPOINT, 'ag-managed', 'free-tier'], 'antigravity 開通寫回');
+  assertEqual_(stub.calls.map((c) => c.url), [ANTIGRAVITY_ENDPOINT + '/v1internal:loadCodeAssist', ANTIGRAVITY_ENDPOINT + '/v1internal:onboardUser', ANTIGRAVITY_ENDPOINT + '/v1internal:onboardUser'], 'antigravity 重送 onboardUser');
+  assertEqual_([JSON.parse(stub.calls[0].options.payload).metadata, JSON.parse(stub.calls[1].options.payload).tier_id, JSON.parse(stub.calls[1].options.payload).metadata.ide_type], [{ ideType: 'ANTIGRAVITY' }, 'free-tier', 'ANTIGRAVITY'], 'antigravity 的 metadata');
+  // antigravity：loadCodeAssist 直接回專案字串
+  agStore = mem(agFresh);
+  assertEqual_(geminiCliAuth_(gcli, { store: agStore, now: () => now, lock, fetch: fetchStub_([fakeResponse_(200, { cloudaicompanionProject: 'ag-direct', currentTier: { id: 'free-tier' } })]).fetch }).project, 'ag-direct', 'antigravity loadCodeAssist 直接有專案');
+  // antigravity：onboard 一直沒 done → fallback 專案（不 503）
+  agStore = mem(agFresh);
+  const agPending = [fakeResponse_(200, {})];
+  for (let i = 0; i < 12; i++) agPending.push(fakeResponse_(200, { done: false }));
+  assertEqual_(geminiCliAuth_(gcli, { store: agStore, now: () => now, lock, fetch: fetchStub_(agPending).fetch, sleep: () => {} }).project, ANTIGRAVITY_FALLBACK_PROJECT, 'antigravity 沒專案用 fallback');
+  // antigravity 列模型：fetchAvailableModels 帶 project；失敗退回靜態
+  agStore = mem(Object.assign({}, agFresh, { project_id: 'ag-managed' }));
+  stub = fetchStub_([fakeResponse_(200, { models: { 'gemini-3-flash': { displayName: 'G3F' } } })]);
+  assertEqual_([geminiCliListModels_(gcli, { store: agStore, fetch: stub.fetch, auth: { token: 'T', project: 'ag-managed', client: 'antigravity', endpoint: ANTIGRAVITY_ENDPOINT } }), stub.calls[0].url, JSON.parse(stub.calls[0].options.payload)], [[{ slug: 'gemini-3-flash', display_name: 'G3F' }], ANTIGRAVITY_ENDPOINT + '/v1internal:fetchAvailableModels', { project: 'ag-managed' }], 'fetchAvailableModels');
+  assert_(geminiCliListModels_(gcli, { store: agStore, fetch: fetchStub_([fakeResponse_(403, { error: { message: 'no' } })]).fetch, auth: { token: 'T', project: 'ag-managed', client: 'antigravity' } }).length > 3, '列模型失敗退回靜態名單');
   // 429 → 換備援
   stub = fetchStub_([fakeResponse_(429, { error: { message: 'quota' } }), fakeResponse_(200, { choices: [{ message: { content: 'from backup' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })]);
   const r2 = chatWithChain_([gcli, backup], { messages: [{ role: 'user', content: 'x' }] }, { fetch: stub.fetch, keyFor: () => 'TOK', record: () => {} });

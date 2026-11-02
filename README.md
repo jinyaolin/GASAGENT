@@ -22,7 +22,7 @@ src/
   Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫
   Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()；M7：chainForRequest_（chatgpt 只服務 owner）
   Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh（oauthAccessToken_，兩種 OAuth 協定共用）、Responses API + SSE adapter、模型清單、登出
-  Providers_GeminiCli.gs  # M7：protocol gemini_cli —— Google 帳號登入（Gemini CLI 方案）憑證、Google token refresh、Code Assist 開通（loadCodeAssist / onboardUser）、generateContent 包層 adapter、登出
+  Providers_GeminiCli.gs  # M7：protocol gemini_cli —— Google 帳號登入（Antigravity / Gemini CLI 兩種 client）憑證、Google token refresh、Code Assist 開通（loadCodeAssist / onboardUser）、generateContent 包層 adapter、fetchAvailableModels、登出
   ToolRegistry.gs   # M2：工具宣告 {name, toolset, description, parameters, risk, handler}、無重名檢查、轉中立工具格式
   ToolExecutor.gs   # M2：參數驗證 → principal（M7-A）→ RBAC → 審批策略 → 執行 → AuditLog → 溢寫；Config 設定讀寫；Approvals 決定；securityAudit_
   Tools_Drive.gs  Tools_Docs.gs  Tools_Sheets.gs  Tools_Slides.gs
@@ -47,7 +47,7 @@ src/
   Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項 + M6 5 項 + M7-A 5 項（principal / injection / secrets）；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
 scripts/siwc-login.js    # M7：在本機完成 Sign in with ChatGPT（動態註冊、PKCE、驗 ID token），印出要貼到管理頁的憑證 JSON
-scripts/gemini-login.js  # M7：在本機用 Gemini CLI 的 OAuth client 完成 Google 登入並開通 Code Assist，印出要貼到管理頁的憑證 JSON（--from-cli 可沿用 ~/.gemini/oauth_creds.json）
+scripts/gemini-login.js  # M7：在本機用 Antigravity（預設）或 Gemini CLI 的 OAuth client 完成 Google 登入、開通 Code Assist、列可用模型，印出要貼到管理頁的憑證 JSON（--from-cli 可沿用 agy / gemini 的 token 檔）
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
@@ -215,24 +215,27 @@ clasp deploy -i <deploymentId> -d "說明"
 
 Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 25 天沒續期、scope 齊。
 
-### Gemini CLI 方案（protocol `gemini_cli`，Google 帳號登入）
+### Google 帳號方案（protocol `gemini_cli`：Antigravity / Gemini CLI）
 
-> **2026-11-03 實測：個人 Google 帳號已不能用。** Google 自 2026-06-18 起讓 Gemini CLI 停止服務個人帳號（免費、AI Pro、AI Ultra），`loadCodeAssist` 回「This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products」（[gemini-cli#28229](https://github.com/google-gemini/gemini-cli/issues/28229)、[官方棄用公告](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)）。這條路現在只剩 **Gemini Code Assist Standard / Enterprise 授權**（公司 GCP 專案，`--project`）能走；個人帳號請用 `gemini` 協定 + AI Studio API key（有免費額度）。Antigravity CLI（`agy`）是閉源、其 OAuth client 與 API 未公開，本專案不接。
+用你 **Google 帳號的方案額度**跑 agent，不用 Gemini API key。走的是 Google 自家工具背後的 Code Assist API（`/v1internal`），用它們原始碼 / 二進位裡公開的安裝型 OAuth client；Google 沒有公開這條 API 給第三方，屬自用的灰色地帶（見「條款」）。憑證的 `client` 欄位決定走哪條：
 
-用你 **Google 帳號的 Gemini CLI 方案額度**（免費個人方案，或 Gemini Code Assist Standard / Enterprise）跑 agent，不用 Gemini API key。走的是 Gemini CLI「Login with Google」背後的 Code Assist API（`https://cloudcode-pa.googleapis.com/v1internal`），用它原始碼裡公開的 OAuth client；Google 沒有公開這條 API 給第三方，屬自用的灰色地帶（見「條款」）。
+| client | 誰能用 | endpoint | 模型 |
+|---|---|---|---|
+| `antigravity`（預設） | 個人 Google 帳號（免費 / AI Pro / Ultra），即 [Antigravity](https://antigravity.google) IDE / `agy` CLI 的方案 | `https://daily-cloudcode-pa.googleapis.com` | Gemini 與 Claude 都有（`gemini-3-flash`、`gemini-2.5-pro`、`claude-sonnet-4-6`…）；「可用模型」會問 `fetchAvailableModels` 列出這個帳號現在能用的與剩餘額度 |
+| `gemini_cli` | 只剩 Gemini Code Assist **Standard / Enterprise** 授權（公司 GCP 專案，`--project`）。Google 2026-06-18 起不再服務個人帳號（[gemini-cli#28229](https://github.com/google-gemini/gemini-cli/issues/28229)、[棄用公告](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)） | `https://cloudcode-pa.googleapis.com` | Gemini CLI 原始碼列的 `gemini-2.5-pro` 等（沒有列模型 API） |
 
 | 項目 | 說明 |
 |---|---|
-| 登入 | 在 **Mac 上**跑 `node scripts/gemini-login.js --account <代號>`（node ≥ 18，零依賴）：開瀏覽器 → 選 Google 帳號 → 全部允許 → 腳本換 token、取 email、呼叫 `loadCodeAssist` /（第一次）`onboardUser` 開通並拿到專案 ID → 印出一段憑證 JSON。憑證同時存在 `~/.config/gas-agent/gemini-cli/<代號>.json`（0600；`--print` 可重印）。已裝 Gemini CLI 且登入過的，`--from-cli` 直接沿用 `~/.gemini/oauth_creds.json` 不用開瀏覽器。Standard / Enterprise 方案加 `--project <GCP 專案 ID>` |
-| 設定 | 管理頁「模型」→ 新增 provider → 範本「Gemini CLI」（protocol `gemini_cli`、base_url `https://cloudcode-pa.googleapis.com`、model `gemini-2.5-pro`）→ 儲存 → 編輯 → 把那段 JSON 貼進「Gemini CLI 憑證」→ 儲存 →「測試連線」。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 `cloud-platform` scope 才收），不存 sheet、不回傳 token |
-| 模型 | Code Assist 沒有列模型 API；「可用模型」按鈕列的是 Gemini CLI 原始碼裡的模型名（`gemini-2.5-pro` / `gemini-2.5-flash` / `gemini-3-pro-preview`…），哪些真的能用看帳號方案，測試連線不過就換一個 |
+| 登入 | 在 **Mac 上**跑 `node scripts/gemini-login.js --account <代號>`（node ≥ 18，零依賴；預設 antigravity，`--client gemini-cli` 走舊 client）：開瀏覽器 → 選 Google 帳號 → 全部允許 → 腳本換 token、取 email、呼叫 `loadCodeAssist` /（第一次）`onboardUser` 開通並拿到專案 ID、antigravity 再列出可用模型 → 印出一段憑證 JSON。憑證同時存在 `~/.config/gas-agent/gemini-cli/<代號>.json`（0600；`--print` 可重印）。本機已登入 `agy`（或 `gemini`）的，`--from-cli` 直接沿用它的 token 檔不用開瀏覽器。Standard / Enterprise 加 `--project <GCP 專案 ID>`。Antigravity 的回呼 port 固定 51121，被占用（例如 `agy` 正在登入）就先關掉 |
+| 設定 | 管理頁「模型」→ 新增 provider → 範本「Google 帳號」（protocol `gemini_cli`、base_url `https://daily-cloudcode-pa.googleapis.com`、model `gemini-3-flash`）→ 儲存 → 編輯 → 把那段 JSON 貼進「Google 帳號憑證」→ 儲存 →「可用模型」挑一個 →「測試連線」。base_url 留在任一預設值時會依憑證的 client 自動選 host；填別的就照填的打（例如自架 proxy）。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 `cloud-platform` scope 才收），不存 sheet、不回傳 token |
 | 續期 | access token 1 小時；剩不到 5 分鐘就用 refresh token 向 `oauth2.googleapis.com/token` 換新（帶 client_secret；與 chatgpt 共用 `oauthAccessToken_`：LockService 序列化、終端錯誤 `invalid_grant` → 標失效、推 Telegram、Doctor 紅燈）。Google 的 refresh token 不會定期到期，撤銷存取權或改密碼才失效，重跑 `gemini-login.js` 貼新憑證即可 |
-| 請求 | `POST {endpoint}/v1internal:generateContent`，body `{model, project, user_prompt_id, request: <標準 generateContent body>}`；回應 `{response: <標準回應>}`——內層直接沿用 gemini 協定的 adapter（contents / functionDeclarations / thoughtSignature 都一樣）。不走串流。憑證裡沒有 `project_id`（例如 `--no-setup`）第一次呼叫會自己 `loadCodeAssist` → `onboardUser` → 輪詢 LRO（每 5 秒、最多 8 次）寫回。429 額度用完 → 自動換備援鏈的下一個 |
+| 請求 | `POST {endpoint}/v1internal:generateContent`，body `{model, project, request: <標準 generateContent body + sessionId>}`，antigravity 再加 `requestType: "agent"`、`userAgent: "antigravity"`、`requestId`；回應 `{response: <標準回應>}`——內層直接沿用 gemini 協定的 adapter（contents / functionDeclarations / thoughtSignature 都一樣）。不走串流。憑證裡沒有 `project_id`（例如 `--no-setup`）第一次呼叫會自己 `loadCodeAssist` → `onboardUser`（antigravity 重送到 done、沒專案用社群實作的 fallback 專案；gemini_cli 輪詢 LRO）寫回。429 額度用完 → 自動換備援鏈的下一個 |
+| **User-Agent 限制** | GAS 的 `UrlFetchApp` 不能改 User-Agent（固定 `Google-Apps-Script`），而 Antigravity 後端用 Hub 的 User-Agent 版本決定要不要給**最新**模型。所以登入腳本列出的模型不一定都能從 GAS 打通；`gemini-2.5-*`、`gemini-3-flash`、`claude-sonnet-4-6` 這類較穩，測試連線回 400 / 404 就換一個 |
 | **只服務 owner** | 與 chatgpt 一樣：`chainForRequest_` 會把 gemini_cli provider 從群聊成員 / 訪客那一輪剔除（指定它會報錯），群組要能用就得另外有一個 API key 的 main provider。每個帳號各自登入自己的 Google 帳號 |
-| 登出 | 編輯 provider →「登出」：向 Google 撤銷 refresh token 並清憑證；或到 [Google 帳號 → 第三方存取權](https://myaccount.google.com/permissions) 移除「Gemini CLI」 |
-| 條款 | Gemini Code Assist 個人方案的[條款](https://developers.google.com/gemini-code-assist/resources/privacy-notice-gemini-code-assist-individuals)允許個人使用；但 Code Assist API 與 Gemini CLI 的 OAuth client 都沒公開給第三方程式用，Google 可能隨時改 API 或擋掉。本人 2026-11-03 知情後決定自用 |
+| 登出 | 編輯 provider →「登出」：向 Google 撤銷 refresh token 並清憑證；或到 [Google 帳號 → 第三方存取權](https://myaccount.google.com/permissions) 移除「Antigravity」/「Gemini CLI」 |
+| 條款 | Antigravity / Gemini Code Assist 個人方案的條款允許個人使用；但 Code Assist API 與這些 OAuth client 都沒公開給第三方程式用，Google 可能隨時改 API、擋 User-Agent 或封帳號（社群實作都這樣警告）。本人 2026-11-03 知情後決定自用 |
 
-Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、Code Assist 專案是否已開通。
+Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與 Code Assist 專案是否已開通。
 
 ### 驗證
 

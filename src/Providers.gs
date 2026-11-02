@@ -16,7 +16,7 @@
 
 /**
  * 支援的協定。chatgpt（M7）= Sign in with ChatGPT 方案額度打 Responses API，見 Providers_ChatGPT.gs；
- * gemini_cli（M7）= Google 帳號登入（Gemini CLI 方案）打 Code Assist API，見 Providers_GeminiCli.gs。
+ * gemini_cli（M7）= Google 帳號登入（Antigravity / Gemini CLI 方案）打 Code Assist API，見 Providers_GeminiCli.gs。
  */
 const PROVIDER_PROTOCOLS = Object.freeze(['openai', 'anthropic', 'gemini', 'chatgpt', 'gemini_cli']);
 /** 用 OAuth 憑證（PROVIDER_OAUTH_<id>、本機登入腳本）而非 API key 的協定；都是 owner 個人方案，只服務 principal=owner。 */
@@ -147,7 +147,7 @@ function validateProvider_(input) {
     if (p.role === 'embed') throw new Error('chatgpt 協定沒有嵌入 API，role 不能是 embed。');
   }
   if (p.protocol === 'gemini_cli') {
-    if (!p.base_url) p.base_url = GEMINI_CLI_ENDPOINT;
+    if (!p.base_url) p.base_url = ANTIGRAVITY_ENDPOINT;
     if (p.role === 'embed') throw new Error('gemini_cli 協定沒有嵌入 API，role 不能是 embed。');
   }
   if (PROVIDER_ROLES.indexOf(p.role) === -1) throw new Error(`role 必須是 ${PROVIDER_ROLES.join(' / ')}。`);
@@ -1100,7 +1100,7 @@ function chainForRequest_(providers, input) {
     const p = providers.find((x) => x.id === input.providerId);
     if (!p) throw new Error(`找不到 provider「${input.providerId}」。`);
     if (p.role === 'embed') throw new Error('embed 角色的 provider 不能聊天（M3 才接嵌入 API）。');
-    if (isOAuthProtocol_(p.protocol) && principal !== 'owner') throw new Error(`provider「${p.id}」用 owner 的${p.protocol === 'gemini_cli' ? ' Google 帳號（Gemini CLI）' : ' ChatGPT'}方案，只服務 owner 本人，群組成員 / 訪客不能指定它。`);
+    if (isOAuthProtocol_(p.protocol) && principal !== 'owner') throw new Error(`provider「${p.id}」用 owner 的${p.protocol === 'gemini_cli' ? ' Google 帳號（Antigravity / Gemini CLI）' : ' ChatGPT'}方案，只服務 owner 本人，群組成員 / 訪客不能指定它。`);
     return [p];
   }
   const chain = providerChain_(input.role || 'main', providers);
@@ -1132,7 +1132,7 @@ function testProvider_(id) {
     if (isOAuthProtocol_(provider.protocol) && /not supported|unsupported|not found|model/i.test(message)) {
       try {
         const models = oauthListModels_(provider);
-        if (models.length) message += `\n\n這個${provider.protocol === 'gemini_cli' ? ' Gemini CLI 帳號可能' : ' ChatGPT 帳號'}可用的模型（按列上的「可用模型」可一鍵設定）：${models.map((m) => m.slug).join(', ')}`;
+        if (models.length) message += `\n\n這個${provider.protocol === 'gemini_cli' ? ' Google 帳號可能' : ' ChatGPT 帳號'}可用的模型（按列上的「可用模型」可一鍵設定）：${models.map((m) => m.slug).join(', ')}`;
       } catch (err2) { /* 列不到就算了 */ }
     }
     return { ok: false, ms: err.ms || (Date.now() - t0), text: '', model: provider.model, usage: null, stop: '', error: message };

@@ -269,19 +269,19 @@
     { id: 'anthropic', label: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', max_tokens: 4096 },
     { id: 'gemini', label: 'Google Gemini', protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', max_tokens: 4096 },
     { id: 'chatgpt', label: 'ChatGPT 方案（Sign in with ChatGPT，不用 API key）', protocol: 'chatgpt', base_url: 'https://api.openai.com/v1', model: 'gpt-5' },
-    { id: 'gemini-cli', label: 'Gemini CLI（Google 帳號登入，不用 API key）', protocol: 'gemini_cli', base_url: 'https://cloudcode-pa.googleapis.com', model: 'gemini-2.5-pro' },
+    { id: 'google-oauth', label: 'Google 帳號（Antigravity / Gemini CLI 方案，不用 API key）', protocol: 'gemini_cli', base_url: 'https://daily-cloudcode-pa.googleapis.com', model: 'gemini-3-flash' },
   ];
   /** 用 OAuth 憑證（本機登入腳本）而不是 API key 的協定；與後端 OAUTH_PROTOCOLS 一致。 */
   const OAUTH_PROTOCOLS = ['chatgpt', 'gemini_cli'];
   const OAUTH_INFO = {
     chatgpt: { label: 'ChatGPT', script: 'scripts/siwc-login.js', field: 'ChatGPT 憑證', scopeHint: '缺 chatgpt.tokens.use.direct scope', hint: '只寫入 Script Properties PROVIDER_OAUTH_<id>，不存 sheet、不回傳 token。條款：只能用你自己的 ChatGPT 方案、只服務你本人；憑證別給別人。' },
-    gemini_cli: { label: 'Gemini CLI', script: 'scripts/gemini-login.js', field: 'Gemini CLI 憑證', scopeHint: '缺 cloud-platform scope', hint: '只寫入 Script Properties PROVIDER_OAUTH_<id>，不存 sheet、不回傳 token。用的是你 Google 帳號的 Gemini CLI 方案額度（Code Assist API），只服務你本人；憑證別給別人。' },
+    gemini_cli: { label: 'Google', script: 'scripts/gemini-login.js', field: 'Google 帳號憑證', scopeHint: '缺 cloud-platform scope', hint: '只寫入 Script Properties PROVIDER_OAUTH_<id>，不存 sheet、不回傳 token。用的是你 Google 帳號的 Antigravity（個人帳號）或 Gemini CLI（Standard / Enterprise）方案額度，走 Code Assist API，只服務你本人；憑證別給別人。' },
   };
 
   const PROVIDER_FIELDS = [
     { key: 'id', label: 'id', hint: '小寫字母 / 數字 / _ / -；每個 provider 唯一、存檔後不可改（key 綁 PROVIDER_KEY_<id>）。同協定第二組請換 id，例如 gemini-2', required: true },
     { key: 'label', label: '顯示名稱' },
-    { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini', 'chatgpt', 'gemini_cli'], required: true, hint: 'chatgpt = 用你的 ChatGPT Plus / Pro 方案（Sign in with ChatGPT）；gemini_cli = 用你 Google 帳號的 Gemini CLI 方案（Code Assist API）。兩者都不用 API key、只服務 owner 本人，群組成員 / 訪客那一輪不會用它' },
+    { key: 'protocol', label: '協定', type: 'select', options: ['openai', 'anthropic', 'gemini', 'chatgpt', 'gemini_cli'], required: true, hint: 'chatgpt = 用你的 ChatGPT Plus / Pro 方案（Sign in with ChatGPT）；gemini_cli = 用你 Google 帳號的 Antigravity / Gemini CLI 方案（Code Assist API）。兩者都不用 API key、只服務 owner 本人，群組成員 / 訪客那一輪不會用它' },
     { key: 'base_url', label: 'base_url', hint: 'openai：到 /v1 為止（不含 /chat/completions）；anthropic / gemini：只到網域', required: true },
     { key: 'model', label: 'model', required: true },
     { key: 'role', label: '角色', type: 'select', options: ['main', 'fast', 'embed'], required: true },
@@ -514,7 +514,7 @@
       if (p && p.oauth) {
         const o = p.oauth;
         const info = OAUTH_INFO[p.protocol] || OAUTH_INFO.chatgpt;
-        const tail = p.protocol === 'gemini_cli' ? `；Code Assist 專案 ${o.projectId || '（第一次呼叫時自動開通）'}${o.tier ? ' / ' + o.tier : ''}` : `；refresh token 已 ${o.refreshAgeDays} 天（30 天內要成功 refresh 一次）`;
+        const tail = p.protocol === 'gemini_cli' ? `；client ${o.client || 'antigravity'}；Code Assist 專案 ${o.projectId || '（第一次呼叫時自動開通）'}${o.tier ? ' / ' + o.tier : ''}` : `；refresh token 已 ${o.refreshAgeDays} 天（30 天內要成功 refresh 一次）`;
         $oauthMsg.textContent = o.invalid ? `憑證已失效（${o.invalid}）：重跑 ${info.script} 貼新憑證` : `${o.email || o.subject}；access token ${o.expiresInMin > 0 ? o.expiresInMin + ' 分鐘後到期' : '已過期'}（會自動 refresh）${tail}${o.scopesOk ? '' : '；' + info.scopeHint}`;
       }
       const $oauthHint = el('span', { class: 'field-hint' });
