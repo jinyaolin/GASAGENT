@@ -10,8 +10,8 @@
  * - Script Property CRON_NEXT_RUN 存最早到期時間，讓 queueTick 閒置時不用開 spreadsheet 就知道沒有排程要跑。
  */
 
-/** deliver_to 可選值；Telegram 留 M6。 */
-const CRON_DELIVER_TARGETS = Object.freeze(['doc', 'email', 'none']);
+/** deliver_to 可選值（telegram 自 M6）。 */
+const CRON_DELIVER_TARGETS = Object.freeze(['doc', 'email', 'telegram', 'none']);
 /** computeNextRun_ 往後最多找幾天。 */
 const CRON_SEARCH_DAYS = 400;
 /** computeNextRun_ 迭代安全上限（有跳躍，實際遠小於此）。 */

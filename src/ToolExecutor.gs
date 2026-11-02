@@ -120,6 +120,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID in map)) missing[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = '';
   if (!(TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID in map)) missing[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = '';
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
+  Object.keys(CHANNEL_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = CHANNEL_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
   if (keys.length) setConfigValues_(missing);
   return keys;
@@ -622,6 +623,10 @@ function enqueueApprovalContinuation_(row, approved, outcome, deps) {
     message: text + '\n請據此接續完成原本的任務並回覆（不要再重送同一個動作）。',
     origin: 'approval', approval_id: row.id, continuations: 0,
     channel: session.channel || 'admin', mode: session.channel === 'cron' ? 'autonomous' : 'interactive',
+    // M6：通道 session 的續跑結果要送回原通道
+    external_id: session.external_id || '',
+    telegram_chat_id: session.channel === 'telegram' ? session.external_id : '',
+    email_thread_id: session.channel === 'email' ? session.external_id : '',
   };
   try {
     return (deps.enqueue || enqueue_)('continuation', payload, sessionId, { store: deps.queueStore });

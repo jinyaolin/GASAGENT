@@ -1,5 +1,5 @@
 /**
- * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）、Queue 與排程（M4）、技能資料夾與 SKILL.md（M5）。
+ * @fileoverview 自我健檢：Properties、DB 每個 tab 與表頭、trigger、授權 scopes、時區、provider（M1）、工具 registry 與 RBAC（M2）、記憶容量 / session / fast provider（M3）、Queue 與排程（M4）、技能資料夾與 SKILL.md（M5）、Telegram / Email 通道（M6）。
  *
  * 回傳純 JSON，管理頁 Doctor 分頁以綠 / 紅 / 黃清單顯示。
  * status：'ok' 通過、'fail' 失敗（整體 ok=false）、'warn' 提醒（不影響整體）。
@@ -220,6 +220,39 @@ function runDoctor() {
       }
     } catch (err) {
       push('skills', '技能健檢', 'fail', String(err && err.message || err));
+    }
+  }
+
+  // 12. 通道（M6）：只在啟用時檢查
+  if (ss) {
+    try {
+      const ccfg = getChannelConfig_();
+      if (ccfg.telegramEnabled) {
+        const token = getTelegramToken_();
+        push('tg_token', 'Telegram bot token 已設定', token ? 'ok' : 'fail', token ? keyHint_(token) : '到「通道」分頁貼上 BotFather 給的 token。');
+        push('tg_allow', 'Telegram 白名單至少一個 user id', ccfg.telegramAllowedUserIds.length ? 'ok' : 'fail', ccfg.telegramAllowedUserIds.join(', ') || '沒有白名單，所有訊息都會被丟掉。');
+        if (token) {
+          try {
+            const info = telegramGetWebhookInfo_();
+            const expected = ccfg.telegramWebhookUrl ? telegramWebhookUrl_(ccfg.telegramWebhookUrl, getTelegramSecret_()) : '';
+            const url = String(info.url || '');
+            push('tg_webhook', 'Telegram webhook 已登記且指向部署 B', !url ? 'fail' : url === expected ? 'ok' : 'warn',
+              !url ? '尚未登記：到「通道」分頁填部署 B 網址後按「設定 webhook」。' : (url === expected ? '' : '登記的 URL 與設定不同（secret 或網址變了？按「設定 webhook」重登）。') +
+              `${url.replace(/key=[^&]+/, 'key=…')}；待處理 ${info.pending_update_count || 0}${info.last_error_message ? `；最後錯誤 ${info.last_error_date ? fmtDate_(new Date(info.last_error_date * 1000)) : ''} ${info.last_error_message}` : ''}`);
+          } catch (err) {
+            push('tg_webhook', 'Telegram webhook 已登記且指向部署 B', 'fail', String(err && err.message || err));
+          }
+        }
+      }
+      if (ccfg.emailEnabled) {
+        const label = GmailApp.getUserLabelByName(ccfg.emailInboxLabel);
+        push('email_label', `Gmail 標籤「${ccfg.emailInboxLabel}」存在`, label ? 'ok' : 'warn', label ? '把寄給自己的指令信貼上這個標籤即可' : '第一次掃描或「通道」分頁「建立標籤」會自動建立。');
+        const next = getProp_(PROP.EMAIL_NEXT_SCAN);
+        push('email_scan', 'Email 指令信掃描旗標已設', next ? 'ok' : 'warn', next ? `下次掃描 ${fmtDate_(new Date(next))}（每 ${ccfg.emailScanEveryMinutes} 分鐘）` : '旗標空：到「通道」分頁再儲存一次。');
+      }
+      if (!ccfg.telegramEnabled && !ccfg.emailEnabled) push('channels', 'Telegram / Email 通道', 'ok', '兩者皆未啟用（只用管理頁聊天台）。');
+    } catch (err) {
+      push('channels', '通道健檢', 'fail', String(err && err.message || err));
     }
   }
 

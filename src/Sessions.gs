@@ -424,9 +424,11 @@ function parseSlashCommand_(text) {
  * @param {AgentConfig} cfg
  * @param {!Object} store
  * @param {function(): number} now
+ * @param {string=} externalId M6：通道識別（Telegram chat id / Gmail thread id），新建 session 時帶上
  * @return {{session: SessionRow, created: boolean, reason: string}}
  */
-function resolveSession_(sessionId, channel, cfg, store, now) {
+function resolveSession_(sessionId, channel, cfg, store, now, externalId) {
+  const fields = { channel, external_id: externalId || '' };
   if (sessionId) {
     const s = store.get(sessionId);
     if (s && s.status === 'active') {
@@ -434,10 +436,10 @@ function resolveSession_(sessionId, channel, cfg, store, now) {
       if (!cfg.sessionIdleHours || idleMs < cfg.sessionIdleHours * 3600000) return { session: s, created: false, reason: '' };
       s.status = 'closed';
       store.update(s);
-      return { session: store.create({ channel }), created: true, reason: `前一個 session 閒置超過 ${cfg.sessionIdleHours} 小時，已自動開新 session` };
+      return { session: store.create(fields), created: true, reason: `前一個 session 閒置超過 ${cfg.sessionIdleHours} 小時，已自動開新 session` };
     }
   }
-  return { session: store.create({ channel }), created: true, reason: sessionId ? '指定的 session 不存在或已關閉，已開新 session' : '' };
+  return { session: store.create(fields), created: true, reason: sessionId ? '指定的 session 不存在或已關閉，已開新 session' : '' };
 }
 
 /**
@@ -464,8 +466,8 @@ function closeSession_(s, deps) {
 /**
  * 聊天台 / Queue 共同入口：一輪含持久化。
  * @param {{message: string, sessionId: (string|undefined), channel: (string|undefined), providerId: (string|undefined),
- *   systemExtra: (string|undefined), mode: (string|undefined), skills: (string|undefined)}} input
- *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt
+ *   systemExtra: (string|undefined), mode: (string|undefined), skills: (string|undefined), externalId: (string|undefined)}} input
+ *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt；externalId（M6）：通道識別，新建 session 時寫入 external_id
  * @param {{store: (Object|undefined), cfg: (AgentConfig|undefined), toolConfig: (ToolConfig|undefined),
  *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), skillStore: (Object|undefined), chat: (Function|undefined),
  *   summarize: (Function|undefined), curate: (Function|undefined), now: (Function|undefined), turnDeps: (Object|undefined)}=} deps
@@ -487,7 +489,7 @@ function runSessionTurn_(input, deps) {
       const prev = store.get(input.sessionId);
       if (prev && prev.status === 'active') closed = closeSession_(prev, { store, cfg, curate: deps.curate, memoryStore: deps.memoryStore, chat: deps.chat, toolConfig: deps.toolConfig, registry: deps.registry });
     }
-    const fresh = store.create({ channel });
+    const fresh = store.create({ channel, external_id: input.externalId || '' });
     const lines = [`已開新 session（${fresh.id}）。`];
     if (closed && closed.curation) {
       lines.push(closed.curation.error ? `前一個 session 的記憶整理失敗：${closed.curation.error}`
@@ -534,7 +536,7 @@ function runSessionTurn_(input, deps) {
     if (parsed.command === 'skill' && !parsed.rest) parsed.rest = SKILL_DEFAULT_MESSAGE;
   }
 
-  const resolved = resolveSession_(input.sessionId || '', channel, cfg, store, now);
+  const resolved = resolveSession_(input.sessionId || '', channel, cfg, store, now, input.externalId || '');
   const session = resolved.session;
 
   // 1. 載入活訊息，必要時壓縮

@@ -8,7 +8,7 @@
  */
 
 /** 應用版本，顯示於管理頁與 Doctor。 */
-const APP_VERSION = '0.5.0-m5';
+const APP_VERSION = '0.6.0-m6';
 
 /** Script Properties 鍵名。 */
 const PROP = Object.freeze({
@@ -26,6 +26,12 @@ const PROP = Object.freeze({
    * 一起看，兩者都沒到就不開 spreadsheet。
    */
   CRON_NEXT_RUN: 'CRON_NEXT_RUN',
+  /** M6：Telegram bot token（只在 Script Properties，管理頁只顯示末 4 碼）。 */
+  TELEGRAM_BOT_TOKEN: 'TELEGRAM_BOT_TOKEN',
+  /** M6：webhook URL 的 query secret（32 字元），doPost 比對 e.parameter.key。 */
+  TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
+  /** M6：Email 指令信下次掃描時間（ISO）；空 = 停用。queueTick 閒置時連同另兩個旗標一起看。 */
+  EMAIL_NEXT_SCAN: 'EMAIL_NEXT_SCAN',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 

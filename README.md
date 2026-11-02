@@ -4,13 +4,13 @@
 零伺服器、常駐於自己的 Google 帳號，用 Google Sheet 當長期記憶、Drive 資料夾放技能，
 透過只有本人能開的管理頁設定多組 AI provider，並有 Gmail / Drive / Docs / Slides / Sheets / Calendar 工具與排程。
 
-完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M5 完成並驗收，下一步 M6 通道**。
+完整規格與里程碑在本機 vault：`~/vault/20-projects/gas-agent.md`。目前進度：**M6 通道程式完成，待本人驗收；之後 M7 加固與維運**。
 
 ## 設計要點
 
 - **純 JavaScript `.gs` + JSDoc，零 npm runtime 依賴**；前端 vanilla JS 單頁。開發只用全域安裝的 `clasp` 同步到 git。
 - **安全**：管理頁部署為「以我執行 / 只限我」，後端每個 `google.script.run` 入口第一行 `assertOwner()`；金鑰只進 Script Properties，其他設定放 Sheet。模型不執行自生程式碼，一律白名單工具；每個 toolset 有 RBAC 四開關，外發動作（寄信 / 分享）走審批（見下方「工具與 RBAC」「審批」）。
-- **兩個 Web App 部署**（M6 才需要第二個）：管理頁「只限我」；Telegram webhook 另開一個「任何人」部署並在 URL 帶 secret，`doGet` 依 `?src=telegram` 分流，回應用 `HtmlService` 避免 302。
+- **兩個 Web App 部署**：管理頁「只限我」（部署 A）；Telegram webhook 另開一個「任何人」部署（部署 B）並在 URL 帶 secret，`doGet` / `doPost` 依 `?src=telegram` 分流，回應用 `HtmlService` 避免 302。存取等級寫在 manifest 裡、每個版本只能一種，所以用 `scripts/deploy.sh` 翻轉 manifest 分別推兩個版本（見「通道」）。
 - **Queue runner**：每分鐘 time trigger 跑 `queueTick()`，無 job 且沒有排程到期時只讀兩個 Script Property（`QUEUE_DIRTY` / `CRON_NEXT_RUN`）就 return，省 trigger 每日 90 分鐘配額。長任務每 4.5 分鐘 checkpoint 一次由續跑 job 接手（見「Queue 與排程」）。
 
 ## 檔案
@@ -28,6 +28,9 @@ src/
   Tools_Cron.gs     # M4：cronjob_manage 宣告（toolset cronjob）
   Tools_Skills.gs   # M5：skill_load / skill_manage 宣告（toolset skill；skill_manage 帶 proposal hook）
   Skills.gs         # M5：Drive skills 資料夾 store、SKILL.md frontmatter 解析、索引快取、注入區塊、提案 / 自動提案、內建範例技能
+  Channels.gs       # M6：通道設定（Config）、job 結束後依 channel 投遞回覆
+  Channels_Telegram.gs  # M6：doPost webhook 入口、secret / 白名單驗證、/new /status /model /skills、排 Queue、審批 inline button、setWebhook
+  Channels_Email.gs     # M6：Gmail 標籤掃描（EMAIL_NEXT_SCAN 旗標）、指令內文清理、thread 回覆
   Agent.gs          # M2：runTurn_() 工具呼叫迴圈、system prompt、步數 / 時間 / 熔斷
   Sessions.gs       # M3：Sessions / Messages 持久化、CacheService 熱快取、context 壓縮、/new、runSessionTurn_()
   Memory.gs         # M3：Memory / UserProfile 上限與快照、memory_manage、session_search、curation
@@ -38,8 +41,9 @@ src/
   Admin.gs          # doGet 路由 + admin* 後端入口
   AdminPage.html / admin_js.html / admin_css.html   # 管理頁 SPA（檔名避開與 Admin.gs 撞名）
   Doctor.gs         # runDoctor()：Properties / tabs / trigger / scopes / 時區 / provider / 工具 RBAC / 記憶容量 / session / Queue / Cron / 技能健檢
-  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項；標 'pure' 的可在本機跑
+  Tests.gs          # runSmokeTests()：M0 10 項 + M1 11 項 + M2 14 項 + M3 9 項 + M4 6 項 + M5 6 項 + M6 4 項；標 'pure' 的可在本機跑
 scripts/local-tests.js   # node 跑 Tests.gs 的 pure 測試（stub 掉 GAS 全域物件），push 前先驗
+scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回
 .clasp.json.example # clasp 綁定範本（.clasp.json 本身不進 git）
 ```
 
@@ -365,6 +369,7 @@ token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何
 
 | `deliver_to` | 做法 |
 |---|---|
+| `telegram` | M6：送到 owner 的 Telegram chat（Config `telegram_owner_chat_id`，沒有就用白名單第一個 user id） |
 | `doc` | 在 Drive `GAS Agent/reports/` 建一份 Google 文件，標題「`<name> YYYY-MM-DD`」，內文 = agent 的最終回覆（輕量 markdown）+「執行資訊」（session、模型、工具步驟、待審批、中止原因） |
 | `email` | 同樣內容寄給 `OWNER_EMAIL`。**只寄給 owner 自己不算外發**，不走 `gmail_send` 工具也不走審批 |
 | `none` | 不投遞；結果仍在 Queue job 與該 session 裡 |
@@ -439,6 +444,44 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 5. 聊天台輸入「幫我把 weekly-report 技能的『本週重點（3 條以內…）』改成 5 條以內」→ 預期 `skill_manage patch` 步驟標「待審批」→ 審批卡片顯示「找到 → 取代成」→ 批准 → 開 Drive 檔確認已改。
 6. 排程：新增一個排程，技能欄填 `weekly-report`，任務指令「產出本週週報」，投遞 doc → 「立即執行」→ 結果 Doc 的「執行資訊」有「載入技能：weekly-report」。
 
+## 通道（M6）
+
+所有入口都只做一件事：**驗證 → 寫一筆 Queue `turn` job → 立刻回覆**；agent 由每分鐘 trigger 的 `queueTick()` 跑，跑完由 `deliverTurnToChannel_`（[Channels.gs](src/Channels.gs)）把文字送回原通道。通道 job 的 session 以 `channel` + `external_id`（Telegram chat id / Gmail thread id）識別，同一個 chat / thread 沿用同一個 active session（閒置 `session_idle_hours` 後自動切新）。續跑（checkpoint、審批後）的 job 也帶著通道識別，每一輪的回覆都會送回去。
+
+### Telegram（webhook，部署 B）
+
+| 項目 | 說明 |
+|---|---|
+| 部署 B | 「以我執行 / **任何人**」的 Web App。Apps Script 的存取等級寫在 `appsscript.json` 的 `webapp.access`，一個版本只能一種，所以 `scripts/deploy.sh` 先以 `MYSELF` 更新部署 A，再把 manifest 翻成 `ANYONE_ANONYMOUS` 推一個版本給部署 B，最後翻回。目前的部署 B：`AKfycbypDGHfZ6Ez0HktdBY0WcysnAEePAyBuaLtDU_maOW5ovPtWvFhHcFlLEjqPpagkkqkug`（版本 18） |
+| webhook URL | `<部署 B /exec>?src=telegram&key=<32 字元 secret>`。GAS 的 `doPost` 拿不到 HTTP header，所以 secret 放 query；`doPost` 比對 `e.parameter.key` 與 Script Property `TELEGRAM_WEBHOOK_SECRET`，再比對 `message.from.id` 是否在 Config `telegram_allowed_user_ids`。不符一律丟掉、不回話、記 `AuditLog`（tool `telegram:webhook`） |
+| 回應 | 一律 `HtmlService.createHtmlOutput('ok')`，第一跳就是 200（`ContentService` 會 302，Telegram 會不斷重送）。每分鐘最多 30 個 update（CacheService 計數） |
+| 流程 | 文字訊息 → 回「收到，處理中…」→ `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼）、白名單 user id、部署 B 網址、secret（儲存時自動產生；可重新產生）、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
+
+### Email 指令信
+
+| 項目 | 說明 |
+|---|---|
+| 觸發 | 寄件者 = `OWNER_EMAIL`（自己寄給自己）且 thread 貼有 Gmail 標籤 `agent/inbox`（Config `email_inbox_label`；可在 Gmail 設篩選器自動貼標，例如 `from:me to:me subject:[agent]`） |
+| 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`，每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
+| 內文 | 去掉 `>` 引用、`On … wrote:` 之後、`-- ` 簽名檔，截 8000 字；內文全是引用就用主旨 |
+| 回覆 | `thread.reply(text, {name:'GAS Agent'})` 進同一 thread，寄件者是 owner 本人；送出後把自己的回覆加星避免被當成指令。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕） |
+| 設定 | 管理頁「通道」：啟用、標籤、掃描間隔、「建立標籤」「立刻掃一次」 |
+
+Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指向設定的部署 B（含 Telegram 回報的待處理數與最後錯誤）；Email 啟用時標籤存在、掃描旗標已設。
+
+### M6 驗收步驟（請在瀏覽器與手機操作）
+
+1. 更新：`scripts/deploy.sh "說明"` 已把部署 A（版本 17）與部署 B（版本 18）推上去。Doctor → 「重新安裝」（Config 補通道設定）→ 全綠 → smoke tests 60 項全過。
+2. Telegram 建 bot：手機 Telegram 找 **@BotFather** → `/newbot` → 取得 token。找 **@userinfobot** 取得自己的 user id（或用 telegram-assistant 已知的 `1201905814`）。
+3. 管理頁「通道」：勾啟用 Telegram、貼 token、白名單填 user id、部署 B 網址填 `https://script.google.com/macros/s/AKfycbypDGHfZ6Ez0HktdBY0WcysnAEePAyBuaLtDU_maOW5ovPtWvFhHcFlLEjqPpagkkqkug/exec` → 儲存（會產生 secret）→ 「設定 webhook」→ 「查 webhook 狀態」應顯示 URL 與待處理 0 → 「送測試訊息」手機應收到。
+4. 手機對 bot 說 `/help` → 立刻回指令說明。再說 `找出我 Drive 最近 5 個檔案，列出名稱與修改時間` → 立刻回「收到，處理中…」，1–2 分鐘內收到結果（trigger 每分鐘跑；或到管理頁「紀錄」按「處理一個 job」）。「記憶」分頁的 Sessions 應多一個 `[telegram]` session。
+5. 審批按鈕：Telegram 說 `寄一封信給我自己，主旨 test，內文 hello`（gmail external 需開）→ 回覆附「✅ 批准 gmail_send / ❌ 拒絕」按鈕 → 按批准 → 回「已批准…agent 會接續回覆」→ 一分鐘內收到 agent 的收尾訊息、信件寄達。
+6. `/weekly-report` 在 Telegram 也能用（技能注入）；`/new` 開新 session；`/model` 列模型。
+7. Email：「通道」勾啟用 Email、間隔先設 1 → 儲存 → 「建立標籤」。用 Gmail 寄一封信給自己，主旨 `[agent] 測試`，內文 `列出我今天的行事曆事件`，寄出後到收件匣把這封信貼上標籤 `agent/inbox`（或先在 Gmail 設篩選器）→ 等 1–2 分鐘（或「通道」按「立刻掃一次」）→ 同一 thread 收到 GAS Agent 的回信；原信已加星。驗完把間隔調回 5。
+8. 排程投遞：新增一個排程 `deliver_to = telegram` → 「立即執行」→ Telegram 收到「📋 <名稱> 日期」+ 內容。
+
 ## 開發流程
 
 ```bash
@@ -453,7 +496,8 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（50 項 pure 測試，不碰 Google 服務）→ `clasp push` → `clasp deploy -i <deploymentId> -d "…"` → 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（54 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh "說明"`（push + 更新部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。
+- **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
 - 不要把 `.clasp.json`（含 scriptId）以外的任何金鑰放進 repo；金鑰只進 Script Properties。
@@ -496,6 +540,11 @@ node scripts/local-tests.js
 | agent 說「skill_manage 只能以提案方式進行」 | 刻意限制：技能新建 / 修補一律進審批，到「紀錄 → 審批」批准 |
 | 複雜任務做完沒有技能提案 | 觸發條件是 ≥ 5 步、順利結束、同 session 第一次；或模型評估為不值得（meta 會顯示評估文字）。開新 session 再試，或直接要求「把這個流程存成技能」 |
 | 升到 M5 後 Doctor 說 `Sessions` 缺 `skill_proposed_turn` / 缺 `rbac.skill` | 按「重新安裝」 |
+| Telegram 說了話沒反應 | 依序看：「通道」→「查 webhook 狀態」有沒有 URL 與最後錯誤；Doctor 的 Telegram 三項；「紀錄 → AuditLog」有無 `telegram:webhook` 列（`rejected user_not_allowed` = 白名單沒填對、`bad_secret` = 重新「設定 webhook」）；「紀錄 → Queue」有沒有 job |
+| Telegram 回「收到」但一直沒結果 | trigger 沒跑或 job 失敗：Doctor 看 trigger、「紀錄 → Queue」看該 job 的狀態與錯誤；Telegram 回覆失敗會記在 job 的 error（例如 token 失效） |
+| Telegram webhook 狀態顯示 `Wrong response from the webhook: 302` | 部署 B 不是「任何人」或網址填成部署 A 的；用 `scripts/deploy.sh` 重推 B，確認「通道」填的是部署 B 的 `/exec` |
+| 寄給自己的指令信沒被處理 | 沒貼標籤、寄件者不是 OWNER_EMAIL、已加星、或超過 7 天；「通道」按「立刻掃一次」看報告；Doctor 看旗標 |
+| agent 把自己的回信當成指令迴圈 | 不該發生：回信顯示名稱 `GAS Agent` 會被排除且已加星；若手動把星星拿掉就會重跑 |
 
 ## 里程碑
 
@@ -505,5 +554,5 @@ node scripts/local-tests.js
 - [x] M3 記憶：Sessions / Messages 持久化、context 壓縮、Memory / UserProfile 上限與快照、memory_manage、session_search（可選向量）、curation 進審批、記憶 / 設定分頁
 - [x] M4 排程與非同步 Queue：job 狀態機、checkpoint 續跑、審批後續跑、Cron 解析與到期掃描、`cronjob_manage`、投遞 doc / email、排程 / Queue 分頁、背景執行
 - [x] M5 技能：Drive `skills/<name>/SKILL.md`、索引快取、system prompt 只放名稱 + 描述、`skill_load` / `/<skill>` / cron skills 全文注入、`skill_manage` 提案進審批、≥ 5 步自動提案、技能分頁
-- [ ] M6 通道（Telegram webhook 部署 B、Email 指令信）
+- [x] M6 通道：Telegram webhook（部署 B「任何人」+ URL secret + 白名單、/new /status /model /skills、審批 inline button）、Email 指令信（標籤掃描、thread = session、回信加星）、通道分頁、`deliver_to=telegram`、`scripts/deploy.sh` —— 程式完成，待本人驗收
 - [ ] M7 加固與維運

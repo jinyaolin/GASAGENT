@@ -89,6 +89,11 @@ function smokeTestTable_() {
     ['skills: cron 的 skills 欄在 cron job 與續跑 job 都傳下去並注入全文；找不到的列在 missing', testSkillCronInjection_, 'pure'],
     ['skills: 自動提案觸發條件（≥ 5 步、順利結束、每 session 一次、需開 skill_manage）；評估呼叫不寫入 Messages', testSkillAutoProposal_, 'pure'],
     ['skills: 內建範例技能可解析；資料夾為空才寫入', testSkillBuiltins_, 'pure'],
+    // M6
+    ['telegram: update 解析、secret / 白名單驗證、保留指令解析、長文切段、審批鍵盤、webhook URL、通道設定解析', testTelegramParse_, 'pure'],
+    ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字先回收到再排隊（沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批', testTelegramHandle_, 'pure'],
+    ['email: 內文去引用 / 簽名、掃描只處理 owner 未加星且非 agent 回覆的信並加星、thread 沿用 session、到期旗標', testEmailChannel_, 'pure'],
+    ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
   ];
 }
 
@@ -1489,7 +1494,7 @@ function testCronSchedule_() {
   assertThrows_(() => validateCronInput_({ schedule: 'daily', prompt: 'x' }), '缺 name');
   assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: '' }), '缺 prompt');
   assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'nope', prompt: 'x' }), 'schedule 壞');
-  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: 'x', deliver_to: 'telegram' }), 'deliver_to 未支援');
+  assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: 'x', deliver_to: 'slack' }), 'deliver_to 未支援');
   assertThrows_(() => validateCronInput_({ name: 'a', schedule: 'daily', prompt: 'x', model_pin: 'ghost' }, undefined, ['p1']), 'model_pin 不存在');
   const edited = validateCronInput_({ prompt: '新指令' }, ok);
   assertEqual_([edited.name, edited.prompt, edited.schedule], ['郵件摘要', '新指令', 'daily 09:00'], '編輯時沿用既有欄位');
@@ -1824,8 +1829,11 @@ function testDeliverContent_() {
   assertEqual_(deliverResult_({ name: 'n', deliver_to: 'email' }, result, deps).summary, '已寄到 o@x.com（[GAS Agent] n 2026-11-03）', 'email');
   assertEqual_(deliverResult_({ name: 'n', deliver_to: 'none' }, result, deps).ok, true, 'none');
   assertEqual_(calls, [['doc', 'n 2026-11-03'], ['mail', 'o@x.com', '[GAS Agent] n 2026-11-03']], 'handler 呼叫');
-  const unknown = deliverResult_({ name: 'n', deliver_to: 'telegram' }, result, deps);
+  const unknown = deliverResult_({ name: 'n', deliver_to: 'slack' }, result, deps);
   assertEqual_([unknown.ok, /未知/.test(unknown.error)], [false, true], '未知目標');
+  const tg = deliverResult_({ name: 'n', deliver_to: 'telegram' }, result, Object.assign({}, deps, { telegramChatId: '42', sendTelegram: (c, t) => calls.push(['tg', c, t.slice(0, 12)]) }));
+  assertEqual_([tg.ok, tg.channel, tg.ref, calls[calls.length - 1]], [true, 'telegram', '42', ['tg', '42', '📋 n 2026-11']], 'telegram 投遞（M6）');
+  assertEqual_(deliverResult_({ name: 'n', deliver_to: 'telegram' }, result, Object.assign({}, deps, { telegramChatId: '' })).ok, false, '沒有 chat id 失敗');
   const broken = deliverResult_({ name: 'n', deliver_to: 'email' }, result, Object.assign({}, deps, { sendEmail: () => { throw new Error('quota'); } }));
   assertEqual_([broken.ok, broken.error, broken.summary], [false, 'quota', '投遞失敗：quota'], 'handler 丟錯不 throw');
   // 沒注入 ownerEmail 就退回 OWNER_EMAIL：GAS 上有值會成功、本機 node 沒設定會失敗。
@@ -2161,4 +2169,252 @@ function testSkillBuiltins_() {
   const has = memorySkillStore_([{ name: 'mine', text: fakeSkillText_('mine') }]);
   assertEqual_([installBuiltinSkills_(has.store), Object.keys(has.files)], [[], ['mine']], '已有技能就不寫入內建');
   assertEqual_(enabledSkills_(empty.store.list()).map((x) => x.name), ['deck-planning', 'weekly-report'], '索引列出兩個');
+}
+
+// ---- M6：channels --------------------------------------------------------------------------------------
+
+/** @return {{deps: Object, sent: !Array, api: !Array, jobs: !Array, decided: !Array, ss: Object}} handleTelegramUpdate_ 的假依賴 */
+function fakeTelegramDeps_(overrides) {
+  const ss = memorySessionStore_();
+  const q = memoryQueueStore_();
+  const sent = [];
+  const api = [];
+  const decided = [];
+  const deps = Object.assign({
+    key: 'secret-ok', secret: 'secret-ok',
+    cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, 222' }),
+    sessionStore: ss.store, queueStore: q.store, agentCfg: fakeAgentConfig_(),
+    send: (chatId, text, opts) => sent.push({ chatId, text, opts: opts || null }),
+    api: (method, payload) => api.push({ method, payload }),
+    enqueue: (type, payload, sessionId) => { const j = { id: 'job_' + (q.jobs.length + 1), type, payload, session_id: sessionId, state: 'queued', attempts: 0, started: null, finished: null, error: '' }; q.store.add(j); return j; },
+    decide: (id, approve) => { decided.push([id, approve]); if (id === 'apr_bad') throw new Error('已處理'); return { id, state: approve ? 'approved' : 'denied', outcome: approve ? { ok: true, ms: 7, status: 'ok' } : null, continuation: 'job_c' }; },
+    providers: [{ id: 'glm', enabled: true, role: 'main', model: 'glm-4.6' }, { id: 'gem', enabled: true, role: 'fast', model: 'gemini' }, { id: 'emb', enabled: true, role: 'embed', model: 'e' }, { id: 'off', enabled: false, role: 'main', model: 'x' }],
+    skills: () => [{ name: 'weekly-report', description: '週報' }],
+    setConfig: (v) => { deps._config.push(v); },
+    rateExceeded: () => false,
+    _config: [],
+  }, overrides || {});
+  return { deps, sent, api, jobs: q.jobs, decided, ss };
+}
+
+/** @return {!Object} Telegram 文字 update */
+function tgMessage_(text, userId, chatId, messageId) {
+  return { update_id: 1, message: { message_id: messageId || 5, from: { id: Number(userId || 111), username: 'jinyao' }, chat: { id: Number(chatId || userId || 111), type: 'private' }, text } };
+}
+
+function testTelegramParse_() {
+  const m = parseTelegramUpdate_(tgMessage_('  哈囉 ', 111, 111, 9));
+  assertEqual_([m.kind, m.chatId, m.userId, m.username, m.text, m.messageId], ['message', '111', '111', 'jinyao', '哈囉', 9], '文字訊息');
+  const cb = parseTelegramUpdate_({ update_id: 2, callback_query: { id: 'cb1', data: 'apr:apr_1:approve', from: { id: 111 }, message: { message_id: 77, chat: { id: 111 } } } });
+  assertEqual_([cb.kind, cb.callbackId, cb.callbackData, cb.userId, cb.chatId, cb.callbackMessageId], ['callback', 'cb1', 'apr:apr_1:approve', '111', '111', 77], 'callback');
+  assertEqual_(parseTelegramUpdate_({ update_id: 3, message: { message_id: 1, from: { id: 111 }, chat: { id: 111 }, sticker: {} } }).text, '', '貼圖沒有 text');
+  assertEqual_(parseTelegramUpdate_({ update_id: 4, channel_post: {} }).kind, 'other', '不支援的 update');
+  assertEqual_(parseTelegramUpdate_({ update_id: 5, edited_message: { message_id: 2, from: { id: 111 }, chat: { id: 111 }, text: '改' } }).text, '改', 'edited_message');
+  // 驗證
+  const base = { key: 's', secret: 's', userId: '111', allowed: ['111'], enabled: true };
+  assertEqual_(telegramAuthorize_(base), '', '通過');
+  assertEqual_(telegramAuthorize_(Object.assign({}, base, { key: 'x' })), 'bad_secret', 'secret 錯');
+  assertEqual_(telegramAuthorize_(Object.assign({}, base, { secret: '' })), 'bad_secret', '沒有 secret 一律拒');
+  assertEqual_(telegramAuthorize_(Object.assign({}, base, { userId: '999' })), 'user_not_allowed', '非白名單');
+  assertEqual_(telegramAuthorize_(Object.assign({}, base, { userId: '' })), 'no_user', '沒 user');
+  assertEqual_(telegramAuthorize_(Object.assign({}, base, { enabled: false })), 'telegram_disabled', '停用');
+  // 指令
+  assertEqual_(parseTelegramCommand_('/new'), { command: 'new', rest: '' }, '/new');
+  assertEqual_(parseTelegramCommand_('/model@mybot glm'), { command: 'model', rest: 'glm' }, '/model@bot');
+  assertEqual_(parseTelegramCommand_('/weekly-report 做'), { command: '', rest: '/weekly-report 做' }, '技能指令不攔');
+  assertEqual_(parseTelegramCommand_('hi'), { command: '', rest: 'hi' }, '一般');
+  // 切段
+  const long = new Array(50).fill('段落' + 'x'.repeat(100)).join('\n\n');
+  const parts = splitTelegramText_(long, 1000);
+  assert_(parts.length > 1 && parts.every((p) => p.length <= 1000) && parts.join('\n\n').replace(/\s+/g, '') === long.replace(/\s+/g, ''), '切段不漏字且每段 ≤ 上限');
+  assertEqual_(splitTelegramText_('', 10), ['（空）'], '空');
+  assertEqual_(splitTelegramText_('a'.repeat(25), 10).length, 3, '沒有換行就硬切');
+  // 鍵盤
+  const kb = telegramApprovalKeyboard_([{ tool: 'gmail_send', approvalId: 'apr_1' }, { tool: 'x', approvalId: '' }]);
+  assertEqual_(kb.inline_keyboard.length, 1, '只有帶 id 的');
+  assertEqual_(kb.inline_keyboard[0].map((b) => b.callback_data), ['apr:apr_1:approve', 'apr:apr_1:deny'], 'callback_data');
+  assert_(TELEGRAM_CALLBACK_RE.test('apr:apr_1_abc-d:deny'), 'callback regex');
+  assertEqual_(telegramApprovalKeyboard_([]), null, '沒有 → null');
+  // webhook URL
+  assertEqual_(telegramWebhookUrl_('https://script.google.com/macros/s/ABC_def-123/exec?x=1', 's3cr3t'), 'https://script.google.com/macros/s/ABC_def-123/exec?src=telegram&key=s3cr3t', 'URL 組合');
+  assertThrows_(() => telegramWebhookUrl_('https://example.com/exec', 's'), '非 GAS 網址');
+  assertThrows_(() => telegramWebhookUrl_('', 's'), '空');
+  assertEqual_(newWebhookSecret_().length, 32, 'secret 32 字');
+  assertThrows_(() => setTelegramToken_('not-a-token'), 'token 格式');
+  // 回覆文字
+  const text = channelReplyText_({ text: '做好了', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }], continued_by: 'job_2', skillProposal: { proposed: true, approvalId: 'apr_9' } }, { approvalHint: '按鈕' });
+  assert_(/^做好了/.test(text) && /待你審批：gmail_send。按鈕/.test(text) && /已排續跑/.test(text) && /技能提案（apr_9）/.test(text), '回覆文字：' + text);
+  assertEqual_(channelReplyText_({ text: '', steps: [] }, {}), '（這輪沒有文字結果）', '空結果');
+  // 通道設定
+  const c = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, abc, 222', email_scan_every_minutes: '0', email_inbox_label: '' });
+  assertEqual_([c.telegramEnabled, c.telegramAllowedUserIds, c.emailEnabled, c.emailScanEveryMinutes, c.emailInboxLabel], [true, ['111', '222'], false, 1, 'agent/inbox'], '設定解析（非數字 id 丟掉、夾限、預設標籤）');
+}
+
+function testTelegramHandle_() {
+  const f = fakeTelegramDeps_();
+  // 非白名單 / secret 錯：什麼都不做、不回話
+  const r0 = handleTelegramUpdate_(tgMessage_('hi', 999), f.deps);
+  assertEqual_([r0.action, f.sent.length, f.jobs.length], ['rejected', 0, 0], '非白名單不回話');
+  assert_(/user_not_allowed \(user 999/.test(r0.reason), 'reason 含 user id');
+  assertEqual_(handleTelegramUpdate_(tgMessage_('hi', 111), Object.assign({}, f.deps, { key: 'wrong' })).action, 'rejected', 'secret 錯');
+  assertEqual_(handleTelegramUpdate_(tgMessage_('hi', 111), Object.assign({}, f.deps, { rateExceeded: () => true })).reason, 'rate_limited', '速率');
+  // 一般文字：先回收到、排 turn job（沒有 session → session_id 空，runSessionTurn_ 會建帶 external_id 的新 session）
+  const r1 = handleTelegramUpdate_(tgMessage_('找本週的信', 111, 111, 42), f.deps);
+  assertEqual_([r1.action, f.sent.length, f.sent[0].text, f.sent[0].opts.replyTo, f.jobs.length], ['enqueued', 1, TELEGRAM_ACK_TEXT, 42, 1], '收到 + 排隊');
+  assertEqual_([f.jobs[0].type, f.jobs[0].session_id, f.jobs[0].payload.message, f.jobs[0].payload.channel, f.jobs[0].payload.telegram_chat_id, f.jobs[0].payload.external_id, f.jobs[0].payload.mode], ['turn', '', '找本週的信', 'telegram', '111', '111', 'interactive'], 'payload');
+  assertEqual_(f.deps._config, [{ telegram_owner_chat_id: '111' }], '第一次記下 owner chat id');
+  // 有 active telegram session 就沿用
+  const sess = f.ss.store.create({ channel: 'telegram', external_id: '111' });
+  const r2 = handleTelegramUpdate_(tgMessage_('/weekly-report', 111), f.deps);
+  assertEqual_([r2.action, f.jobs[1].session_id, f.jobs[1].payload.message], ['enqueued', sess.id, '/weekly-report'], '技能指令原樣排隊、沿用 session');
+  // /status /help /skills
+  assert_(/session s1：0 輪/.test(handleTelegramUpdate_(tgMessage_('/status', 111), f.deps).text), '/status');
+  assert_(/\/model/.test(handleTelegramUpdate_(tgMessage_('/help', 111), f.deps).text), '/help');
+  assert_(/\/weekly-report — 週報/.test(handleTelegramUpdate_(tgMessage_('/skills', 111), f.deps).text), '/skills');
+  // /model
+  const rm = handleTelegramUpdate_(tgMessage_('/model', 111), f.deps);
+  assert_(/glm（main/.test(rm.text) && /gem（fast/.test(rm.text) && !/emb/.test(rm.text) && !/off/.test(rm.text), '/model 列可用（排除 embed / 停用）：' + rm.text);
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/model nope', 111), f.deps).action, 'model_invalid', '無效 provider');
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/model GLM', 111), f.deps).action, 'model_set', '設定模型');
+  assertEqual_(f.ss.store.get(sess.id).model_override, 'glm', 'session.model_override');
+  handleTelegramUpdate_(tgMessage_('/model auto', 111), f.deps);
+  assertEqual_(f.ss.store.get(sess.id).model_override, '', 'auto 清掉');
+  // /new：關舊開新；帶訊息就直接排隊
+  const rn = handleTelegramUpdate_(tgMessage_('/new 開始新任務', 111), f.deps);
+  assertEqual_([rn.action, f.ss.store.get(sess.id).status, !!rn.jobId], ['new', 'closed', true], '/new 帶訊息');
+  const fresh = f.ss.store.get(rn.sessionId);
+  assertEqual_([fresh.channel, fresh.external_id, fresh.status], ['telegram', '111', 'active'], '新 session 帶 chat id');
+  assertEqual_(f.jobs[f.jobs.length - 1].session_id, fresh.id, 'job 掛在新 session');
+  // 非文字
+  assertEqual_(handleTelegramUpdate_({ update_id: 9, message: { message_id: 1, from: { id: 111 }, chat: { id: 111 }, photo: [] } }, f.deps).reason, 'no_text', '非文字');
+  // 按鈕審批：decide、answerCallbackQuery、拿掉按鈕、回文字
+  const cbUpdate = (data) => ({ update_id: 10, callback_query: { id: 'cb1', data, from: { id: 111 }, message: { message_id: 77, chat: { id: 111 } } } });
+  const sentBefore = f.sent.length;
+  const ra = handleTelegramUpdate_(cbUpdate('apr:apr_1:approve'), f.deps);
+  assertEqual_([ra.action, f.decided[f.decided.length - 1]], ['approved', ['apr_1', true]], '批准');
+  assertEqual_(f.api.slice(-2).map((x) => x.method), ['answerCallbackQuery', 'editMessageReplyMarkup'], '回應 callback 並拿掉按鈕');
+  assert_(/已批准 apr_1，已執行（7 ms）；agent 會接續回覆/.test(f.sent[sentBefore].text), '批准文字：' + f.sent[sentBefore].text);
+  assertEqual_(handleTelegramUpdate_(cbUpdate('apr:apr_2:deny'), f.deps).action, 'denied', '拒絕');
+  assertEqual_(handleTelegramUpdate_(cbUpdate('apr:apr_bad:approve'), f.deps).action, 'decide_failed', '已處理的審批');
+  assertEqual_(handleTelegramUpdate_(cbUpdate('garbage'), f.deps).reason, 'bad_callback', '壞 callback');
+  assertEqual_(handleTelegramUpdate_(cbUpdate('apr:apr_1:approve'), Object.assign({}, f.deps, { key: 'x' })).action, 'rejected', 'callback 也要驗 secret');
+  // payload helper
+  assertEqual_(telegramTurnPayload_('m', { chatId: '1', messageId: 2, username: 'u', userId: '1' }).telegram_user, 'u', 'payload user');
+}
+
+/** @return {{gmail: Object, starred: !Array}} 假 Gmail（search 回固定 threads） */
+function fakeGmail_(threads) {
+  const starred = [];
+  return {
+    starred,
+    gmail: {
+      search: (query, max) => { fakeGmail_.lastQuery = query; return threads.slice(0, max); },
+      star: (id) => { starred.push(id); threads.forEach((t) => t.messages.forEach((m) => { if (m.id === id) m.starred = true; })); },
+    },
+  };
+}
+
+function testEmailChannel_() {
+  assertEqual_(extractEmailCommand_('請整理本週的信\n\n第二行\n> 引用\n> 引用二\nOn Mon, Nov 2 wrote:\n> old'), '請整理本週的信\n\n第二行', '去引用與 On … wrote');
+  assertEqual_(extractEmailCommand_('做事\n-- \n林經堯\n0912'), '做事', '去簽名');
+  assertEqual_(extractEmailCommand_('\r\n  指令  \r\n'), '指令', 'CRLF 與空白');
+  assertEqual_(extractEmailCommand_('x'.repeat(9000)).length, EMAIL_COMMAND_MAX_CHARS, '截長');
+  const cfg = parseChannelConfig_({ email_enabled: 'TRUE', email_inbox_label: 'agent/inbox' });
+  const ss = memorySessionStore_();
+  const q = memoryQueueStore_();
+  const enqueue = (type, payload, sid) => { const j = { id: 'job_' + (q.jobs.length + 1), type, payload, session_id: sid, state: 'queued', attempts: 0, started: null, finished: null, error: '' }; q.store.add(j); return j; };
+  const t1 = { id: 'th1', subject: '[agent] 週報', messages: [
+    { id: 'm1', from: 'Jinyao <owner@x.com>', date: new Date(2026, 10, 2, 9), starred: false, body: '幫我做本週週報\n-- \nsig' },
+    { id: 'm2', from: '"GAS Agent" <owner@x.com>', date: new Date(2026, 10, 2, 9, 5), starred: false, body: '做好了' },
+    { id: 'm3', from: 'Someone <other@y.com>', date: new Date(2026, 10, 2, 9, 6), starred: false, body: '我不是 owner' },
+    { id: 'm4', from: 'owner@x.com', date: new Date(2026, 10, 2, 9, 7), starred: true, body: '已處理過' },
+  ] };
+  const t2 = { id: 'th2', subject: '只有主旨', messages: [{ id: 'm5', from: 'owner@x.com', date: new Date(2026, 10, 2, 10), starred: false, body: '> 全是引用' }] };
+  const t3 = { id: 'th3', subject: '沒事', messages: [{ id: 'm6', from: 'owner@x.com', date: new Date(), starred: true, body: 'x' }] };
+  const g = fakeGmail_([t1, t2, t3]);
+  const existing = ss.store.create({ channel: 'email', external_id: 'th2' });
+  const r = scanEmailInbox_({ cfg, ownerEmail: 'Owner@X.com', gmail: g.gmail, sessionStore: ss.store, enqueue });
+  assert_(/label:agent\/inbox from:owner@x.com newer_than:7d -is:starred/.test(fakeGmail_.lastQuery), 'query：' + fakeGmail_.lastQuery);
+  assertEqual_([r.scanned, r.enqueued.length, r.skipped], [3, 2, 1], '三串：兩個 job、一串略過');
+  assertEqual_(g.starred, ['m1', 'm5'], '只有 owner 未加星且非 agent 的訊息被處理並加星');
+  assertEqual_([q.jobs[0].payload.message, q.jobs[0].payload.channel, q.jobs[0].payload.external_id, q.jobs[0].payload.email_thread_id, q.jobs[0].payload.email_subject, q.jobs[0].session_id], ['幫我做本週週報', 'email', 'th1', 'th1', '[agent] 週報', ''], 'th1 job（無 session → 空，runSessionTurn_ 會建）');
+  assertEqual_([q.jobs[1].payload.message, q.jobs[1].session_id], ['只有主旨', existing.id], '內文全是引用就用主旨；沿用該 thread 的 session');
+  // 再掃一次：都加星了 → 沒有新 job
+  const r2 = scanEmailInbox_({ cfg, ownerEmail: 'owner@x.com', gmail: g.gmail, sessionStore: ss.store, enqueue });
+  assertEqual_([r2.enqueued.length, q.jobs.length], [0, 2], '幂等');
+  assertEqual_(scanEmailInbox_({ cfg: parseChannelConfig_({}), ownerEmail: 'o', gmail: g.gmail, sessionStore: ss.store, enqueue }).scanned, 0, '停用不掃');
+  // 到期旗標
+  setProp_(PROP.EMAIL_NEXT_SCAN, '');
+  assertEqual_(emailScanIfDue_({ now: () => 1000 }), null, '沒旗標不掃');
+  refreshEmailNextScanProp_(cfg, new Date(5000));
+  assertEqual_(emailScanIfDue_({ now: () => 4000, cfg }), null, '未到期');
+  const g2 = fakeGmail_([]);
+  const due = emailScanIfDue_({ now: () => 6000, cfg, gmail: g2.gmail, sessionStore: ss.store, enqueue, ownerEmail: 'owner@x.com' });
+  assertEqual_(due.scanned, 0, '到期掃描');
+  assertEqual_(new Date(getProp_(PROP.EMAIL_NEXT_SCAN)).getTime(), 6000 + 5 * 60000, '旗標推到下一次');
+  assertEqual_(refreshEmailNextScanProp_(parseChannelConfig_({}), new Date()), '', '停用清旗標');
+  assertEqual_(getProp_(PROP.EMAIL_NEXT_SCAN), '', '旗標已清');
+  // 回覆投遞
+  const replies = [];
+  deliverTurnToEmail_('th1', { text: '週報好了', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }] }, { replyEmail: (tid, body) => replies.push([tid, body]) });
+  assertEqual_(replies[0][0], 'th1', '回到同一 thread');
+  assert_(/^週報好了/.test(replies[0][1]) && /管理頁「紀錄 → 審批」/.test(replies[0][1]), 'email 回覆含審批說明');
+}
+
+function testChannelDelivery_() {
+  // deliverTurnToChannel_：telegram 帶按鈕；email 回 thread；非通道回 null；失敗 ok=false
+  const sent = [];
+  const result = { text: '結果', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }] };
+  const d1 = deliverTurnToChannel_({ channel: 'telegram', telegram_chat_id: '111' }, result, { sendTelegram: (c, t, o) => { sent.push([c, t, o]); return { messages: 1 }; } });
+  assertEqual_([d1.ok, d1.channel, sent[0][0], sent[0][2].replyMarkup.inline_keyboard[0][0].callback_data], [true, 'telegram', '111', 'apr:apr_1:approve'], 'telegram 投遞帶按鈕');
+  assert_(/用下方按鈕決定/.test(sent[0][1]), 'telegram 審批提示');
+  const d2 = deliverTurnToChannel_({ channel: 'email', external_id: 'th9' }, { text: 'ok', steps: [] }, { replyEmail: (tid, body) => sent.push([tid, body]) });
+  assertEqual_([d2.ok, sent[1][0], sent[1][1]], [true, 'th9', 'ok'], 'email 投遞');
+  assertEqual_(deliverTurnToChannel_({ channel: 'admin' }, result, {}), null, 'admin 不投遞');
+  assertEqual_(deliverTurnToChannel_({ channel: 'cron' }, result, {}), null, 'cron 不投遞');
+  assertEqual_(deliverTurnToChannel_({ channel: 'telegram' }, result, {}).ok, false, '缺 chat id');
+  assertEqual_(deliverTurnToChannel_({ channel: 'telegram', telegram_chat_id: '1' }, result, { sendTelegram: () => { throw new Error('boom'); } }).error, 'boom', '送失敗');
+  // 走 Queue：telegram turn job → runSessionTurn_ 收到 externalId、新 session 帶 external_id、每輪都回覆、續跑 payload 帶識別
+  const q = memoryQueueStore_();
+  const cron = memoryCronStore_();
+  const ss = memorySessionStore_();
+  const fake = fakeChat_([{ toolCalls: [{ id: 'c1', name: 'fake_send', args: { text: 'go' } }], stop: 'tool_calls' }, { text: '已送審', stop: 'end' }, { text: '續跑完成', stop: 'end' }]);
+  const sessionDeps = fakeQueueSessionDeps_(fake.chat);
+  sessionDeps.store = ss.store;
+  const tg = [];
+  const job = enqueue_('turn', { message: '寄信給我', channel: 'telegram', mode: 'interactive', external_id: '111', telegram_chat_id: '111' }, '', { store: q.store });
+  const tick = () => queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps, channelDeps: { sendTelegram: (c, t, o) => { tg.push({ c, t, o }); return { messages: 1 }; } } });
+  const r1 = tick();
+  assertEqual_([r1.ran.id, r1.ran.state], [job.id, 'needs_approval'], 'X 工具停在審批 → needs_approval');
+  const sess = ss.sessions[0];
+  assertEqual_([sess.channel, sess.external_id, sess.status], ['telegram', '111', 'active'], '新 session 帶 external_id');
+  assertEqual_(tg.length, 1, '回覆送到 Telegram');
+  assert_(/已送審/.test(tg[0].t) && /待你審批：fake_send/.test(tg[0].t) && tg[0].o.replyMarkup, '回覆文字 + 按鈕');
+  assertEqual_(q.store.get(job.id).payload.result.channel_delivery.ok, true, 'result 記投遞');
+  // 審批後續跑：payload 帶 telegram_chat_id → 續跑結果也送回 Telegram
+  const apRows = sessionDeps._sink.approvals.map((r, i) => Object.assign({ _row: i + 2 }, r));
+  const ap = memoryApprovalStore_(apRows);
+  const dec = decideApproval_(apRows[0].id, true, { approvalStore: ap.store, sessionStore: ss.store, queueStore: q.store, registry: fakeM3Registry_(), config: fakeM3ToolConfig_(), sink: sessionDeps._sink.sink, spill: memorySpill_().store });
+  const cont = q.store.get(dec.continuation);
+  assertEqual_([cont.type, cont.payload.channel, cont.payload.telegram_chat_id, cont.payload.external_id, cont.payload.email_thread_id], ['continuation', 'telegram', '111', '111', ''], '審批續跑 payload 帶 chat id');
+  const r2 = tick();
+  assertEqual_([r2.ran.id, r2.ran.state, tg.length], [cont.id, 'done', 2], '續跑完成並再回覆');
+  assert_(/續跑完成/.test(tg[1].t) && !tg[1].o.replyMarkup, '第二則沒有按鈕');
+  // checkpoint 續跑 payload 也帶識別（用 runTurnJob_ 直接測）
+  let captured = null;
+  const stub = (input) => { captured = input; return { text: 't', steps: [], stopped: 'max_steps', sessionId: 's_x', usage: { prompt: 0, completion: 0 }, llmCalls: 1, ms: 1 }; };
+  const j2 = { id: 'job_e', type: 'turn', session_id: '', payload: { message: 'm', channel: 'email', external_id: 'th1', email_thread_id: 'th1', email_subject: 'S' }, state: 'running', attempts: 1 };
+  const emails = [];
+  const rr = runTurnJob_(j2, { store: q.store, cronStore: cron.store, budgetMs: 100000, runSessionTurn: stub, channelDeps: { replyEmail: (tid, body) => emails.push([tid, body]) } });
+  assertEqual_(captured.externalId, 'th1', 'runSessionTurn_ 收到 externalId');
+  const next = q.store.get(rr.result.continued_by);
+  assertEqual_([next.payload.channel, next.payload.email_thread_id, next.payload.external_id], ['email', 'th1', 'th1'], 'checkpoint 續跑帶 thread id');
+  assertEqual_([emails.length, emails[0][0]], [1, 'th1'], '中止那輪也回 email（含「已排續跑」）');
+  assert_(/已排續跑/.test(emails[0][1]), '續跑說明');
+  assert_(/\[Email\] S：m/.test(jobSummary_(j2)), 'job 摘要標通道');
+  // 投遞失敗：state 不變但 error 記下
+  const j3 = { id: 'job_f', type: 'turn', session_id: '', payload: { message: 'm', channel: 'telegram', telegram_chat_id: '1' }, state: 'running', attempts: 1 };
+  const rf = runTurnJob_(j3, { store: q.store, cronStore: cron.store, budgetMs: 100000, runSessionTurn: () => ({ text: 'ok', steps: [], stopped: '', sessionId: 's', usage: { prompt: 0, completion: 0 }, llmCalls: 1, ms: 1 }), channelDeps: { sendTelegram: () => { throw new Error('tg down'); } } });
+  assertEqual_([rf.state, rf.error, rf.result.channel_delivery.ok], ['done', 'tg down', false], '投遞失敗記 error');
+  setProp_(PROP.QUEUE_DIRTY, '');
 }

@@ -11,6 +11,7 @@
     { id: 'memory', label: '記憶' },
     { id: 'skills', label: '技能' },
     { id: 'cron', label: '排程' },
+    { id: 'channels', label: '通道' },
     { id: 'logs', label: '紀錄' },
     { id: 'settings', label: '設定' },
     { id: 'doctor', label: 'Doctor' },
@@ -503,7 +504,7 @@
     }
 
     function sessionOption(sx) {
-      return el('option', { value: sx.id }, `${sx.status === 'active' ? '● ' : '○ '}${sx.title || '（無標題）'} · ${sx.turns} 輪 · ${(sx.last_active || '').slice(0, 16).replace('T', ' ')}`);
+      return el('option', { value: sx.id }, `${sx.status === 'active' ? '● ' : '○ '}${sx.channel && sx.channel !== 'admin' ? `[${sx.channel}] ` : ''}${sx.title || '（無標題）'} · ${sx.turns} 輪 · ${(sx.last_active || '').slice(0, 16).replace('T', ' ')}`);
     }
 
     async function loadHistory(id) {
@@ -1116,7 +1117,7 @@
   // ---- 排程（Cron）------------------------------------------------------------------------------
 
   const JOB_STATE_LABEL = { queued: '排隊中', running: '執行中', needs_approval: '待審批', done: '完成', failed: '失敗' };
-  const DELIVER_LABEL = { doc: 'doc — 建一份 Google 文件（GAS Agent/reports）', email: 'email — 寄給 owner', none: 'none — 不投遞' };
+  const DELIVER_LABEL = { doc: 'doc — 建一份 Google 文件（GAS Agent/reports）', email: 'email — 寄給 owner', telegram: 'telegram — 送到 owner 的 Telegram（需先設定通道）', none: 'none — 不投遞' };
 
   async function renderCron(root) {
     root.append(...header('排程', '到期時由每分鐘 trigger 排進 Queue，在全新 session、無人模式（autonomous）執行；X 類工具依審批策略送審。結果依 deliver_to 投遞。schedule 用 5 欄 cron 或 hourly / daily 09:00 / weekly mon 09:00。'));
@@ -1381,6 +1382,114 @@
     load();
   }
 
+  // ---- 通道（M6：Telegram webhook / Email 指令信）------------------------------------------------
+
+  async function renderChannels(root) {
+    root.append(...header('通道', 'Telegram：另一個「以我執行 / 任何人」的部署（部署 B）當 webhook，URL 帶 secret，再比對 user id 白名單；訊息先排 Queue、每分鐘 trigger 執行後回覆，待審批附按鈕。Email：寄給自己並貼標籤的信視為指令，回覆進同一 thread。'));
+    const $body = el('div', {}, el('div', { class: 'loading' }, '載入中…'));
+    root.append($body);
+    let data;
+    try {
+      data = await call('adminGetChannelSettings');
+    } catch (err) {
+      $body.innerHTML = '';
+      $body.append(errorBox(err));
+      return;
+    }
+    $body.innerHTML = '';
+    const cfg = data.config;
+    // Telegram
+    const $tgEnabled = el('input', { type: 'checkbox' }); $tgEnabled.checked = cfg.telegramEnabled;
+    const $token = el('input', { type: 'password', autocomplete: 'off', placeholder: data.telegram.hasToken ? `已設定（${data.telegram.tokenHint}），留空則不變` : '貼上 @BotFather 給的 token（123456789:AAH…）' });
+    const $allow = el('input', { type: 'text', placeholder: '1201905814, 987654321' }); $allow.value = cfg.telegramAllowedUserIds.join(', ');
+    const $execUrl = el('input', { type: 'text', placeholder: 'https://script.google.com/macros/s/<部署 B 的 ID>/exec' }); $execUrl.value = cfg.telegramWebhookUrl;
+    const $regen = el('input', { type: 'checkbox' });
+    const $tgMsg = el('div');
+    const $webhookInfo = el('div', { class: 'meta' });
+    const tgPanel = el('div', { class: 'panel' }, [
+      el('h3', {}, 'Telegram'),
+      el('div', { class: 'form-grid' }, [
+        field('啟用', el('label', { class: 'checkbox' }, [$tgEnabled, ' 接受 Telegram 訊息'])),
+        field('Bot token', el('div', { class: 'key-row' }, [$token].concat(data.telegram.hasToken ? [el('button', { class: 'small danger', onclick: async () => { if (!confirm('清除 Telegram token？')) return; try { await call('adminClearTelegramToken'); rerender(); } catch (err) { $tgMsg.innerHTML = ''; $tgMsg.append(errorBox(err)); } } }, '清除')] : [])), '只寫入 Script Properties TELEGRAM_BOT_TOKEN，不存 sheet。到 Telegram 找 @BotFather → /newbot 取得'),
+        field('白名單 user id', $allow, '純數字，逗號分隔。查自己的 id：對 @userinfobot 說話。私聊的 chat id = user id'),
+        field('部署 B 網址（/exec）', $execUrl, '編輯器「部署 → 新增部署作業」：網頁應用程式、執行身分「我」、存取權「任何人」；或用 scripts/deploy.sh 建。管理頁（部署 A）維持「只限我」不要動'),
+        field('webhook secret', el('label', { class: 'checkbox' }, [$regen, ` 重新產生（目前 ${data.telegram.hasSecret ? data.telegram.secretHint : '尚未產生，儲存時自動產生'}）`]), '放在 webhook URL 的 ?key=；重新產生後要再按「設定 webhook」'),
+      ]),
+      data.telegram.webhookUrl ? el('div', { class: 'meta' }, `webhook URL：${data.telegram.webhookUrl.replace(/key=[^&]+/, 'key=…')}`) : (data.telegram.webhookUrlError ? el('div', { class: 'warn-text' }, data.telegram.webhookUrlError) : null),
+      el('div', { class: 'toolbar' }, [
+        el('button', { class: 'primary', onclick: () => save() }, '儲存'),
+        el('button', { onclick: () => tg('adminTelegramSetWebhook', '已向 Telegram 登記 webhook') }, '設定 webhook'),
+        el('button', { onclick: () => tg('adminTelegramWebhookInfo', '') }, '查 webhook 狀態'),
+        el('button', { onclick: () => { if (confirm('移除 webhook？Telegram 訊息會不再送進來。')) tg('adminTelegramDeleteWebhook', '已移除 webhook'); } }, '移除 webhook'),
+        el('button', { onclick: () => tg('adminTelegramTest', '測試訊息已送出') }, '送測試訊息'),
+      ]),
+      $webhookInfo, $tgMsg,
+    ]);
+    // Email
+    const $emEnabled = el('input', { type: 'checkbox' }); $emEnabled.checked = cfg.emailEnabled;
+    const $label = el('input', { type: 'text' }); $label.value = cfg.emailInboxLabel;
+    const $every = el('input', { type: 'number', min: 1, max: 1440 }); $every.value = cfg.emailScanEveryMinutes;
+    const $emMsg = el('div');
+    const emPanel = el('div', { class: 'panel' }, [
+      el('h3', {}, 'Email 指令信'),
+      el('div', { class: 'form-grid' }, [
+        field('啟用', el('label', { class: 'checkbox' }, [$emEnabled, ' 掃描指令信'])),
+        field('Gmail 標籤', $label, `寄件者必須是 ${data.email.owner}（寄給自己），且貼上這個標籤；可在 Gmail 設篩選器（例如 from:me to:me 主旨含 [agent]）自動貼標`),
+        field('每幾分鐘掃一次', $every, '由每分鐘 trigger 帶動；沒到時間不開 Gmail'),
+      ]),
+      el('div', { class: 'meta' }, `處理過的指令信會加星（★）；agent 的回覆用 thread 回信（寄件者顯示 GAS Agent）並加星。${data.email.nextScan ? '下次掃描 ' + data.email.nextScan.slice(0, 16).replace('T', ' ') + 'Z' : '尚未排程掃描'}`),
+      el('div', { class: 'toolbar' }, [
+        el('button', { class: 'primary', onclick: () => save() }, '儲存'),
+        el('button', { onclick: () => em('adminEmailEnsureLabel', '標籤已就位') }, '建立標籤'),
+        el('button', { onclick: () => em('adminEmailScanNow', '') }, '立刻掃一次'),
+      ]),
+      $emMsg,
+    ]);
+    $body.append(tgPanel, emPanel);
+
+    function rerender() { root.innerHTML = ''; renderChannels(root); }
+    async function save() {
+      $tgMsg.innerHTML = ''; $emMsg.innerHTML = '';
+      try {
+        await call('adminSaveChannelSettings', {
+          telegram_enabled: $tgEnabled.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(), regenerateSecret: $regen.checked,
+          email_enabled: $emEnabled.checked, email_inbox_label: $label.value.trim(), email_scan_every_minutes: $every.value,
+        });
+        $token.value = '';
+        rerender();
+      } catch (err) {
+        $tgMsg.append(errorBox(err));
+      }
+    }
+    async function tg(fn, okText) {
+      $tgMsg.innerHTML = ''; $webhookInfo.textContent = '執行中…';
+      try {
+        const r = await call(fn);
+        const info = r && (r.info || (r.url !== undefined ? null : r));
+        $webhookInfo.innerHTML = '';
+        if (okText) $webhookInfo.append(el('span', { class: 'summary ok' }, okText), ' ');
+        if (r && r.url) $webhookInfo.append(el('span', { class: 'meta' }, r.url), el('br'));
+        if (info && typeof info === 'object' && 'url' in info) {
+          $webhookInfo.append(el('span', { class: 'meta' }, `目前 webhook：${info.url || '（未登記）'} · 待處理 ${info.pending_update_count || 0}${info.last_error_message ? ' · 最後錯誤：' + info.last_error_message : ''}`));
+        } else if (r && r.chatId) {
+          $webhookInfo.append(el('span', { class: 'meta' }, `chat ${r.chatId}`));
+        }
+      } catch (err) {
+        $webhookInfo.textContent = '';
+        $tgMsg.append(errorBox(err));
+      }
+    }
+    async function em(fn, okText) {
+      $emMsg.innerHTML = '';
+      try {
+        const r = await call(fn);
+        $emMsg.append(el('span', { class: 'summary ok' }, okText || `掃了 ${r.scanned} 串，排入 ${r.enqueued.length} 個 job${r.enqueued.length ? '：' + r.enqueued.map((x) => x.subject || x.threadId).join('、') : ''}；略過 ${r.skipped}`));
+      } catch (err) {
+        $emMsg.append(errorBox(err));
+      }
+    }
+  }
+
   // ---- 尚未實作的分頁 ----------------------------------------------------------
 
   function renderPlaceholder(item) {
@@ -1393,7 +1502,7 @@
 
   // ---- 路由 ------------------------------------------------------------------
 
-  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings, cron: renderCron, skills: renderSkills };
+  const VIEWS = { dashboard: renderDashboard, doctor: renderDoctor, models: renderModels, chat: renderChat, tools: renderTools, logs: renderLogs, memory: renderMemory, settings: renderSettings, cron: renderCron, skills: renderSkills, channels: renderChannels };
   NAV.forEach((item) => { if (!VIEWS[item.id]) VIEWS[item.id] = renderPlaceholder(item); });
 
   function currentRoute() {

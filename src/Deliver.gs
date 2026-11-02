@@ -4,7 +4,7 @@
  * - doc：在 Drive「GAS Agent/reports」建一份 Google 文件，標題「<name> YYYY-MM-DD」，內文用 Docs 輕量 markdown（Tools_Docs.gs 的 appendLiteMarkdown_）。
  * - email：寄給 OWNER_EMAIL。只寄給 owner 自己不算外發，不走審批、不經 gmail_send 工具。
  * - none：不投遞（結果仍在 Queue job 的 payload.result 與 session 裡）。
- * Telegram 留 M6。內容組裝（buildDeliveryContent_）是純函式；實際送出的 handler 可注入供測試。
+ * - telegram（M6）：送到 owner 的 Telegram chat（Config telegram_owner_chat_id，沒有就用白名單第一個 user id）。內容組裝（buildDeliveryContent_）是純函式；實際送出的 handler 可注入供測試。
  */
 
 /** 投遞文件放的資料夾。 */
@@ -98,7 +98,7 @@ function sendOwnerEmail_(to, subject, body) {
  * 依 deliver_to 投遞。不 throw：失敗回 ok=false 讓呼叫端記進 last_status。
  * @param {{name: string, id: (string|undefined), schedule: (string|undefined), deliver_to: string}} cron
  * @param {!Object} result runTurn 摘要（見 buildDeliveryContent_）
- * @param {{createDoc: (Function|undefined), sendEmail: (Function|undefined), ownerEmail: (string|undefined), now: (Function|undefined)}=} deps
+ * @param {{createDoc: (Function|undefined), sendEmail: (Function|undefined), sendTelegram: (Function|undefined), telegramChatId: (string|undefined), ownerEmail: (string|undefined), now: (Function|undefined)}=} deps
  * @return {{channel: string, ok: boolean, ref: string, id: string, summary: string, error: string}}
  */
 function deliverResult_(cron, result, deps) {
@@ -116,6 +116,16 @@ function deliverResult_(cron, result, deps) {
       if (!to) throw new Error('OWNER_EMAIL 未設定。');
       (deps.sendEmail || sendOwnerEmail_)(to, content.subject, content.body);
       return { channel: 'email', ok: true, ref: to, id: '', summary: `已寄到 ${to}（${content.subject}）`, error: '' };
+    }
+    if (target === 'telegram') {
+      let chatId = deps.telegramChatId;
+      if (chatId === undefined) {
+        const ccfg = getChannelConfig_();
+        chatId = ccfg.telegramOwnerChatId || ccfg.telegramAllowedUserIds[0] || '';
+      }
+      if (!chatId) throw new Error('沒有 Telegram chat id：先在 Telegram 對 bot 說一句話，或在「通道」分頁填白名單 user id。');
+      (deps.sendTelegram || ((c, t) => telegramSend_(c, t)))(String(chatId), `📋 ${content.title}\n\n${content.body}`);
+      return { channel: 'telegram', ok: true, ref: String(chatId), id: '', summary: `已送到 Telegram chat ${chatId}`, error: '' };
     }
     throw new Error(`未知的 deliver_to：${target}`);
   } catch (err) {

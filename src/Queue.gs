@@ -2,8 +2,8 @@
  * @fileoverview Queue runner（M4）：job 狀態機、LockService 防重入、checkpoint 續跑、cron 到期掃描。
  *
  * installAgent() 裝一支每分鐘的 time-driven trigger 指向 queueTick()。trigger 每日總時間只有 90 分鐘，
- * 所以閒置時必須幾乎零成本地 return：只讀兩個 Script Property（QUEUE_DIRTY = 有 queued job；
- * CRON_NEXT_RUN = 最早到期的排程時間），兩者都沒到就不開 spreadsheet。
+ * 所以閒置時必須幾乎零成本地 return：只讀三個 Script Property（QUEUE_DIRTY = 有 queued job；
+ * CRON_NEXT_RUN = 最早到期的排程時間；EMAIL_NEXT_SCAN = Email 指令信下次掃描，M6），都沒到就不開 spreadsheet。
  *
  * 每次 tick（整體預算 QUEUE_TICK_BUDGET_MS）：
  *   tryLock → 掃 Cron 到期 → 把卡在 running 超過 10 分鐘的 job 重排 / 判失敗 → 取最舊的 queued job → running →
@@ -11,7 +11,8 @@
  * 一次 tick 最多跑一個 job。
  *
  * Job type：
- *   turn          聊天台「背景執行」：payload {message, providerId, systemExtra, channel, mode}，session_id 可空（會建新）
+ *   turn          聊天台「背景執行」或通道（M6 telegram / email）：payload {message, providerId, systemExtra, channel, mode, external_id,
+ *                 telegram_chat_id | email_thread_id}，session_id 可空（會建新；通道 job 的新 session 帶 external_id）；通道 job 結束後 deliverTurnToChannel_
  *   continuation  續跑：payload {message, origin: checkpoint|approval, continuations, cron?}，接在同一 session
  *   cron          排程：payload {cron_id, name, prompt, deliver_to, model_pin, skills}；建新 session（channel cron）、mode autonomous、skills 全文注入（M5）、結束後投遞
  *   curation      記憶整理：session_id 指定 session
@@ -183,6 +184,7 @@ function publicJob_(j) {
       message: p.message ? truncateText_(String(p.message), 300).text : '',
       origin: p.origin || '', continuations: toNumber_(p.continuations, 0), cron: p.cron || (p.cron_id ? { cron_id: p.cron_id, name: p.name, deliver_to: p.deliver_to } : null),
       mode: p.mode || '', providerId: p.providerId || '', approval_id: p.approval_id || '',
+      channel: p.channel || '', external_id: p.external_id || '',
       result: p.result || null,
     },
   };
@@ -210,7 +212,8 @@ function jobSummary_(j) {
   if (j.type === 'cron') return `排程「${p.name || p.cron_id || ''}」`;
   if (j.type === 'continuation') return `${p.origin === 'approval' ? '審批後續跑' : '續跑'}${p.continuations ? `（第 ${p.continuations} 次）` : ''}${p.cron ? `：排程「${p.cron.name}」` : ''}`;
   if (j.type === 'curation') return '記憶整理';
-  return truncateText_(String(p.message || '').replace(/\s+/g, ' '), 80).text;
+  const prefix = p.channel === 'telegram' ? '[Telegram] ' : p.channel === 'email' ? `[Email] ${p.email_subject ? p.email_subject + '：' : ''}` : '';
+  return prefix + truncateText_(String(p.message || '').replace(/\s+/g, ' '), 80).text;
 }
 
 // ---- tick ----------------------------------------------------------------------------------------
@@ -229,7 +232,9 @@ function queueTick() {
   const dirty = getProp_(PROP.QUEUE_DIRTY) === '1';
   const nextCron = getProp_(PROP.CRON_NEXT_RUN);
   const cronDue = !!nextCron && new Date(nextCron).getTime() <= Date.now();
-  if (!dirty && !cronDue) return;
+  const nextEmail = getProp_(PROP.EMAIL_NEXT_SCAN);
+  const emailDue = !!nextEmail && new Date(nextEmail).getTime() <= Date.now();
+  if (!dirty && !cronDue && !emailDue) return;
   queueTickCore_({});
 }
 
@@ -237,18 +242,26 @@ function queueTick() {
  * tick 的本體。所有依賴可注入。
  * @param {{store: (Object|undefined), cronStore: (Object|undefined), lock: (Object|undefined), now: (Function|undefined),
  *   budgetMs: (number|undefined), runJob: (Function|undefined), sessionDeps: (Object|undefined), deliverDeps: (Object|undefined)}} deps
- * @return {{skipped: string, cronEnqueued: !Array<string>, recovered: !Array<string>, ran: ?Object, remaining: number, cronError: string}}
+ * @return {{skipped: string, cronEnqueued: !Array<string>, recovered: !Array<string>, ran: ?Object, remaining: number, cronError: string, emailScan: ?Object}}
  */
 function queueTickCore_(deps) {
   deps = deps || {};
   const now = deps.now || (() => Date.now());
   const started = now();
   const lock = deps.lock || scriptLock_();
-  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '' };
+  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '', emailScan: null };
   if (!lock.tryLock(5000)) { report.skipped = 'locked'; return report; }
   try {
     const store = deps.store || sheetQueueStore_();
     const cronStore = deps.cronStore || sheetCronStore_();
+
+    // 0. M6：Email 指令信到期就掃一次（旗標沒到會立刻回 null）
+    try {
+      report.emailScan = (deps.emailScan || emailScanIfDue_)(Object.assign({ now, enqueue: (type, payload, sid) => enqueue_(type, payload, sid, { store }) }, deps.emailDeps || {}));
+    } catch (err) {
+      report.emailScan = { error: String(err && err.message || err) };
+      console.warn('掃 Email 指令信失敗：' + report.emailScan.error);
+    }
 
     // 1. 到期的排程入列
     try {
@@ -380,6 +393,7 @@ function runTurnJob_(job, deps) {
     systemExtra: p.systemExtra || '',
     mode: p.mode || 'interactive',
     skills: p.skills || (p.cron && p.cron.skills) || '',
+    externalId: p.external_id || '',
   }, sessionDeps);
   if (r.sessionId) job.session_id = r.sessionId;
 
@@ -392,12 +406,17 @@ function runTurnJob_(job, deps) {
         message: CONTINUATION_PROMPT, origin: 'checkpoint', continuations: continuations + 1,
         channel: p.channel || 'admin', providerId: p.providerId || '', systemExtra: p.systemExtra || '', mode: p.mode || 'interactive',
         skills: p.skills || (p.cron && p.cron.skills) || '', cron: p.cron || null, root_job_id: p.root_job_id || job.id,
+        external_id: p.external_id || '', telegram_chat_id: p.telegram_chat_id || '', email_thread_id: p.email_thread_id || '',
       }, r.sessionId, { store: deps.store });
       result.continued_by = next.id;
     } else {
       result.continuation_exhausted = true;
     }
   }
+
+  // M6：Telegram / Email 來的 job 每一輪（含續跑）都把文字送回原通道；待審批附按鈕 / 說明。投遞失敗記 error 但 state 不改。
+  const channelDelivery = deliverTurnToChannel_(p, result, Object.assign({ now: deps.now }, deps.channelDeps || {}));
+  if (channelDelivery) result.channel_delivery = channelDelivery;
 
   // cron：最終才投遞並更新 last_status
   if (p.cron) {
@@ -412,7 +431,8 @@ function runTurnJob_(job, deps) {
     }
   }
   // 投遞失敗：state=failed 並把原因放 error 欄，但結果保留；不自動重試（重跑會再花一次模型費用）。
-  return { state, result, error: state === 'failed' && result.delivery ? result.delivery.error : '' };
+  const error = state === 'failed' && result.delivery ? result.delivery.error : (channelDelivery && !channelDelivery.ok ? channelDelivery.error : '');
+  return { state, result, error };
 }
 
 /**

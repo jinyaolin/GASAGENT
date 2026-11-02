@@ -250,7 +250,7 @@ function adminListSessions(limit) {
  */
 function publicSession_(s) {
   return {
-    id: s.id, channel: s.channel, title: s.title, summary: s.summary, status: s.status, turns: s.turns, token_est: s.token_est,
+    id: s.id, channel: s.channel, external_id: s.external_id, title: s.title, summary: s.summary, status: s.status, turns: s.turns, token_est: s.token_est,
     compact_seq: s.compact_seq, last_curated_turn: s.last_curated_turn, has_embedding: !!s.embedding,
     created: fmtDate_(s.created), last_active: fmtDate_(s.last_active),
   };
@@ -691,6 +691,120 @@ function adminSetSkillsFolder(folderIdOrUrl) {
   skillsFolderCache_ = null;
   invalidateSkillIndex_();
   return adminListSkills();
+}
+
+// ---- M6：通道分頁 -----------------------------------------------------------------------------
+
+/**
+ * 通道分頁：設定 + token / secret 提示 + webhook URL（給 setWebhook 用）。
+ * @return {!Object}
+ */
+function adminGetChannelSettings() {
+  assertOwner();
+  ensureToolConfigDefaults_();
+  const cfg = getChannelConfig_();
+  const token = getTelegramToken_();
+  const secret = getTelegramSecret_();
+  let webhookUrl = '';
+  let webhookUrlError = '';
+  if (cfg.telegramWebhookUrl && secret) {
+    try { webhookUrl = telegramWebhookUrl_(cfg.telegramWebhookUrl, secret); } catch (err) { webhookUrlError = String(err && err.message || err); }
+  }
+  return {
+    config: cfg,
+    defaults: CHANNEL_CONFIG_DEFAULTS,
+    telegram: { hasToken: !!token, tokenHint: keyHint_(token), hasSecret: !!secret, secretHint: secret ? secret.slice(0, 4) + '…' + secret.slice(-4) : '', webhookUrl, webhookUrlError },
+    email: { owner: getOwnerEmail_(), nextScan: getProp_(PROP.EMAIL_NEXT_SCAN) },
+    adminUrl: (() => { try { return ScriptApp.getService().getUrl() || ''; } catch (err) { return ''; } })(),
+  };
+}
+
+/**
+ * 通道分頁：儲存（token 非空才寫；regenerateSecret 重新產生 secret，之後要重新 setWebhook）。
+ * @param {!Object} input
+ * @return {!Object} adminGetChannelSettings()
+ */
+function adminSaveChannelSettings(input) {
+  assertOwner();
+  saveChannelConfig_(input || {});
+  return adminGetChannelSettings();
+}
+
+/**
+ * 通道分頁：清除 Telegram token。
+ * @return {!Object}
+ */
+function adminClearTelegramToken() {
+  assertOwner();
+  setTelegramToken_('');
+  return adminGetChannelSettings();
+}
+
+/**
+ * 通道分頁：向 Telegram 登記 webhook（部署 B 網址 + secret）。
+ * @return {{url: string, result: *, info: *}}
+ */
+function adminTelegramSetWebhook() {
+  assertOwner();
+  const r = telegramSetWebhook_();
+  return { url: r.url.replace(/key=[^&]+/, 'key=…'), result: r.result, info: telegramGetWebhookInfo_() };
+}
+
+/**
+ * 通道分頁：目前 webhook 狀態（url 遮掉 secret、pending、最後錯誤）。
+ * @return {!Object}
+ */
+function adminTelegramWebhookInfo() {
+  assertOwner();
+  const info = telegramGetWebhookInfo_() || {};
+  return Object.assign({}, info, { url: String(info.url || '').replace(/key=[^&]+/, 'key=…') });
+}
+
+/**
+ * 通道分頁：移除 webhook（停用 Telegram 入口）。
+ * @return {*}
+ */
+function adminTelegramDeleteWebhook() {
+  assertOwner();
+  return telegramDeleteWebhook_();
+}
+
+/**
+ * 通道分頁：對 owner 的 chat 送一則測試訊息（需要 owner 先對 bot 說過話，或填白名單 id）。
+ * @return {{chatId: string}}
+ */
+function adminTelegramTest() {
+  assertOwner();
+  const cfg = getChannelConfig_();
+  const chatId = cfg.telegramOwnerChatId || cfg.telegramAllowedUserIds[0] || '';
+  if (!chatId) throw new Error('沒有 chat id：先填白名單 user id（私聊的 chat id = user id）。');
+  telegramSend_(chatId, `✅ GAS Agent 測試訊息 ${fmtDate_(new Date())}。直接輸入任務即可；/help 看指令。`);
+  return { chatId };
+}
+
+/**
+ * 通道分頁：立刻掃一次 Email 指令信（不等 trigger）。
+ * @return {!Object} scanEmailInbox_ 報告
+ */
+function adminEmailScanNow() {
+  assertOwner();
+  const cfg = getChannelConfig_();
+  if (!cfg.emailEnabled) throw new Error('Email 通道尚未啟用。');
+  ensureGmailLabel_(cfg.emailInboxLabel);
+  const r = scanEmailInbox_({ cfg, ownerEmail: getOwnerEmail_(), gmail: defaultEmailGmail_(cfg), sessionStore: sheetSessionStore_(), enqueue: (type, payload, sid) => enqueue_(type, payload, sid) });
+  refreshEmailNextScanProp_(cfg, new Date(Date.now() + cfg.emailScanEveryMinutes * 60000));
+  return r;
+}
+
+/**
+ * 通道分頁：確保 Gmail 標籤存在。
+ * @return {{label: string}}
+ */
+function adminEmailEnsureLabel() {
+  assertOwner();
+  const cfg = getChannelConfig_();
+  ensureGmailLabel_(cfg.emailInboxLabel);
+  return { label: cfg.emailInboxLabel };
 }
 
 /**
