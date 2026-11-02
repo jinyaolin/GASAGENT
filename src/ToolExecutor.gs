@@ -391,7 +391,8 @@ function spillRead_(store, fileId, offset, limit) {
  * @param {string} name 工具名
  * @param {*} args 模型給的參數
  * @param {{sessionId: (string|undefined), mode: (string|undefined), jobId: (string|undefined),
- *   approved: (boolean|undefined)}=} ctx approved=true 表示 owner 已批准（略過審批判斷；RBAC 仍檢）
+ *   approved: (boolean|undefined), approveWrites: (boolean|undefined)}=} ctx approved=true 表示 owner 已批准（略過審批判斷；RBAC 仍檢）；
+ *   approveWrites=true（M6 群聊模式：非 owner 觸發）表示 R 以外的工具一律送審批
  * @param {{registry: (ToolRegistry|undefined), config: (ToolConfig|undefined),
  *   sink: ({audit: Function, approval: Function}|undefined), spill: ({write: Function, read: Function}|undefined)}=} deps
  * @return {ToolOutcome}
@@ -459,6 +460,8 @@ function executeTool_(name, args, ctx, deps) {
     }
   } else if (!ctx.approved && needsApproval_(tool, config.approvalPolicy, mode)) {
     reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；審批策略 ${config.approvalPolicy}；模式 ${mode}`;
+  } else if (!ctx.approved && ctx.approveWrites && tool.risk !== 'R') {
+    reason = `風險 ${tool.risk}（${RISK_LABEL[tool.risk]}）；由群組成員（非 owner）觸發，寫入類動作一律送審`;
   }
   if (reason) {
     const approvalId = newApprovalId_();

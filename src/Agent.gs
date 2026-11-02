@@ -181,7 +181,8 @@ function stopMessage_(stopped, detail, steps) {
  * 跑一輪。
  * @param {{message: string, history: (!Array<!Object>|undefined), providerId: (string|undefined),
  *   sessionId: (string|undefined), mode: (string|undefined), systemExtra: (string|undefined),
- *   contextBlocks: (!Array<string>|undefined)}} input
+ *   contextBlocks: (!Array<string>|undefined), approveWrites: (boolean|undefined)}} input
+ *   approveWrites（M6 群聊）：R 以外的工具一律送審批
  *   history：先前的訊息（中立格式，可含 assistant tool_calls 與 tool 訊息）；contextBlocks：附加到 system prompt 的區塊
  * @param {{chat: (Function|undefined), execute: (Function|undefined), registry: (ToolRegistry|undefined),
  *   config: (ToolConfig|undefined), executeDeps: (Object|undefined), now: (Function|undefined),
@@ -260,7 +261,7 @@ function runTurn_(input, deps) {
       } else if (now() - started > budgetMs) {
         outcome = { name: tc.name, status: 'error', ok: false, ms: 0, approvalId: '', spill: null, result: null, error: 'time_budget', content: toolErrorText_('time_budget', '已達單輪時間預算，此呼叫未執行。') };
       } else {
-        outcome = execute(tc.name, tc.args || {}, { sessionId, mode }, deps.executeDeps);
+        outcome = execute(tc.name, tc.args || {}, { sessionId, mode, approveWrites: !!input.approveWrites }, deps.executeDeps);
       }
       if (outcome.status === 'pending_approval' && outcome.approvalId) pendingKeys[key] = outcome.approvalId;
 

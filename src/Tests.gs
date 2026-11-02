@@ -95,6 +95,7 @@ function smokeTestTable_() {
     ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字直接排隊（telegram_ack 開才先回收到；沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批、附件存 Drive 後排隊', testTelegramHandle_, 'pure'],
     ['email: 內文去引用 / 簽名、掃描只處理 owner 未加星且非 agent 回覆的信並加星、thread 沿用 session、到期旗標', testEmailChannel_, 'pure'],
     ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；非 Telegram 來源停在審批時推 Telegram 通知；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
+    ['telegram 群組：只在 @bot / 回覆 bot / 指令時反應；/group on 群聊模式（成員共用 session、有工具但寫入送審、無記憶、MEMBER_SYSTEM_EXTRA）、/group guest 訪客模式（獨立 session、無工具）、/group off；群組回覆 reply_to', testTelegramGroup_, 'pure'],
   ];
 }
 
@@ -2487,4 +2488,129 @@ function testChannelDelivery_() {
   const rf = runTurnJob_(j3, { store: q.store, cronStore: cron.store, budgetMs: 100000, runSessionTurn: () => ({ text: 'ok', steps: [], stopped: '', sessionId: 's', usage: { prompt: 0, completion: 0 }, llmCalls: 1, ms: 1 }), channelDeps: { sendTelegram: () => { throw new Error('tg down'); } } });
   assertEqual_([rf.state, rf.error, rf.result.channel_delivery.ok], ['done', 'tg down', false], '投遞失敗記 error');
   setProp_(PROP.QUEUE_DIRTY, '');
+}
+
+/** @return {!Object} 群組訊息 update */
+function tgGroupMessage_(text, userId, chatId, extra) {
+  return { update_id: 1, message: Object.assign({ message_id: 70, from: { id: Number(userId), username: 'u' + userId }, chat: { id: Number(chatId), type: 'supergroup' }, text }, extra || {}) };
+}
+
+function testTelegramGroup_() {
+  // 解析：chatType / mentions / reply-to
+  const g = parseTelegramUpdate_(tgGroupMessage_('@MyAgentBot 幫我看一下 @someone', 111, -100));
+  assertEqual_([g.chatType, g.mentions, g.chatId], ['supergroup', ['myagentbot', 'someone'], '-100'], '群組解析');
+  const rp = parseTelegramUpdate_(tgGroupMessage_('對，就是這個', 111, -100, { reply_to_message: { message_id: 3, from: { id: 999, is_bot: true, username: 'MyAgentBot' } } }));
+  assertEqual_([rp.replyToIsBot, rp.replyToUserId], [true, '999'], '回覆 bot');
+  assertEqual_([telegramAddressedToBot_(g, 'MyAgentBot', '999'), telegramAddressedToBot_(rp, 'MyAgentBot', '999'), telegramAddressedToBot_(rp, 'MyAgentBot', '123'),
+    telegramAddressedToBot_(parseTelegramUpdate_(tgGroupMessage_('/status', 111, -100)), 'MyAgentBot', ''), telegramAddressedToBot_(parseTelegramUpdate_(tgGroupMessage_('沒叫你', 111, -100)), 'MyAgentBot', '999')],
+    [true, true, false, true, false], '叫到 bot 的判斷');
+  assertEqual_(stripBotMention_('@MyAgentBot 幫我看一下 @someone', 'MyAgentBot'), '幫我看一下 @someone', '去掉 @bot 保留別人');
+  assertEqual_(parseChannelConfig_({ telegram_open_groups: '-100, abc, -200' }).telegramOpenGroups, ['-100', '-200'], 'open_groups 解析（負數 id）');
+  // 流程
+  const f = fakeTelegramDeps_({ botUsername: 'MyAgentBot', botId: '999' });
+  f.deps.setConfig = (v) => { f.deps._config.push(v); if (v.telegram_open_groups !== undefined) f.deps.cfg.telegramOpenGroups = toStringList_(v.telegram_open_groups); if (v.telegram_guest_groups !== undefined) f.deps.cfg.telegramGuestGroups = toStringList_(v.telegram_guest_groups); };
+  // 白名單成員在群組沒叫 bot → 安靜略過；叫到 → 排隊到群組 session，去掉 @bot，payload 帶 chat type
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('大家早', 111, -100), f.deps).reason, 'not_addressed', '沒叫到不理');
+  const r1 = handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 今天幾號', 111, -100), f.deps);
+  assertEqual_([r1.action, r1.guest, f.jobs[0].payload.message, f.jobs[0].payload.external_id, f.jobs[0].payload.telegram_chat_id, f.jobs[0].payload.telegram_chat_type, !!f.jobs[0].payload.guest], ['enqueued', false, '今天幾號', '-100', '-100', 'supergroup', false], 'owner 在群組被叫到');
+  assertEqual_(f.deps._config.length, 0, '群組不記 owner chat id');
+  // 回覆 bot 也算叫到
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('再說一次', 111, -100, { reply_to_message: { message_id: 3, from: { id: 999, is_bot: true } } }), f.deps).action, 'enqueued', '回覆 bot');
+  // 非白名單成員：群組未開放 → 拒絕不回話（即使 @bot）
+  const r2 = handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 你好', 555, -100), f.deps);
+  assertEqual_([r2.action, f.sent.length, f.jobs.length], ['rejected', 0, 2], '未開放的群組拒絕訪客');
+  assert_(/user_not_allowed/.test(r2.reason) && /in group -100/.test(r2.reason), 'reason：' + r2.reason);
+  // 非白名單成員不能 /group on
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/group on', 555, -100), f.deps).action, 'rejected', '訪客不能開');
+  // owner /group（私聊提示、狀態、on = 群聊模式）
+  assert_(/只在群組裡有用/.test(handleTelegramUpdate_(tgMessage_('/group on', 111), f.deps).text), '私聊 /group 提示');
+  assert_(/未開放/.test(handleTelegramUpdate_(tgGroupMessage_('/group', 111, -100), f.deps).text), '/group 狀態：未開放');
+  const on = handleTelegramUpdate_(tgGroupMessage_('/group on', 111, -100), f.deps);
+  assertEqual_([on.action, f.deps.cfg.telegramOpenGroups, f.deps.cfg.telegramGuestGroups, f.deps._config[f.deps._config.length - 1]], ['group_on', ['-100'], [], { telegram_open_groups: '-100', telegram_guest_groups: '' }], '/group on 寫 Config');
+  assert_(/群聊模式/.test(on.text) && /@MyAgentBot/.test(on.text), 'on 文字：' + on.text);
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/group on', 111, -100), f.deps).action, 'group_on', '重複 on 不重複加');
+  assertEqual_(f.deps.cfg.telegramOpenGroups, ['-100'], '不重複');
+  assert_(/群聊模式/.test(handleTelegramUpdate_(tgGroupMessage_('/group status', 111, -100), f.deps).text), '/group 狀態：群聊');
+  // 群聊模式：成員 @bot → 與 owner 共用群組 session（external_id = chat id）、payload.member、去掉 @bot；沒叫到不理；成員 /指令忽略；callback 仍要白名單
+  const mj0 = f.jobs.length;
+  const m1 = handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 幫我查一下', 555, -100), f.deps);
+  const mj = f.jobs[f.jobs.length - 1];
+  assertEqual_([m1.action, m1.member, m1.guest, f.jobs.length, mj.payload.message, mj.payload.external_id, mj.payload.member, !!mj.payload.guest], ['enqueued', true, false, mj0 + 1, '幫我查一下', '-100', true, false], '成員排隊到群組 session');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('隨便聊', 555, -100), f.deps).reason, 'not_addressed', '成員沒叫到不理');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/status', 555, -100), f.deps).reason, 'member_command', '成員指令忽略');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/group off', 555, -100), f.deps).reason, 'member_command', '成員不能關');
+  assertEqual_(handleTelegramUpdate_({ update_id: 10, callback_query: { id: 'cb', data: 'apr:apr_1:approve', from: { id: 555 }, message: { message_id: 7, chat: { id: -100, type: 'supergroup' } } } }, f.deps).action, 'rejected', '成員不能按審批');
+  const shared = f.ss.store.create({ channel: 'telegram', external_id: '-100' });
+  handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 再問', 555, -100), f.deps);
+  handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot owner 問', 111, -100), f.deps);
+  assertEqual_([f.jobs[f.jobs.length - 2].session_id, f.jobs[f.jobs.length - 1].session_id, !!f.jobs[f.jobs.length - 1].payload.member], [shared.id, shared.id, false], '成員與 owner 共用 session；owner 不帶 member');
+  f.ss.store.update(Object.assign({}, shared, { status: 'closed' }));
+  // /group guest → 訪客模式（open 清掉、guest 加入）
+  const gm = handleTelegramUpdate_(tgGroupMessage_('/group guest', 111, -100), f.deps);
+  assertEqual_([gm.action, f.deps.cfg.telegramOpenGroups, f.deps.cfg.telegramGuestGroups], ['group_guest', [], ['-100']], '/group guest 寫 Config');
+  assert_(/訪客模式/.test(gm.text), 'guest 文字：' + gm.text);
+  // 訪客模式：訪客 @bot → 訪客 session（<chat>:guest）、payload.guest、去掉 @bot；沒叫到仍不理；訪客的 /指令忽略；附件不處理
+  const jobsBefore = f.jobs.length;
+  const r3 = handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 請問你是誰', 555, -100), f.deps);
+  const gj = f.jobs[f.jobs.length - 1];
+  assertEqual_([r3.action, r3.guest, f.jobs.length, gj.payload.message, gj.payload.external_id, gj.payload.telegram_chat_id, gj.payload.guest, gj.session_id], ['enqueued', true, jobsBefore + 1, '請問你是誰', '-100:guest', '-100', true, ''], '訪客排隊');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('隨便聊', 555, -100), f.deps).reason, 'not_addressed', '訪客沒叫到不理');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('/status', 555, -100), f.deps).reason, 'guest_command', '訪客指令忽略');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot', 555, -100), f.deps).action, 'enqueued', '只 @bot 也排隊（預設訊息）');
+  assertEqual_(f.jobs[f.jobs.length - 1].payload.message, TELEGRAM_GUEST_DEFAULT_MESSAGE, '預設訊息');
+  // 訪客有既有 session 就沿用；owner 的群組 session 與訪客分開
+  const gs = f.ss.store.create({ channel: 'telegram', external_id: '-100:guest' });
+  const os = f.ss.store.create({ channel: 'telegram', external_id: '-100' });
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 再問', 555, -100), f.deps).sessionId, gs.id, '沿用訪客 session');
+  assertEqual_(f.jobs[f.jobs.length - 1].session_id, gs.id, 'job 掛訪客 session');
+  handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot owner 問', 111, -100), f.deps);
+  assertEqual_(f.jobs[f.jobs.length - 1].session_id, os.id, 'owner 用群組 session');
+  // 訪客的 callback（按審批按鈕）仍要過白名單
+  assertEqual_(handleTelegramUpdate_({ update_id: 11, callback_query: { id: 'cb', data: 'apr:apr_1:approve', from: { id: 555 }, message: { message_id: 7, chat: { id: -100, type: 'supergroup' } } } }, f.deps).action, 'rejected', '訪客不能按審批');
+  // /group off
+  const off = handleTelegramUpdate_(tgGroupMessage_('/group off', 111, -100), f.deps);
+  assertEqual_([off.action, f.deps.cfg.telegramOpenGroups, f.deps.cfg.telegramGuestGroups], ['group_off', [], []], '/group off');
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot 還在嗎', 555, -100), f.deps).action, 'rejected', '關閉後訪客又被拒');
+  // 私聊不受影響：不用 @bot
+  assertEqual_(handleTelegramUpdate_(tgMessage_('私聊不用叫', 111), f.deps).action, 'enqueued', '私聊照舊');
+  // runSessionTurn_ 訪客模式：無工具、無記憶快照、無技能索引、GUEST_SYSTEM_EXTRA、不 curation
+  const fake = fakeChat_([{ text: '我是 owner 的助理', stop: 'end' }]);
+  const skills = memorySkillStore_([{ name: 'weekly-report', text: fakeSkillText_('weekly-report') }]);
+  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_(), cfg: fakeAgentConfig_({ curationEveryTurns: 1 }), curate: () => { throw new Error('訪客不該 curation'); } });
+  deps._mem.store.add('user', { content: 'owner 喜歡貓' });
+  const gr = runSessionTurn_({ message: '請問你是誰', channel: 'telegram', externalId: '-100:guest', guest: true }, deps);
+  const sys = fake.calls[0].messages[0].content;
+  assertEqual_([gr.guest, gr.curation, gr.skillProposal, fake.calls[0].tools.length], [true, null, null, 0], '訪客：無工具、不 curation、不提案');
+  assert_(sys.indexOf(GUEST_SYSTEM_EXTRA) !== -1 && !/owner 喜歡貓/.test(sys) && !/可用技能/.test(sys) && !/長期記憶快照/.test(sys), '訪客 system prompt 不含記憶 / 技能：' + sys.slice(-600));
+  assertEqual_([deps._ss.sessions[0].external_id, deps._ss.sessions[0].channel], ['-100:guest', 'telegram'], '訪客 session');
+  // 非訪客照常有工具與快照
+  const fake2 = fakeChat_([{ text: 'ok', stop: 'end' }]);
+  const deps2 = fakeSessionDeps_(fake2.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  runSessionTurn_({ message: 'hi', channel: 'telegram', externalId: '-100' }, deps2);
+  assert_(fake2.calls[0].tools.length > 0 && /長期記憶快照/.test(fake2.calls[0].messages[0].content), 'owner 照常');
+  // runSessionTurn_ 群聊成員模式：有工具（R 直接跑、W 送審批）、無記憶快照、MEMBER_SYSTEM_EXTRA、不 curation、不提案；同一 session 下一輪 owner 的 W 照常
+  const fake3 = fakeChat_([
+    { toolCalls: [{ id: 'a', name: 'fake_echo', args: { text: 'r' } }, { id: 'b', name: 'fake_write', args: { text: 'w' } }], stop: 'tool_calls' },
+    { text: '讀到了，寫入等 owner 批准', stop: 'end' },
+    { toolCalls: [{ id: 'c', name: 'fake_write', args: { text: 'w2' } }], stop: 'tool_calls' },
+    { text: 'owner 寫入完成', stop: 'end' },
+  ]);
+  const deps3 = fakeSessionDeps_(fake3.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_({ approvalPolicy: 'never' }), cfg: fakeAgentConfig_({ curationEveryTurns: 1 }), curate: () => { throw new Error('成員不該 curation'); } });
+  deps3._mem.store.add('user', { content: 'owner 喜歡貓' });
+  const mr = runSessionTurn_({ message: '幫我查一下再寫', channel: 'telegram', externalId: '-100', member: true }, deps3);
+  const msys = fake3.calls[0].messages[0].content;
+  assertEqual_([mr.member, mr.guest, mr.curation, mr.skillProposal, mr.steps.map((x) => x.status)], [true, false, null, null, ['ok', 'pending_approval']], '成員：R 跑、W 送審、不 curation');
+  assert_(fake3.calls[0].tools.length > 0 && msys.indexOf(MEMBER_SYSTEM_EXTRA) !== -1 && !/owner 喜歡貓/.test(msys) && !/長期記憶快照/.test(msys), '成員 system prompt 有工具、無記憶：' + msys.slice(-400));
+  assert_(/由群組成員（非 owner）觸發/.test(deps3._sink.approvals[0].reason), '審批理由標成員：' + deps3._sink.approvals[0].reason);
+  const orr = runSessionTurn_({ message: '我來寫', channel: 'telegram', externalId: '-100', sessionId: mr.sessionId }, deps3);
+  assertEqual_([orr.sessionId === mr.sessionId, orr.steps.map((x) => x.status), /長期記憶快照/.test(fake3.calls[2].messages[0].content)], [true, ['ok'], true], 'owner 同 session 的 W 直接跑、帶快照');
+  // 群組回覆 reply_to 觸發訊息；私聊不帶
+  const sent = [];
+  const sendTg = (c, t, o) => { sent.push(o); return { messages: 1 }; };
+  deliverTurnToChannel_({ channel: 'telegram', telegram_chat_id: '-100', telegram_chat_type: 'supergroup', telegram_message_id: 70 }, { text: 'x', steps: [] }, { sendTelegram: sendTg });
+  deliverTurnToChannel_({ channel: 'telegram', telegram_chat_id: '111', telegram_chat_type: 'private', telegram_message_id: 5 }, { text: 'x', steps: [] }, { sendTelegram: sendTg });
+  assertEqual_([sent[0].replyTo, sent[1].replyTo], [70, 0], '群組 reply_to、私聊不帶');
+  // guestToolConfig_
+  const gcfg = guestToolConfig_(fakeM5ToolConfig_());
+  assert_(Object.keys(gcfg.rbac).length > 0 && Object.keys(gcfg.rbac).every((k) => !gcfg.rbac[k].read && !gcfg.rbac[k].write), '訪客 RBAC 全關');
 }

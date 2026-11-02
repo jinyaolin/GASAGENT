@@ -467,7 +467,9 @@ function closeSession_(s, deps) {
  * 聊天台 / Queue 共同入口：一輪含持久化。
  * @param {{message: string, sessionId: (string|undefined), channel: (string|undefined), providerId: (string|undefined),
  *   systemExtra: (string|undefined), mode: (string|undefined), skills: (string|undefined), externalId: (string|undefined)}} input
- *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt；externalId（M6）：通道識別，新建 session 時寫入 external_id
+ *   skills（M5）：cron 的 `skills` 欄（逗號分隔技能名），全文注入 system prompt；externalId（M6）：通道識別，新建 session 時寫入 external_id；
+ *   guest（M6）：訪客模式——工具全關、不注入記憶與技能、附 GUEST_SYSTEM_EXTRA、不 curation、不自動提案；
+ *   member（M6）：群聊模式的非 owner 成員——工具可用但 R 以外送審批、不注入記憶快照、附 MEMBER_SYSTEM_EXTRA、不 curation、不自動提案
  * @param {{store: (Object|undefined), cfg: (AgentConfig|undefined), toolConfig: (ToolConfig|undefined),
  *   registry: (ToolRegistry|undefined), memoryStore: (Object|undefined), skillStore: (Object|undefined), chat: (Function|undefined),
  *   summarize: (Function|undefined), curate: (Function|undefined), now: (Function|undefined), turnDeps: (Object|undefined)}=} deps
@@ -508,10 +510,13 @@ function runSessionTurn_(input, deps) {
       sessionId: s ? s.id : '', sessionCreated: false, sessionReason: '', turns: s ? s.turns : 0, compacted: false, curation: null, command: 'status', skills: { loaded: [], missing: [] }, skillProposal: null };
   }
 
-  const toolConfig = deps.toolConfig || getToolConfig_();
-  const registry = deps.registry || getToolRegistry_();
+  const guest = !!input.guest;
+  const member = !guest && !!input.member;
+  const toolConfig = guest ? guestToolConfig_(deps.toolConfig || getToolConfig_()) : (deps.toolConfig || getToolConfig_());
+  // 訪客用空 registry：模型沒有工具清單，system prompt 也不會有記憶 / 技能規則與「目前未開放」清單。
+  const registry = guest ? buildToolRegistry_([]) : (deps.registry || getToolRegistry_());
   const memoryStore = deps.memoryStore || sheetMemoryStore_();
-  const skillStore = deps.skillStore || (registry.byName.skill_load ? driveSkillStore_() : null);
+  const skillStore = guest ? null : (deps.skillStore || (registry.byName.skill_load ? driveSkillStore_() : null));
 
   // M5：/<skill-name> → 技能全文注入；找不到就直接回錯誤文字（不打模型、不建 session）。
   const skillBlocks = [];
@@ -552,7 +557,7 @@ function runSessionTurn_(input, deps) {
   }
 
   // 2. 記憶快照 + 先前摘要 → system prompt 附加區塊
-  const snapshot = buildMemorySnapshot_(memoryStore, cfg);
+  const snapshot = (guest || member) ? '' : buildMemorySnapshot_(memoryStore, cfg);
   const contextBlocks = [];
   if (snapshot) contextBlocks.push(snapshot);
   if (session.summary) contextBlocks.push('## 先前對話摘要（本 session 較早的部分已壓縮）\n' + session.summary);
@@ -581,8 +586,9 @@ function runSessionTurn_(input, deps) {
     providerId: input.providerId || session.model_override || '',
     sessionId: session.id,
     mode: input.mode || 'interactive',
-    systemExtra: input.systemExtra || '',
+    systemExtra: (guest ? GUEST_SYSTEM_EXTRA + '\n' : member ? MEMBER_SYSTEM_EXTRA + '\n' : '') + (input.systemExtra || ''),
     contextBlocks,
+    approveWrites: member,
   }, turnDeps);
 
   // 4. 寫回這輪新增的訊息（system 與 history 之外的）
@@ -598,7 +604,7 @@ function runSessionTurn_(input, deps) {
   // 4b. M5：複雜任務（≥ SKILL_PROPOSE_MIN_STEPS 步、順利結束）後請模型評估一次是否值得存成技能；同 session 只問一次。
   //     這次評估的訊息不寫進 Messages（避免污染對話），結果放 skillProposal 給 UI 顯示；提案本身在 Approvals。
   let skillProposal = null;
-  if (shouldNudgeSkillProposal_(r, session, { hasSkillManage: !!(registry.byName.skill_manage && isToolAllowed_(registry.byName.skill_manage, toolConfig.rbac)), elapsedMs: now() - started })) {
+  if (!guest && !member && shouldNudgeSkillProposal_(r, session, { hasSkillManage: !!(registry.byName.skill_manage && isToolAllowed_(registry.byName.skill_manage, toolConfig.rbac)), elapsedMs: now() - started })) {
     session.skill_proposed_turn = session.turns;
     store.update(session);
     try {
@@ -638,7 +644,7 @@ function runSessionTurn_(input, deps) {
 
   // 5. Curation nudge：每 K 輪一次，且本輪沒花太久才做（避免撞 6 分鐘）
   let curation = null;
-  if (cfg.curationEveryTurns > 0 && session.turns - session.last_curated_turn >= cfg.curationEveryTurns && (now() - started) < 180000) {
+  if (!guest && !member && cfg.curationEveryTurns > 0 && session.turns - session.last_curated_turn >= cfg.curationEveryTurns && (now() - started) < 180000) {
     try {
       curation = (deps.curate || curateSession_)(session, { store, cfg, memoryStore, chat: deps.chat, toolConfig, registry });
     } catch (err) {
@@ -648,6 +654,6 @@ function runSessionTurn_(input, deps) {
 
   return Object.assign(r, {
     sessionId: session.id, sessionCreated: resolved.created, sessionReason: resolved.reason, turns: session.turns,
-    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal, approvalNotice,
+    compacted, curation, command: parsed.command, skills: skillsReport, skillProposal, approvalNotice, guest, member,
   });
 }

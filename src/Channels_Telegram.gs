@@ -8,6 +8,13 @@
  * 結果經 deliverTurnToTelegram_ 送回；待審批的動作附「批准 / 拒絕」按鈕，按下走 callback_query → decideApproval_。
  *
  * 指令：/new（新 session）/status /model [provider id] /skills /help；其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
+ * 群組：只在「@bot 提到它」「回覆它的訊息」或「/指令」時反應（私聊不變）。白名單成員在群組裡用 /group 切模式：
+ *   /group on    群聊模式（Config telegram_open_groups）：全群共用一個 session，非白名單成員 @bot 也能用工具，但那一輪
+ *                R 以外的工具一律送審批、不注入 owner 記憶快照、不 curation（payload.member → Sessions.gs）
+ *   /group guest 訪客模式（Config telegram_guest_groups）：非白名單成員獨立 session（<chat id>:guest）、沒有工具、不注入記憶 / 技能
+ *   /group off   只有白名單成員叫得到
+ * 成員（非白名單）的 /指令一律忽略；訪客的附件不處理，群聊成員的附件照常存 Drive。
+ * 審批按鈕任何人都看得到，但 callback 仍要過白名單。bot username 由 getMe 取得存 Config telegram_bot_username。
  * 附件：照片 / 檔案（document / photo / video / audio / voice）用 getFile 下載存到 Drive `GAS Agent/attachments/telegram/`，
  * 訊息 = caption（沒有就預設一句）+ 附件註記（名稱 / 類型 / Drive file_id / 網址），agent 用 drive_read_text（PDF / 圖片 OCR）、
  * drive_move、gmail_send attachment_file_ids 等既有工具處理。Bot API 單檔下載上限 20 MB。
@@ -30,7 +37,9 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group']);
+/** 訪客在群組只 @bot 沒說話時的訊息。 */
+const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
 
 // ---- Properties -------------------------------------------------------------------------------------
 
@@ -148,8 +157,9 @@ function telegramApprovalKeyboard_(pending) {
  * @typedef {{
  *   kind: ('message'|'callback'|'other'), updateId: number, chatId: string, userId: string, username: string,
  *   text: string, messageId: number, callbackId: string, callbackData: string, callbackMessageId: number,
- *   attachments: !Array<TelegramAttachment>
+ *   attachments: !Array<TelegramAttachment>, chatType: string, mentions: !Array<string>, replyToUserId: string, replyToIsBot: boolean
  * }} TelegramUpdate
+ * chatType：private / group / supergroup / channel；mentions：訊息裡 @xxx 的 xxx（小寫）；replyTo*：回覆的那則訊息的作者。
  */
 
 /**
@@ -182,7 +192,7 @@ function telegramAttachments_(msg) {
  */
 function parseTelegramUpdate_(update) {
   const u = update || {};
-  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0, attachments: [] };
+  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0, attachments: [], chatType: '', mentions: [], replyToUserId: '', replyToIsBot: false };
   const msg = u.message || u.edited_message || null;
   if (u.callback_query) {
     const cq = u.callback_query;
@@ -191,7 +201,7 @@ function parseTelegramUpdate_(update) {
     out.callbackData = String(cq.data || '');
     out.userId = cq.from ? String(cq.from.id || '') : '';
     out.username = cq.from ? String(cq.from.username || '') : '';
-    if (cq.message) { out.chatId = cq.message.chat ? String(cq.message.chat.id || '') : ''; out.callbackMessageId = toNumber_(cq.message.message_id, 0); }
+    if (cq.message) { out.chatId = cq.message.chat ? String(cq.message.chat.id || '') : ''; out.chatType = cq.message.chat ? String(cq.message.chat.type || '') : ''; out.callbackMessageId = toNumber_(cq.message.message_id, 0); }
     return out;
   }
   if (msg) {
@@ -202,8 +212,50 @@ function parseTelegramUpdate_(update) {
     out.text = String(msg.text || msg.caption || '').trim();
     out.messageId = toNumber_(msg.message_id, 0);
     out.attachments = telegramAttachments_(msg);
+    out.chatType = msg.chat ? String(msg.chat.type || '') : '';
+    const m = out.text.match(/@([A-Za-z0-9_]{3,})/g) || [];
+    out.mentions = m.map((x) => x.slice(1).toLowerCase());
+    if (msg.reply_to_message && msg.reply_to_message.from) {
+      out.replyToUserId = String(msg.reply_to_message.from.id || '');
+      out.replyToIsBot = !!msg.reply_to_message.from.is_bot;
+    }
   }
   return out;
+}
+
+/**
+ * 群組訊息是不是在叫這個 bot：@username、回覆 bot 的訊息、或 /指令。純函式。
+ * @param {TelegramUpdate} u
+ * @param {string} botUsername 不含 @（可空）
+ * @param {string} botId token 冒號前的數字（可空）
+ * @return {boolean}
+ */
+function telegramAddressedToBot_(u, botUsername, botId) {
+  if (botUsername && u.mentions.indexOf(String(botUsername).toLowerCase()) !== -1) return true;
+  if (u.replyToIsBot && (!botId || u.replyToUserId === String(botId))) return true;
+  if (/^\//.test(u.text)) return true;
+  return false;
+}
+
+/**
+ * 把 @bot 從文字拿掉。純函式。
+ * @param {string} text
+ * @param {string} botUsername
+ * @return {string}
+ */
+function stripBotMention_(text, botUsername) {
+  if (!botUsername) return String(text || '').trim();
+  return String(text || '').replace(new RegExp('@' + escapeRegex_(botUsername) + '\\b', 'ig'), '').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * 群組的訪客 session（與 owner 的群組 session 分開，避免訪客看到 owner 的工具結果）。
+ * @param {string} chatId
+ * @param {!Object} store
+ * @return {?SessionRow}
+ */
+function telegramGuestSession_(chatId, store) {
+  return telegramSession_(`${chatId}:guest`, store);
 }
 
 /**
@@ -307,17 +359,30 @@ function telegramRateExceeded_() {
  */
 function handleTelegramUpdate_(rawUpdate, deps) {
   const u = parseTelegramUpdate_(rawUpdate);
-  const report = { action: '', reason: '', jobId: '', sessionId: '', text: '' };
-  const denied = telegramAuthorize_({ key: deps.key, secret: deps.secret, userId: u.userId, allowed: deps.cfg.telegramAllowedUserIds, enabled: deps.cfg.telegramEnabled });
+  const report = { action: '', reason: '', jobId: '', sessionId: '', text: '', guest: false };
+  const isGroup = u.chatType === 'group' || u.chatType === 'supergroup';
+  const whitelisted = !!u.userId && deps.cfg.telegramAllowedUserIds.indexOf(String(u.userId)) !== -1;
+  const groupMode = !isGroup ? '' : deps.cfg.telegramOpenGroups.indexOf(String(u.chatId)) !== -1 ? 'chat' : deps.cfg.telegramGuestGroups.indexOf(String(u.chatId)) !== -1 ? 'guest' : '';
+  // 群組開放：非白名單成員「@bot 叫到」的一般訊息可以進來——群聊模式（member）或訪客模式（guest）；其餘仍走白名單。
+  const member = groupMode === 'chat' && !whitelisted && u.kind === 'message';
+  const guest = groupMode === 'guest' && !whitelisted && u.kind === 'message';
+  const denied = telegramAuthorize_({ key: deps.key, secret: deps.secret, userId: u.userId, allowed: (guest || member) ? [String(u.userId)] : deps.cfg.telegramAllowedUserIds, enabled: deps.cfg.telegramEnabled });
   if (denied) {
     // 不回任何訊息給非白名單的人（避免被拿來探測）；secret 錯直接忽略。
     report.action = 'rejected';
-    report.reason = denied + (u.userId ? ` (user ${u.userId}${u.username ? ' @' + u.username : ''})` : '');
+    report.reason = denied + (u.userId ? ` (user ${u.userId}${u.username ? ' @' + u.username : ''}${isGroup ? ' in group ' + u.chatId : ''})` : '');
     return report;
   }
   if (u.kind === 'other') { report.action = 'ignored'; report.reason = 'unsupported_update'; return report; }
+  // 群組：沒叫到 bot 的訊息安靜略過（Telegram 隱私模式開著時本來就收不到，這裡是第二道）
+  if (isGroup && u.kind === 'message' && !telegramAddressedToBot_(u, deps.botUsername || deps.cfg.telegramBotUsername, deps.botId || '')) {
+    report.action = 'ignored'; report.reason = 'not_addressed'; return report;
+  }
+  if (isGroup && u.kind === 'message') u.text = stripBotMention_(u.text, deps.botUsername || deps.cfg.telegramBotUsername);
+  report.guest = guest;
+  report.member = member;
   if ((deps.rateExceeded || telegramRateExceeded_)()) { report.action = 'rejected'; report.reason = 'rate_limited'; return report; }
-  if (!deps.cfg.telegramOwnerChatId && deps.setConfig && u.chatId) {
+  if (!deps.cfg.telegramOwnerChatId && deps.setConfig && u.chatId && !isGroup && whitelisted) {
     try { deps.setConfig({ telegram_owner_chat_id: u.chatId }); } catch (err) { /* 忽略 */ }
   }
   const store = deps.sessionStore;
@@ -352,6 +417,20 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     return report;
   }
 
+  // 群聊模式的成員：不吃指令；其餘與白名單成員相同，但 payload.member 讓那一輪 R 以外的工具送審、不帶記憶
+  if (member && /^\//.test(u.text) && !u.attachments.length) { report.action = 'ignored'; report.reason = 'member_command'; return report; }
+  // 訪客（訪客模式群組的非白名單成員）：不處理指令與附件，純文字進訪客 session
+  if (guest) {
+    if (/^\//.test(u.text)) { report.action = 'ignored'; report.reason = 'guest_command'; return report; }
+    const gs = telegramGuestSession_(u.chatId, store);
+    const payload = telegramTurnPayload_(u.text || TELEGRAM_GUEST_DEFAULT_MESSAGE, u);
+    payload.external_id = `${u.chatId}:guest`;
+    payload.guest = true;
+    const job = deps.enqueue('turn', payload, gs ? gs.id : '');
+    report.action = 'enqueued'; report.jobId = job.id; report.sessionId = gs ? gs.id : '';
+    return report;
+  }
+
   // 附件：先存 Drive，再把註記接在訊息後面
   let messageText = u.text;
   const savedFiles = [];
@@ -365,7 +444,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
   }
   // 文字訊息
   if (!messageText) { send('目前只接受文字與檔案（照片 / 文件 / 語音），貼圖等不處理。'); report.action = 'ignored'; report.reason = 'no_text'; return report; }
-  const cmd = u.attachments.length ? { command: '', rest: messageText } : parseTelegramCommand_(u.text);
+  const cmd = (u.attachments.length || member) ? { command: '', rest: messageText } : parseTelegramCommand_(u.text);
   const current = telegramSession_(u.chatId, store);
   report.sessionId = current ? current.id : '';
 
@@ -373,8 +452,34 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
       '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
+      '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員也能用工具，寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
     report.text = lines.join('\n'); send(report.text); report.action = 'help'; return report;
+  }
+  if (cmd.command === 'group') {
+    if (!isGroup) { report.text = '/group 只在群組裡有用：把 bot 加進群組後，在群組輸入 /group on 開放其他成員 @bot 提問。'; send(report.text); report.action = 'group'; return report; }
+    const want = cmd.rest.trim().toLowerCase();
+    const here = String(u.chatId);
+    const bot = deps.botUsername || deps.cfg.telegramBotUsername || 'bot';
+    const without = (arr) => arr.filter((x) => x !== here);
+    if (want === 'on' || want === 'guest' || want === 'off') {
+      const open = want === 'on' ? without(deps.cfg.telegramOpenGroups).concat([here]) : without(deps.cfg.telegramOpenGroups);
+      const guestList = want === 'guest' ? without(deps.cfg.telegramGuestGroups).concat([here]) : without(deps.cfg.telegramGuestGroups);
+      if (deps.setConfig) deps.setConfig({ telegram_open_groups: open.join(','), telegram_guest_groups: guestList.join(',') });
+      deps.cfg.telegramOpenGroups = open;
+      deps.cfg.telegramGuestGroups = guestList;
+      report.text = want === 'on'
+        ? `此群組已切成群聊模式：全群共用一個對話，任何成員 @${bot} 都能請它用工具幫忙；非 owner 觸發的寫入 / 寄信 / 分享會先送審批（按鈕只有白名單能按），且那一輪不帶 owner 的記憶。/group guest 改訪客模式、/group off 關閉。`
+        : want === 'guest'
+          ? `此群組已切成訪客模式：任何成員 @${bot} 都會得到回答，但不帶工具、不會透露 owner 的資料。/group on 改群聊模式、/group off 關閉。`
+          : '此群組已關閉開放：只有白名單成員 @bot 或回覆 bot 時會回答。';
+      report.action = 'group_' + want;
+    } else {
+      const mode = deps.cfg.telegramOpenGroups.indexOf(here) !== -1 ? '群聊模式（成員可用工具，寫入送審）' : deps.cfg.telegramGuestGroups.indexOf(here) !== -1 ? '訪客模式（成員無工具）' : '未開放（只有白名單）';
+      report.text = `此群組目前：${mode}。/group on 群聊、/group guest 訪客、/group off 關閉。bot 只在被 @ 提到、被回覆或收到 /指令時反應。`;
+      report.action = 'group';
+    }
+    send(report.text); return report;
   }
   if (cmd.command === 'skills') {
     let names = [];
@@ -423,6 +528,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
   // 一般訊息（含 /<技能名> 與附件）：排隊；Config telegram_ack 開著才先回「收到」
   if (deps.cfg.telegramAck) send(TELEGRAM_ACK_TEXT, { replyTo: u.messageId });
   const payload = telegramTurnPayload_(messageText, u);
+  if (member) payload.member = true;
   if (savedFiles.length) payload.attachments = savedFiles.map((f) => ({ id: f.id, name: f.name, mime_type: f.mime_type }));
   const job = deps.enqueue('turn', payload, current ? current.id : '');
   report.action = 'enqueued'; report.jobId = job.id; report.text = deps.cfg.telegramAck ? TELEGRAM_ACK_TEXT : '';
@@ -437,7 +543,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
  * @return {!Object}
  */
 function telegramTurnPayload_(message, u) {
-  return { message, channel: 'telegram', mode: 'interactive', external_id: u.chatId, telegram_chat_id: u.chatId, telegram_message_id: u.messageId, telegram_user: u.username || u.userId };
+  return { message, channel: 'telegram', mode: 'interactive', external_id: u.chatId, telegram_chat_id: u.chatId, telegram_chat_type: u.chatType || 'private', telegram_message_id: u.messageId, telegram_user: u.username || u.userId };
 }
 
 /**
@@ -450,9 +556,16 @@ function telegramWebhook_(e) {
   try {
     const raw = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
     const cfg = getChannelConfig_();
+    const token = getTelegramToken_();
+    let botUsername = cfg.telegramBotUsername;
+    if (!botUsername && token) {
+      try { botUsername = String(telegramApi_('getMe', {}).username || ''); if (botUsername) setConfigValues_({ telegram_bot_username: botUsername }); } catch (err) { botUsername = ''; }
+    }
     report = handleTelegramUpdate_(raw, {
       key: (e && e.parameter && e.parameter.key) || '',
       cfg,
+      botUsername,
+      botId: token.split(':')[0] || '',
       secret: getTelegramSecret_(),
       sessionStore: sheetSessionStore_(),
       queueStore: sheetQueueStore_(),
@@ -501,7 +614,7 @@ function deliverTurnToTelegram_(chatId, result, deps) {
   const pending = (result.steps || []).filter((s) => s.status === 'pending_approval' && s.approvalId);
   const text = channelReplyText_(result, { approvalHint: pending.length ? '用下方按鈕決定，或到管理頁「紀錄 → 審批」。' : '' });
   const send = deps.sendTelegram || ((c, t, o) => telegramSend_(c, t, o));
-  return send(chatId, text, { replyMarkup: telegramApprovalKeyboard_(pending) }) || { messages: 1 };
+  return send(chatId, text, { replyMarkup: telegramApprovalKeyboard_(pending), replyTo: deps.replyTo || 0 }) || { messages: 1 };
 }
 
 /**

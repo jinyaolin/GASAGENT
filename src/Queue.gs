@@ -395,6 +395,8 @@ function runTurnJob_(job, deps) {
     mode: p.mode || 'interactive',
     skills: p.skills || (p.cron && p.cron.skills) || '',
     externalId: p.external_id || '',
+    guest: !!p.guest,
+    member: !!p.member,
   }, sessionDeps);
   if (r.sessionId) job.session_id = r.sessionId;
 
@@ -407,7 +409,7 @@ function runTurnJob_(job, deps) {
         message: CONTINUATION_PROMPT, origin: 'checkpoint', continuations: continuations + 1,
         channel: p.channel || 'admin', providerId: p.providerId || '', systemExtra: p.systemExtra || '', mode: p.mode || 'interactive',
         skills: p.skills || (p.cron && p.cron.skills) || '', cron: p.cron || null, root_job_id: p.root_job_id || job.id,
-        external_id: p.external_id || '', telegram_chat_id: p.telegram_chat_id || '', email_thread_id: p.email_thread_id || '',
+        external_id: p.external_id || '', telegram_chat_id: p.telegram_chat_id || '', telegram_chat_type: p.telegram_chat_type || '', telegram_message_id: p.telegram_message_id || 0, email_thread_id: p.email_thread_id || '', guest: !!p.guest, member: !!p.member,
       }, r.sessionId, { store: deps.store });
       result.continued_by = next.id;
     } else {

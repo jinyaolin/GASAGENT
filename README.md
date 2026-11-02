@@ -473,6 +473,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | webhook URL | `<部署 B /exec>?src=telegram&key=<32 字元 secret>`。GAS 的 `doPost` 拿不到 HTTP header，所以 secret 放 query；`doPost` 比對 `e.parameter.key` 與 Script Property `TELEGRAM_WEBHOOK_SECRET`，再比對 `message.from.id` 是否在 Config `telegram_allowed_user_ids`。不符一律丟掉、不回話、記 `AuditLog`（tool `telegram:webhook`） |
 | 回應 | 一律 `HtmlService.createHtmlOutput('ok')`，第一跳就是 200（`ContentService` 會 302，Telegram 會不斷重送）。每分鐘最多 30 個 update（CacheService 計數） |
 | 流程 | 文字訊息 → `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`（預設不先回話；Config `telegram_ack` 開了才先回「收到，處理中…」）；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
+| 群組 | 把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變；Telegram 的 bot 隱私模式開著時本來也只收得到這些）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 用工具幫忙；但**非白名單成員觸發的那一輪** R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、system prompt 提醒不透露 owner 私人資料、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
 | 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
@@ -499,8 +500,9 @@ Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指�
 5. 審批按鈕：Telegram 說 `寄一封信給我自己，主旨 test，內文 hello`（gmail external 需開）→ 回覆附「✅ 批准 gmail_send / ❌ 拒絕」按鈕 → 按批准 → 回「已批准…agent 會接續回覆」→ 一分鐘內收到 agent 的收尾訊息、信件寄達。
 6. `/weekly-report` 在 Telegram 也能用（技能注入）；`/new` 開新 session；`/model` 列模型。
 7. Email：「通道」勾啟用 Email、間隔先設 1 → 儲存 → 「建立標籤」。用 Gmail 寄一封信給自己，主旨 `[agent] 測試`，內文 `列出我今天的行事曆事件`，寄出後到收件匣把這封信貼上標籤 `agent/inbox`（或先在 Gmail 設篩選器）→ 等 1–2 分鐘（或「通道」按「立刻掃一次」）→ 同一 thread 收到 GAS Agent 的回信；原信已加星。驗完把間隔調回 5。
-8. 跨通道審批：用 Email 指令信要求寄一封信給自己 → Telegram 收到「⏸ 來自 Email 指令信的任務需要你審批」+ 按鈕 → 按批准 → Email thread 收到 agent 的收尾回信。
-9. 排程投遞：新增一個排程 `deliver_to = telegram` → 「立即執行」→ Telegram 收到「📋 <名稱> 日期」+ 內容。
+8. 群組：建一個群組把 bot 與另一個人拉進來。你 `@bot 今天幾號` 應得到回覆（掛在你的訊息下）；另一個人 `@bot 你好` 沒反應。你輸入 `/group on` → 對方 `@bot 幫我查今天行事曆` → agent 用工具回答（同一個群組對話）；對方 `@bot 幫我寄信給 X` → 回「待審批」，你的私聊收到帶按鈕的審批通知；對方輸入 `/status` 沒反應。`/group guest` → 對方 `@bot 你是誰` 得到不帶工具的回答。`/group off` 後對方又沒反應。
+9. 跨通道審批：用 Email 指令信要求寄一封信給自己 → Telegram 收到「⏸ 來自 Email 指令信的任務需要你審批」+ 按鈕 → 按批准 → Email thread 收到 agent 的收尾回信。
+10. 排程投遞：新增一個排程 `deliver_to = telegram` → 「立即執行」→ Telegram 收到「📋 <名稱> 日期」+ 內容。
 
 ## 開發流程
 

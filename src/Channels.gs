@@ -14,6 +14,9 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
   telegram_owner_chat_id: '',
   telegram_notify_approvals: true,
   telegram_ack: false,
+  telegram_open_groups: '',
+  telegram_guest_groups: '',
+  telegram_bot_username: '',
   email_enabled: false,
   email_inbox_label: 'agent/inbox',
   email_scan_every_minutes: 5,
@@ -21,7 +24,7 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
 
 /**
  * @typedef {{
- *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean, telegramAck: boolean,
+ *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean, telegramAck: boolean, telegramOpenGroups: !Array<string>, telegramGuestGroups: !Array<string>, telegramBotUsername: string,
  *   emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
  * }} ChannelConfig
  */
@@ -41,6 +44,9 @@ function parseChannelConfig_(map) {
     telegramOwnerChatId: String(map.telegram_owner_chat_id || '').trim(),
     telegramNotifyApprovals: map.telegram_notify_approvals === undefined ? d.telegram_notify_approvals : toBoolean_(map.telegram_notify_approvals),
     telegramAck: map.telegram_ack === undefined ? d.telegram_ack : toBoolean_(map.telegram_ack),
+    telegramOpenGroups: toStringList_(map.telegram_open_groups).filter((x) => /^-?\d+$/.test(x)),
+    telegramGuestGroups: toStringList_(map.telegram_guest_groups).filter((x) => /^-?\d+$/.test(x)),
+    telegramBotUsername: String(map.telegram_bot_username || '').trim().replace(/^@/, ''),
     emailEnabled: map.email_enabled === undefined ? d.email_enabled : toBoolean_(map.email_enabled),
     emailInboxLabel: String(map.email_inbox_label || d.email_inbox_label).trim() || d.email_inbox_label,
     emailScanEveryMinutes: clampInt_(map.email_scan_every_minutes, d.email_scan_every_minutes, 1, 1440),
@@ -66,15 +72,37 @@ function saveChannelConfig_(input) {
     values[k] = typeof def === 'boolean' ? toBoolean_(input[k]) : typeof def === 'number' ? toNumber_(input[k], def) : String(input[k] || '').trim();
   });
   if (values.telegram_allowed_user_ids !== undefined) values.telegram_allowed_user_ids = toStringList_(values.telegram_allowed_user_ids).join(',');
+  if (values.telegram_open_groups !== undefined) values.telegram_open_groups = toStringList_(values.telegram_open_groups).join(',');
+  if (values.telegram_guest_groups !== undefined) values.telegram_guest_groups = toStringList_(values.telegram_guest_groups).join(',');
   const parsed = parseChannelConfig_(Object.assign({}, getConfigMap_(), values));
   if (values.email_scan_every_minutes !== undefined) values.email_scan_every_minutes = parsed.emailScanEveryMinutes;
   if (parsed.telegramEnabled && !parsed.telegramAllowedUserIds.length) throw new Error('啟用 Telegram 前請先填至少一個允許的 Telegram user id（純數字）。');
   if (Object.keys(values).length) setConfigValues_(values);
-  if (typeof input.telegramBotToken === 'string' && input.telegramBotToken.trim()) setTelegramToken_(input.telegramBotToken);
+  if (typeof input.telegramBotToken === 'string' && input.telegramBotToken.trim()) {
+    setTelegramToken_(input.telegramBotToken);
+    // 換 token 就重抓 bot username（群組 @mention 判斷用）
+    try { setConfigValues_({ telegram_bot_username: String(telegramApi_('getMe', {}).username || '') }); } catch (err) { setConfigValues_({ telegram_bot_username: '' }); }
+  }
   if (input.regenerateSecret || !getTelegramSecret_()) setProp_(PROP.TELEGRAM_WEBHOOK_SECRET, newWebhookSecret_());
   // Email：啟用就把下次掃描設成現在，讓 queueTick 立刻接手；停用就清掉旗標（閒置零成本）。
   refreshEmailNextScanProp_(parsed, parsed.emailEnabled ? new Date() : null);
   return parsed;
+}
+
+/** 群聊模式（M6：/group on 的群組裡非 owner 成員觸發的那一輪）附加的 system 指示。 */
+const MEMBER_SYSTEM_EXTRA = '本訊息來自 Telegram 群組的成員，不是 owner 本人。你可以用讀取類工具協助回答群組的問題；任何寫入、刪除、寄信、分享類的動作都會先送 owner 審批（這是正常流程，告知對方等 owner 批准即可）。不要主動透露 owner 的私人資料（記憶、私人郵件、行程）；這一輪看不到 owner 的記憶快照。';
+/** 訪客模式（M6：/group guest 的群組裡非白名單成員）附加的 system 指示。 */
+const GUEST_SYSTEM_EXTRA = '本訊息來自 Telegram 群組的其他成員，不是 owner。你在這個對話裡**沒有任何工具**，也看不到 owner 的記憶、郵件、檔案、行事曆或設定；絕對不要透露或猜測 owner 的任何資料與行程。用一般知識簡短、友善地回答（繁體中文），需要 owner 的資料或決定時請對方直接找 owner。';
+
+/**
+ * 訪客用的工具設定：RBAC 全關（模型連工具清單都看不到）。純函式。
+ * @param {ToolConfig} toolConfig
+ * @return {ToolConfig}
+ */
+function guestToolConfig_(toolConfig) {
+  const rbac = {};
+  Object.keys(toolConfig.rbac || {}).forEach((ts) => { rbac[ts] = { read: false, write: false, delete: false, external: false }; });
+  return Object.assign({}, toolConfig, { rbac });
 }
 
 /**
@@ -92,7 +120,10 @@ function deliverTurnToChannel_(payload, result, deps) {
     if (channel === 'telegram') {
       const chatId = String(payload.telegram_chat_id || payload.external_id || '');
       if (!chatId) throw new Error('payload 缺 telegram_chat_id。');
-      const r = deliverTurnToTelegram_(chatId, result, deps);
+      const r = deliverTurnToTelegram_(chatId, result, Object.assign({}, deps, {
+        // 群組：回覆掛在觸發的那則訊息下，大家才知道在回誰
+        replyTo: /^(group|supergroup)$/.test(String(payload.telegram_chat_type || '')) ? toNumber_(payload.telegram_message_id, 0) : 0,
+      }));
       return { channel, ok: true, summary: `Telegram 已回覆 chat ${chatId}（${r.messages} 則）`, error: '' };
     }
     const threadId = String(payload.email_thread_id || payload.external_id || '');
