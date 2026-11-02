@@ -9,6 +9,11 @@ const DRIVE_READ_MAX_CHARS = 50000;
 const DRIVE_READ_DEFAULT_CHARS = 20000;
 /** PDF / 圖片 OCR 上限（bytes）；UrlFetch payload 上限 50 MB，保守取 10 MB。 */
 const DRIVE_PDF_MAX_BYTES = 10 * 1024 * 1024;
+/**
+ * OCR 語言提示。Drive REST v3 的 ocrLanguage 只收 ISO 639-1 **兩碼**（zh / en / ja…），給 zh-TW 會回
+ * HTTP 400「Invalid Value, location: ocrLanguage」（2026-11-02 Telegram 傳 PDF 踩到）。繁簡由 Drive 自己判，不能指定。
+ */
+const DRIVE_OCR_LANGUAGE = 'zh';
 
 /** @return {!Array<ToolDecl>} */
 function driveTools_() {
@@ -239,6 +244,18 @@ function sheetsToText_(ss, max) {
 }
 
 /**
+ * Drive REST v3 multipart 上傳 + 轉 Google 文件（觸發 OCR）的網址。純函式，測試鎖住 ocrLanguage 必須是兩碼。
+ * @param {string=} lang 省略用 DRIVE_OCR_LANGUAGE
+ * @return {string}
+ * @throws {Error} lang 不是 ISO 639-1 兩碼
+ */
+function driveOcrUploadUrl_(lang) {
+  const l = String(lang === undefined ? DRIVE_OCR_LANGUAGE : lang).trim().toLowerCase();
+  if (!/^[a-z]{2}$/.test(l)) throw new Error(`ocrLanguage 必須是 ISO 639-1 兩碼（如 zh / en），不是「${lang}」。`);
+  return `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=${l}&fields=id`;
+}
+
+/**
  * PDF → 文字（OCR）。
  * @param {GoogleAppsScript.Drive.File} file
  * @return {string}
@@ -260,7 +277,7 @@ function ocrToText_(file, contentType) {
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`;
   const tail = `\r\n--${boundary}--`;
   const payload = Utilities.newBlob(head).getBytes().concat(file.getBlob().getBytes(), Utilities.newBlob(tail).getBytes());
-  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=zh-TW&fields=id', {
+  const res = UrlFetchApp.fetch(driveOcrUploadUrl_(), {
     method: 'post',
     contentType: `multipart/related; boundary=${boundary}`,
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },

@@ -63,6 +63,7 @@ function smokeTestTable_() {
     ['agent: 同一工具 + 同參數失敗 3 次即熔斷', testRunTurnCircuitBreaker_, 'pure'],
     ['agent: 步數上限與時間預算到就停並回報；重複的待審批不再寫第二筆', testRunTurnLimits_, 'pure'],
     ['config: parseToolConfig_ 預設值與 rbac.<toolset> 解析', testToolConfigParse_, 'pure'],
+    ['drive: OCR 上傳網址的 ocrLanguage 必須是 ISO 639-1 兩碼（zh-TW 會被 Drive 回 400）', testDriveOcrUrl_, 'pure'],
     ['web: 域名白名單（exact / *.wildcard / 空 = 全拒）與 HTML 轉文字', testWebHelpers_, 'pure'],
     ['docs/slides: 輕量 markdown 解析、deck spec 驗證（九種版面、table / image 必填、>40 頁）、兩層項目、簡報規則進 prompt、刪頁預設被 RBAC 擋', testDocsSlidesSpecs_, 'pure'],
     // M3
@@ -954,6 +955,14 @@ function testToolConfigParse_() {
   assertEqual_(c.webAllowedDomains, ['example.com', '*.wikipedia.org'], '白名單正規化去重');
   assertEqual_(parseToolConfig_({ approval_policy: 'bogus', spill_threshold: '10' }).approvalPolicy, 'always', '未知策略退回 always');
   assertEqual_(parseToolConfig_({ spill_threshold: '10' }).spillThreshold, 1500, 'spill 下限 1500');
+}
+
+function testDriveOcrUrl_() {
+  assertEqual_(driveOcrUploadUrl_(), 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=zh&fields=id', '預設 zh');
+  assertEqual_(driveOcrUploadUrl_('EN'), 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=en&fields=id', '小寫化');
+  assertThrows_(() => driveOcrUploadUrl_('zh-TW'), 'zh-TW 會被 Drive 回 400，程式先擋');
+  assertThrows_(() => driveOcrUploadUrl_(''), '空');
+  assertEqual_(DRIVE_OCR_LANGUAGE, 'zh', '常數是兩碼');
 }
 
 function testWebHelpers_() {

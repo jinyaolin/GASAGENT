@@ -581,7 +581,7 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（61 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（62 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
 - 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
