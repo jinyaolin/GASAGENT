@@ -51,6 +51,38 @@ const REQUIRED_SCOPES = Object.freeze([
   'https://www.googleapis.com/auth/userinfo.email',
 ]);
 
+/**
+ * 母 scope → 它涵蓋的子 scope 前綴。Apps Script 自動推斷（manifest 沒列 scopes 時）給 GmailApp 的是完整的
+ * https://mail.google.com/，tokeninfo 不會另外列出 gmail.modify，但權限其實足夠；Doctor 比對時要認得。
+ */
+const SCOPE_SUPERSETS = Object.freeze({
+  'https://mail.google.com/': ['https://www.googleapis.com/auth/gmail.'],
+  'https://www.googleapis.com/auth/drive': ['https://www.googleapis.com/auth/drive.'],
+  'https://www.googleapis.com/auth/calendar': ['https://www.googleapis.com/auth/calendar.'],
+  'https://www.googleapis.com/auth/spreadsheets': ['https://www.googleapis.com/auth/spreadsheets.'],
+  'https://www.googleapis.com/auth/documents': ['https://www.googleapis.com/auth/documents.'],
+  'https://www.googleapis.com/auth/presentations': ['https://www.googleapis.com/auth/presentations.'],
+});
+
+/**
+ * 某個需要的 scope 是否已被授權（本身在清單裡，或被母 scope 涵蓋）。純函式。
+ * @param {string} required
+ * @param {!Array<string>} granted
+ * @return {boolean}
+ */
+function scopeGranted_(required, granted) {
+  if (granted.indexOf(required) !== -1) return true;
+  return Object.keys(SCOPE_SUPERSETS).some((sup) => granted.indexOf(sup) !== -1 && SCOPE_SUPERSETS[sup].some((prefix) => required.indexOf(prefix) === 0));
+}
+
+/**
+ * @param {!Array<string>} granted
+ * @return {!Array<string>} REQUIRED_SCOPES 裡尚未授權的
+ */
+function missingScopes_(granted) {
+  return REQUIRED_SCOPES.filter((s) => !scopeGranted_(s, granted || []));
+}
+
 /** appsscript.json 設定的時區；Doctor 會比對。 */
 const EXPECTED_TIME_ZONE = 'Asia/Taipei';
 

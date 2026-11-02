@@ -67,7 +67,7 @@ function reauthorize() {
   probe('urlfetch', () => `HTTP ${UrlFetchApp.fetch('https://www.google.com/generate_204', { muteHttpExceptions: true }).getResponseCode()}`);
   probe('scriptapp', () => `${ScriptApp.getProjectTriggers().length} triggers`);
   probe('email', () => Session.getEffectiveUser().getEmail());
-  probe('scopes', () => { const g = getGrantedScopes_(); return g.error || `${g.granted.filter((x) => REQUIRED_SCOPES.indexOf(x) !== -1).length} / ${REQUIRED_SCOPES.length} 已授權`; });
+  probe('scopes', () => { const g = getGrantedScopes_(); const missing = missingScopes_(g.granted); return g.error || (missing.length ? `缺 ${missing.join(', ')}` : `${REQUIRED_SCOPES.length} / ${REQUIRED_SCOPES.length} 已授權`); });
   console.log(JSON.stringify(out, null, 2));
   return out;
 }

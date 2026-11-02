@@ -32,6 +32,7 @@ function smokeTestTable_() {
     ['owner: assertOwner 拒絕非 owner', testAssertOwnerRejectsStranger_, 'db'],
     ['owner: assertOwner 接受 owner（大小寫 / 空白不敏感）', testAssertOwnerAcceptsOwner_, 'db'],
     ['owner: OWNER_EMAIL 未設定時拒絕所有人', testAssertOwnerRejectsWhenUnset_, 'pure'],
+    ['doctor: scope 比對認得母 scope（mail.google.com 涵蓋 gmail.modify）', testScopeCoverage_, 'pure'],
     ['owner: 目前使用者通過 assertOwner()', testAssertOwnerCurrentUser_, 'db'],
     ['queue: queueTick 無 job 時立即 return', testQueueTickNoop_, 'db'],
     ['admin: doGet?src=telegram 只回一行文字', testDoGetTelegramPlain_, 'db'],
@@ -193,6 +194,18 @@ function testAssertOwnerRejectsStranger_() {
 function testAssertOwnerAcceptsOwner_() {
   assertOwnerEmail_('Owner@Example.com ', 'owner@example.com');
   assertOwnerEmail_(getOwnerEmail_());
+}
+
+function testScopeCoverage_() {
+  const all = REQUIRED_SCOPES.slice();
+  assertEqual_(missingScopes_(all), [], '全列 → 不缺');
+  const withMail = all.filter((s) => s.indexOf('gmail.modify') === -1).concat(['https://mail.google.com/']);
+  assertEqual_(missingScopes_(withMail), [], 'mail.google.com 涵蓋 gmail.modify');
+  const noGmail = all.filter((s) => s.indexOf('gmail.modify') === -1);
+  assertEqual_(missingScopes_(noGmail), ['https://www.googleapis.com/auth/gmail.modify'], '真的缺 gmail');
+  assertEqual_(scopeGranted_('https://www.googleapis.com/auth/drive.readonly', ['https://www.googleapis.com/auth/drive']), true, 'drive 涵蓋 drive.readonly');
+  assertEqual_(scopeGranted_('https://www.googleapis.com/auth/drive', ['https://www.googleapis.com/auth/drive.readonly']), false, '子 scope 不涵蓋母 scope');
+  assertEqual_(missingScopes_([]).length, REQUIRED_SCOPES.length, '空 → 全缺');
 }
 
 function testAssertOwnerRejectsWhenUnset_() {

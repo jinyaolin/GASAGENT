@@ -75,9 +75,9 @@ function runDoctor() {
   if (scopes.error) {
     push('scopes', '已授權的 OAuth scopes 涵蓋 appsscript.json', 'fail', scopes.error);
   } else {
-    const missing = REQUIRED_SCOPES.filter((s) => scopes.granted.indexOf(s) === -1);
+    const missing = missingScopes_(scopes.granted);
     push('scopes', '已授權的 OAuth scopes 涵蓋 appsscript.json', missing.length ? 'fail' : 'ok',
-      missing.length ? `缺少：\n${missing.join('\n')}\n請在編輯器重新執行 installAgent() 以重新授權。` : `${REQUIRED_SCOPES.length} 個 scopes 皆已授權`);
+      missing.length ? `缺少：\n${missing.join('\n')}\n請在編輯器執行 reauthorize()（或 installAgent()）重新授權。` : `${REQUIRED_SCOPES.length} 個 scopes 皆已授權（含母 scope 涵蓋）`);
   }
 
   // 5. 時區
