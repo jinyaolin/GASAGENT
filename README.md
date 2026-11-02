@@ -217,6 +217,8 @@ Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 2
 
 ### Gemini CLI 方案（protocol `gemini_cli`，Google 帳號登入）
 
+> **2026-11-03 實測：個人 Google 帳號已不能用。** Google 自 2026-06-18 起讓 Gemini CLI 停止服務個人帳號（免費、AI Pro、AI Ultra），`loadCodeAssist` 回「This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products」（[gemini-cli#28229](https://github.com/google-gemini/gemini-cli/issues/28229)、[官方棄用公告](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)）。這條路現在只剩 **Gemini Code Assist Standard / Enterprise 授權**（公司 GCP 專案，`--project`）能走；個人帳號請用 `gemini` 協定 + AI Studio API key（有免費額度）。Antigravity CLI（`agy`）是閉源、其 OAuth client 與 API 未公開，本專案不接。
+
 用你 **Google 帳號的 Gemini CLI 方案額度**（免費個人方案，或 Gemini Code Assist Standard / Enterprise）跑 agent，不用 Gemini API key。走的是 Gemini CLI「Login with Google」背後的 Code Assist API（`https://cloudcode-pa.googleapis.com/v1internal`），用它原始碼裡公開的 OAuth client；Google 沒有公開這條 API 給第三方，屬自用的灰色地帶（見「條款」）。
 
 | 項目 | 說明 |
