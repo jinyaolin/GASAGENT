@@ -49,10 +49,15 @@ read -r -p "開好了按 Enter 繼續… " _
 step "3/6 建立 Apps Script 專案「${TITLE}」並推送程式碼"
 BACKUP=""
 if [[ -f .clasp.json ]]; then BACKUP=".clasp.json.bak.$$"; mv .clasp.json "$BACKUP"; fi
+# clasp create-script 會把 rootDir 裡的 appsscript.json 覆寫成預設 manifest（沒有 scopes / webapp / 時區），先備份再還原。
+MANIFEST_BAK="$(mktemp)"; cp "$MANIFEST" "$MANIFEST_BAK"
 if ! clasp_u "$ACCOUNT" create-script --type standalone --title "$TITLE" --rootDir src; then
   [[ -n "$BACKUP" ]] && mv "$BACKUP" .clasp.json
+  cp "$MANIFEST_BAK" "$MANIFEST"
   die "建立專案失敗：通常是 Apps Script API 還沒開（等一分鐘再試），或登入的帳號不對。"
 fi
+cp "$MANIFEST_BAK" "$MANIFEST"; rm -f "$MANIFEST_BAK"
+grep -q '"oauthScopes"' "$MANIFEST" && [[ "$(manifest_access)" == "MYSELF" ]] || die "manifest 還原失敗：$MANIFEST 缺 oauthScopes / webapp，請 git checkout -- src/appsscript.json 後重跑"
 cp .clasp.json "$DIR/clasp.json"
 [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
 SCRIPT_ID="$(python3 -c 'import json;print(json.load(open(".clasp.json"))["scriptId"])')"
