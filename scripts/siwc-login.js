@@ -3,7 +3,9 @@
  * Sign in with ChatGPT（SIWC）本機登入：給 GAS Agent 的 protocol=chatgpt provider 用。零依賴（node ≥ 18）。
  * 官方流程：https://developers.openai.com/siwc/token-sharing-open-source/sign-in
  *
- *   node scripts/siwc-login.js [--account <代號>] [--name "GAS Agent"] [--port 1455] [--print] [--no-open] [--debug]
+ *   node scripts/siwc-login.js [--account <代號>] [--name "GAS Agent"] [--port 1455] [--print] [--reset] [--no-open] [--debug]
+ *   --reset：忘掉已核發的 client_id（核發的 client 綁定第一次註冊時選的 ChatGPT 帳號 + 工作區；換帳號 / 工作區登入會被
+ *           3p_login_workspace_scope_denied 擋，要重設後重新註冊，且之後每次都選同一個帳號與工作區）
  *
  * 做什麼：
  *   1. 為這個帳號（= 一個 GAS Agent 安裝）產生並保存一個穩定的 ext_agent_host_id（urn:uuid:…）。
@@ -58,6 +60,12 @@ function printForPaste(creds) {
   console.log('\n==== 把下面整段（含大括號）貼到管理頁「模型」→ 編輯 chatgpt provider →「ChatGPT 憑證」====\n');
   console.log(JSON.stringify(paste));
   console.log('\n==== 結束。憑證也存在 ' + credPath + '（0600）；貼完可以留著以便下次重新授權。====');
+}
+
+if (flag('--reset')) {
+  // 忘掉已核發的 client_id（換 ChatGPT 帳號 / 工作區時用；host id 保留）
+  try { fs.unlinkSync(credPath); console.log('已刪除 ' + credPath + '，下次執行會重新動態註冊。'); } catch (err) { console.log('沒有已存的憑證，不用重設。'); }
+  process.exit(0);
 }
 
 if (flag('--print')) {
