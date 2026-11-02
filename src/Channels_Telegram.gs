@@ -8,6 +8,9 @@
  * 結果經 deliverTurnToTelegram_ 送回；待審批的動作附「批准 / 拒絕」按鈕，按下走 callback_query → decideApproval_。
  *
  * 指令：/new（新 session）/status /model [provider id] /skills /help；其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
+ * 附件：照片 / 檔案（document / photo / video / audio / voice）用 getFile 下載存到 Drive `GAS Agent/attachments/telegram/`，
+ * 訊息 = caption（沒有就預設一句）+ 附件註記（名稱 / 類型 / Drive file_id / 網址），agent 用 drive_read_text（PDF / 圖片 OCR）、
+ * drive_move、gmail_send attachment_file_ids 等既有工具處理。Bot API 單檔下載上限 20 MB。
  * 全部外部依賴（fetch、store、enqueue、decide）可注入，測試不打網路。
  */
 
@@ -20,6 +23,12 @@ const TELEGRAM_RATE_PER_MINUTE = 30;
 const TELEGRAM_ACK_TEXT = '收到，處理中…';
 /** 審批按鈕的 callback_data：apr:<approval id>:approve|deny（≤ 64 bytes）。 */
 const TELEGRAM_CALLBACK_RE = /^apr:([A-Za-z0-9_-]+):(approve|deny)$/;
+/** Bot API getFile 的單檔上限。 */
+const TELEGRAM_FILE_MAX_BYTES = 20 * 1024 * 1024;
+/** 附件存放的 Drive 資料夾。 */
+const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments', 'telegram']);
+/** 只有附件、沒有 caption 時給 agent 的訊息。 */
+const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
 const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills']);
 
@@ -132,11 +141,39 @@ function telegramApprovalKeyboard_(pending) {
 // ---- update 解析與驗證 ----------------------------------------------------------------------------------
 
 /**
+ * @typedef {{fileId: string, fileName: string, mimeType: string, fileSize: number, kind: string}} TelegramAttachment
+ */
+
+/**
  * @typedef {{
  *   kind: ('message'|'callback'|'other'), updateId: number, chatId: string, userId: string, username: string,
- *   text: string, messageId: number, callbackId: string, callbackData: string, callbackMessageId: number
+ *   text: string, messageId: number, callbackId: string, callbackData: string, callbackMessageId: number,
+ *   attachments: !Array<TelegramAttachment>
  * }} TelegramUpdate
  */
+
+/**
+ * 訊息裡的附件：document / photo（取最大尺寸）/ video / audio / voice / animation。純函式。
+ * @param {!Object} msg Telegram message
+ * @return {!Array<TelegramAttachment>}
+ */
+function telegramAttachments_(msg) {
+  const out = [];
+  const push = (kind, f, name, mime) => {
+    if (!f || !f.file_id) return;
+    out.push({ fileId: String(f.file_id), fileName: String(name || f.file_name || `${kind}_${f.file_unique_id || f.file_id}`), mimeType: String(mime || f.mime_type || ''), fileSize: toNumber_(f.file_size, 0), kind });
+  };
+  if (msg.document) push('document', msg.document);
+  if (Array.isArray(msg.photo) && msg.photo.length) {
+    const best = msg.photo.slice().sort((a, b) => toNumber_(b.file_size, 0) - toNumber_(a.file_size, 0))[0];
+    push('photo', best, `photo_${best.file_unique_id || best.file_id}.jpg`, 'image/jpeg');
+  }
+  if (msg.video) push('video', msg.video);
+  if (msg.audio) push('audio', msg.audio);
+  if (msg.voice) push('voice', msg.voice, `voice_${msg.voice.file_unique_id || ''}.ogg`, msg.voice.mime_type || 'audio/ogg');
+  if (msg.animation) push('animation', msg.animation);
+  return out;
+}
 
 /**
  * Telegram update JSON → 精簡結構。純函式；非文字訊息（貼圖、照片…）kind='message' 但 text 為空。
@@ -145,7 +182,7 @@ function telegramApprovalKeyboard_(pending) {
  */
 function parseTelegramUpdate_(update) {
   const u = update || {};
-  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0 };
+  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0, attachments: [] };
   const msg = u.message || u.edited_message || null;
   if (u.callback_query) {
     const cq = u.callback_query;
@@ -164,8 +201,47 @@ function parseTelegramUpdate_(update) {
     out.username = msg.from ? String(msg.from.username || '') : '';
     out.text = String(msg.text || msg.caption || '').trim();
     out.messageId = toNumber_(msg.message_id, 0);
+    out.attachments = telegramAttachments_(msg);
   }
   return out;
+}
+
+/**
+ * 下載 Telegram 檔案存到 Drive。
+ * @param {TelegramAttachment} att
+ * @param {{api: (Function|undefined), fetch: (Function|undefined), token: (string|undefined), folder: (Object|undefined)}=} deps
+ * @return {{id: string, name: string, mime_type: string, size: number, url: string}}
+ * @throws {Error} 太大、getFile 失敗
+ */
+function telegramSaveAttachment_(att, deps) {
+  deps = deps || {};
+  if (att.fileSize > TELEGRAM_FILE_MAX_BYTES) throw new Error(`${att.fileName} 太大（${Math.round(att.fileSize / 1048576)} MB），Telegram Bot API 下載上限 20 MB。`);
+  const api = deps.api || ((m, p) => telegramApi_(m, p, deps));
+  const info = api('getFile', { file_id: att.fileId });
+  if (!info || !info.file_path) throw new Error(`Telegram getFile 沒有回 file_path（${att.fileName}）。`);
+  const token = deps.token !== undefined ? deps.token : getTelegramToken_();
+  const fetch = deps.fetch || ((url, opts) => UrlFetchApp.fetch(url, opts));
+  const res = fetch(`${TELEGRAM_API_BASE}/file/bot${token}/${info.file_path}`, { muteHttpExceptions: true });
+  if (res.getResponseCode() >= 300) throw new Error(`下載 ${att.fileName} 失敗（HTTP ${res.getResponseCode()}）。`);
+  const blob = res.getBlob().setName(att.fileName);
+  if (att.mimeType) { try { blob.setContentType(att.mimeType); } catch (err) { /* 忽略 */ } }
+  const folder = deps.folder || folderByPath_(TELEGRAM_ATTACHMENT_FOLDER_PATH);
+  const file = folder.createFile(blob);
+  return { id: file.getId(), name: file.getName(), mime_type: file.getMimeType(), size: file.getSize(), url: file.getUrl() };
+}
+
+/**
+ * 附件存好後附在使用者訊息後面的註記（agent 看得到 file_id 才能用工具處理）。純函式。
+ * @param {!Array<{id: string, name: string, mime_type: string, size: number, url: string}>} saved
+ * @param {!Array<string>} failed 失敗說明
+ * @return {string}
+ */
+function telegramAttachmentNote_(saved, failed) {
+  const lines = ['', '', '（使用者從 Telegram 附了檔案，已存到 Drive「GAS Agent/attachments/telegram」：'];
+  saved.forEach((f) => lines.push(`- ${f.name}｜${f.mime_type || '?'}｜${Math.max(1, Math.round(f.size / 1024))} KB｜file_id=${f.id}｜${f.url}`));
+  (failed || []).forEach((m) => lines.push(`- 存檔失敗：${m}`));
+  lines.push('可用 drive_read_text 讀內容（PDF / 圖片會 OCR 成文字）、drive_move / drive_rename 歸檔、gmail_send 或 gmail_create_draft 的 attachment_file_ids 轉寄。）');
+  return lines.join('\n');
 }
 
 /**
@@ -276,15 +352,27 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     return report;
   }
 
+  // 附件：先存 Drive，再把註記接在訊息後面
+  let messageText = u.text;
+  const savedFiles = [];
+  if (u.attachments.length) {
+    const failed = [];
+    u.attachments.forEach((att) => {
+      try { savedFiles.push((deps.saveAttachment || telegramSaveAttachment_)(att)); } catch (err) { failed.push(`${att.fileName}：${err && err.message || err}`); }
+    });
+    if (!savedFiles.length) { send(`附件存檔失敗：${failed.join('；')}`); report.action = 'attachment_failed'; report.reason = failed.join('；'); return report; }
+    messageText = (u.text || TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE) + telegramAttachmentNote_(savedFiles, failed);
+  }
   // 文字訊息
-  if (!u.text) { send('目前只接受文字訊息。'); report.action = 'ignored'; report.reason = 'no_text'; return report; }
-  const cmd = parseTelegramCommand_(u.text);
+  if (!messageText) { send('目前只接受文字與檔案（照片 / 文件 / 語音），貼圖等不處理。'); report.action = 'ignored'; report.reason = 'no_text'; return report; }
+  const cmd = u.attachments.length ? { command: '', rest: messageText } : parseTelegramCommand_(u.text);
   const current = telegramSession_(u.chatId, store);
   report.sessionId = current ? current.id : '';
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
       '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/help — 這份說明',
+      '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
     report.text = lines.join('\n'); send(report.text); report.action = 'help'; return report;
   }
@@ -332,10 +420,13 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     send(report.text); report.action = 'model_set'; return report;
   }
 
-  // 一般訊息（含 /<技能名>）：排隊；Config telegram_ack 開著才先回「收到」
+  // 一般訊息（含 /<技能名> 與附件）：排隊；Config telegram_ack 開著才先回「收到」
   if (deps.cfg.telegramAck) send(TELEGRAM_ACK_TEXT, { replyTo: u.messageId });
-  const job = deps.enqueue('turn', telegramTurnPayload_(u.text, u), current ? current.id : '');
+  const payload = telegramTurnPayload_(messageText, u);
+  if (savedFiles.length) payload.attachments = savedFiles.map((f) => ({ id: f.id, name: f.name, mime_type: f.mime_type }));
+  const job = deps.enqueue('turn', payload, current ? current.id : '');
   report.action = 'enqueued'; report.jobId = job.id; report.text = deps.cfg.telegramAck ? TELEGRAM_ACK_TEXT : '';
+  report.attachments = savedFiles.length;
   return report;
 }
 

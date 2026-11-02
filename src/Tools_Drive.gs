@@ -7,7 +7,7 @@ const DRIVE_MAX_RESULTS = 50;
 const DRIVE_DEFAULT_RESULTS = 20;
 const DRIVE_READ_MAX_CHARS = 50000;
 const DRIVE_READ_DEFAULT_CHARS = 20000;
-/** PDF OCR 上限（bytes）；UrlFetch payload 上限 50 MB，保守取 10 MB。 */
+/** PDF / 圖片 OCR 上限（bytes）；UrlFetch payload 上限 50 MB，保守取 10 MB。 */
 const DRIVE_PDF_MAX_BYTES = 10 * 1024 * 1024;
 
 /** @return {!Array<ToolDecl>} */
@@ -42,7 +42,7 @@ function driveTools_() {
     },
     {
       name: 'drive_read_text', toolset: 'drive', risk: 'R',
-      description: '把檔案內容讀成純文字：Google 文件 / 試算表 / 簡報、純文字 / CSV / JSON / Markdown，以及 PDF（OCR，較慢）。超過 max_chars 會截斷。',
+      description: '把檔案內容讀成純文字：Google 文件 / 試算表 / 簡報、純文字 / CSV / JSON / Markdown，以及 PDF 與圖片（PNG / JPG / GIF / BMP / WebP，OCR 成文字，較慢）。超過 max_chars 會截斷。',
       parameters: {
         type: 'object',
         properties: {
@@ -207,6 +207,8 @@ function driveReadText_(args) {
     text = slidesToText_(SlidesApp.openById(id)).map((s) => `--- 第 ${s.index} 頁 ---\n${s.texts.join('\n')}`).join('\n');
   } else if (mime === MimeType.PDF) {
     text = pdfToText_(file);
+  } else if (/^image\/(png|jpe?g|gif|bmp|webp)$/i.test(mime)) {
+    text = ocrToText_(file, mime);
   } else if (/^text\/|json|xml|csv|markdown|javascript/i.test(mime)) {
     text = file.getBlob().getDataAsString('UTF-8');
   } else {
@@ -237,15 +239,25 @@ function sheetsToText_(ss, max) {
 }
 
 /**
- * PDF → 文字：以 Drive REST v3 multipart 上傳並轉成 Google 文件（觸發 OCR），讀完後把暫存文件丟進垃圾桶。
+ * PDF → 文字（OCR）。
  * @param {GoogleAppsScript.Drive.File} file
  * @return {string}
  */
 function pdfToText_(file) {
-  if (file.getSize() > DRIVE_PDF_MAX_BYTES) throw new Error(`PDF 太大（${file.getSize()} bytes），OCR 上限 ${DRIVE_PDF_MAX_BYTES} bytes。`);
+  return ocrToText_(file, 'application/pdf');
+}
+
+/**
+ * PDF / 圖片 → 文字：以 Drive REST v3 multipart 上傳並轉成 Google 文件（觸發 OCR），讀完後把暫存文件丟進垃圾桶。
+ * @param {GoogleAppsScript.Drive.File} file
+ * @param {string} contentType application/pdf 或 image/*
+ * @return {string}
+ */
+function ocrToText_(file, contentType) {
+  if (file.getSize() > DRIVE_PDF_MAX_BYTES) throw new Error(`檔案太大（${file.getSize()} bytes），OCR 上限 ${DRIVE_PDF_MAX_BYTES} bytes。`);
   const boundary = 'gasagent' + Date.now();
   const meta = JSON.stringify({ name: `[OCR 暫存] ${file.getName()}`, mimeType: MimeType.GOOGLE_DOCS });
-  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`;
+  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`;
   const tail = `\r\n--${boundary}--`;
   const payload = Utilities.newBlob(head).getBytes().concat(file.getBlob().getBytes(), Utilities.newBlob(tail).getBytes());
   const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=zh-TW&fields=id', {
@@ -255,7 +267,7 @@ function pdfToText_(file) {
     payload,
     muteHttpExceptions: true,
   });
-  if (res.getResponseCode() >= 300) throw new Error(`PDF OCR 失敗（HTTP ${res.getResponseCode()}）：${res.getContentText().slice(0, 300)}`);
+  if (res.getResponseCode() >= 300) throw new Error(`OCR 失敗（HTTP ${res.getResponseCode()}）：${res.getContentText().slice(0, 300)}`);
   const tempId = JSON.parse(res.getContentText()).id;
   try {
     return DocumentApp.openById(tempId).getBody().getText();

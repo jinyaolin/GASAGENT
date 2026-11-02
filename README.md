@@ -209,7 +209,7 @@ clasp deploy -i <deploymentId> -d "說明"
 
 | toolset | 工具（風險） |
 |---|---|
-| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF OCR) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_export_pdf`(W) `drive_share`(**X**) |
+| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_export_pdf`(W) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
 | sheets | `sheets_create`(W) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) |
 | slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |
@@ -473,6 +473,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | webhook URL | `<部署 B /exec>?src=telegram&key=<32 字元 secret>`。GAS 的 `doPost` 拿不到 HTTP header，所以 secret 放 query；`doPost` 比對 `e.parameter.key` 與 Script Property `TELEGRAM_WEBHOOK_SECRET`，再比對 `message.from.id` 是否在 Config `telegram_allowed_user_ids`。不符一律丟掉、不回話、記 `AuditLog`（tool `telegram:webhook`） |
 | 回應 | 一律 `HtmlService.createHtmlOutput('ok')`，第一跳就是 200（`ContentService` 會 302，Telegram 會不斷重送）。每分鐘最多 30 個 update（CacheService 計數） |
 | 流程 | 文字訊息 → `enqueue_('turn', {channel:'telegram', telegram_chat_id, …})`（預設不先回話；Config `telegram_ack` 開了才先回「收到，處理中…」）；trigger 跑完 → 回覆文字（超過 3900 字自動切段）。待審批的動作附 **inline button「批准 / 拒絕」**，按下走 `callback_query` → `decideApproval_` → 回結果並拿掉按鈕；批准後的續跑結果也會送回 |
+| 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
 | 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼）、白名單 user id、部署 B 網址、secret（儲存時自動產生；可重新產生）、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |

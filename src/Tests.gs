@@ -92,7 +92,7 @@ function smokeTestTable_() {
     ['skills: 內建範例技能可解析；資料夾為空才寫入', testSkillBuiltins_, 'pure'],
     // M6
     ['telegram: update 解析、secret / 白名單驗證、保留指令解析、長文切段、審批鍵盤、webhook URL、通道設定解析', testTelegramParse_, 'pure'],
-    ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字直接排隊（telegram_ack 開才先回收到；沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批', testTelegramHandle_, 'pure'],
+    ['telegram: handleTelegramUpdate_ — 拒絕不回話、文字直接排隊（telegram_ack 開才先回收到；沿用 chat 的 session）、/new /status /model /skills /help、按鈕審批、附件存 Drive 後排隊', testTelegramHandle_, 'pure'],
     ['email: 內文去引用 / 簽名、掃描只處理 owner 未加星且非 agent 回覆的信並加星、thread 沿用 session、到期旗標', testEmailChannel_, 'pure'],
     ['channels: turn job 結束把回覆送回 Telegram（含審批按鈕）/ Email；非 Telegram 來源停在審批時推 Telegram 通知；續跑與審批續跑 payload 帶通道識別；新 session 帶 external_id', testChannelDelivery_, 'pure'],
   ];
@@ -2223,6 +2223,14 @@ function testTelegramParse_() {
   const cb = parseTelegramUpdate_({ update_id: 2, callback_query: { id: 'cb1', data: 'apr:apr_1:approve', from: { id: 111 }, message: { message_id: 77, chat: { id: 111 } } } });
   assertEqual_([cb.kind, cb.callbackId, cb.callbackData, cb.userId, cb.chatId, cb.callbackMessageId], ['callback', 'cb1', 'apr:apr_1:approve', '111', '111', 77], 'callback');
   assertEqual_(parseTelegramUpdate_({ update_id: 3, message: { message_id: 1, from: { id: 111 }, chat: { id: 111 }, sticker: {} } }).text, '', '貼圖沒有 text');
+  // 附件解析：photo 取最大、document 保留檔名、caption 當 text
+  const ph = parseTelegramUpdate_({ update_id: 6, message: { message_id: 2, from: { id: 111 }, chat: { id: 111 }, caption: '這是收據', photo: [{ file_id: 'small', file_unique_id: 'u1', file_size: 100 }, { file_id: 'big', file_unique_id: 'u1', file_size: 9000 }] } });
+  assertEqual_([ph.text, ph.attachments.length, ph.attachments[0].fileId, ph.attachments[0].fileName, ph.attachments[0].mimeType, ph.attachments[0].kind], ['這是收據', 1, 'big', 'photo_u1.jpg', 'image/jpeg', 'photo'], 'photo 取最大尺寸');
+  const doc = parseTelegramUpdate_({ update_id: 7, message: { message_id: 3, from: { id: 111 }, chat: { id: 111 }, document: { file_id: 'd1', file_name: '合約.pdf', mime_type: 'application/pdf', file_size: 1234 } } });
+  assertEqual_([doc.text, doc.attachments[0].fileName, doc.attachments[0].mimeType, doc.attachments[0].fileSize], ['', '合約.pdf', 'application/pdf', 1234], 'document');
+  assertEqual_(parseTelegramUpdate_(tgMessage_('hi', 111)).attachments, [], '純文字沒附件');
+  const note = telegramAttachmentNote_([{ id: 'F1', name: '合約.pdf', mime_type: 'application/pdf', size: 2048, url: 'https://drive/F1' }], ['x.zip：太大']);
+  assert_(/合約\.pdf｜application\/pdf｜2 KB｜file_id=F1｜https:\/\/drive\/F1/.test(note) && /存檔失敗：x\.zip/.test(note) && /drive_read_text/.test(note), '附件註記：' + note);
   assertEqual_(parseTelegramUpdate_({ update_id: 4, channel_post: {} }).kind, 'other', '不支援的 update');
   assertEqual_(parseTelegramUpdate_({ update_id: 5, edited_message: { message_id: 2, from: { id: 111 }, chat: { id: 111 }, text: '改' } }).text, '改', 'edited_message');
   // 驗證
@@ -2305,8 +2313,30 @@ function testTelegramHandle_() {
   const fresh = f.ss.store.get(rn.sessionId);
   assertEqual_([fresh.channel, fresh.external_id, fresh.status], ['telegram', '111', 'active'], '新 session 帶 chat id');
   assertEqual_(f.jobs[f.jobs.length - 1].session_id, fresh.id, 'job 掛在新 session');
-  // 非文字
-  assertEqual_(handleTelegramUpdate_({ update_id: 9, message: { message_id: 1, from: { id: 111 }, chat: { id: 111 }, photo: [] } }, f.deps).reason, 'no_text', '非文字');
+  // 非文字（貼圖）
+  assertEqual_(handleTelegramUpdate_({ update_id: 9, message: { message_id: 1, from: { id: 111 }, chat: { id: 111 }, sticker: {} } }, f.deps).reason, 'no_text', '貼圖不處理');
+  // 附件：存 Drive（注入 saveAttachment）、訊息 = caption + 註記、payload.attachments；沒 caption 用預設句；全失敗回錯誤不排隊
+  const saved = [];
+  const attDeps = Object.assign({}, f.deps, { saveAttachment: (att) => { saved.push(att); if (att.fileId === 'bad') throw new Error('太大'); return { id: 'drv_' + att.fileId, name: att.fileName, mime_type: att.mimeType || 'application/octet-stream', size: 2048, url: 'https://drive/' + att.fileId }; } });
+  const jobsBefore = f.jobs.length;
+  const ra1 = handleTelegramUpdate_({ update_id: 20, message: { message_id: 8, from: { id: 111 }, chat: { id: 111 }, caption: '歸到報帳', document: { file_id: 'd9', file_name: '收據.pdf', mime_type: 'application/pdf', file_size: 500 } } }, attDeps);
+  const aj = f.jobs[f.jobs.length - 1];
+  assertEqual_([ra1.action, ra1.attachments, f.jobs.length, saved[0].fileId, aj.payload.attachments], ['enqueued', 1, jobsBefore + 1, 'd9', [{ id: 'drv_d9', name: '收據.pdf', mime_type: 'application/pdf' }]], '附件排隊');
+  assert_(/^歸到報帳\n\n（使用者從 Telegram 附了檔案/.test(aj.payload.message) && /file_id=drv_d9/.test(aj.payload.message), '訊息 = caption + 註記：' + aj.payload.message);
+  const ra2 = handleTelegramUpdate_({ update_id: 21, message: { message_id: 9, from: { id: 111 }, chat: { id: 111 }, photo: [{ file_id: 'p1', file_unique_id: 'q', file_size: 10 }] } }, attDeps);
+  assert_(ra2.action === 'enqueued' && f.jobs[f.jobs.length - 1].payload.message.indexOf(TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE) === 0, '沒 caption 用預設句');
+  const ra3 = handleTelegramUpdate_({ update_id: 22, message: { message_id: 10, from: { id: 111 }, chat: { id: 111 }, document: { file_id: 'bad', file_name: 'x.zip', file_size: 5 } } }, attDeps);
+  assertEqual_([ra3.action, f.jobs.length, /附件存檔失敗：x\.zip：太大/.test(f.sent[f.sent.length - 1].text)], ['attachment_failed', jobsBefore + 2, true], '全部失敗 → 回錯誤不排隊');
+  // telegramSaveAttachment_ 本體（注入 api / fetch / folder）
+  const created = [];
+  const fakeFolder = { createFile: (blob) => { created.push(blob); return { getId: () => 'F9', getName: () => blob.name, getMimeType: () => blob.type, getSize: () => 3, getUrl: () => 'https://drive/F9' }; } };
+  const fakeBlob = { name: '', type: '', setName(n) { this.name = n; return this; }, setContentType(t) { this.type = t; return this; } };
+  const sv = telegramSaveAttachment_({ fileId: 'tf', fileName: 'a.jpg', mimeType: 'image/jpeg', fileSize: 3, kind: 'photo' }, {
+    api: (m, p) => { assertEqual_([m, p.file_id], ['getFile', 'tf'], 'getFile'); return { file_path: 'photos/a.jpg' }; },
+    token: 'T', fetch: (url) => { assert_(url === TELEGRAM_API_BASE + '/file/botT/photos/a.jpg', 'download url：' + url); return { getResponseCode: () => 200, getBlob: () => fakeBlob }; }, folder: fakeFolder,
+  });
+  assertEqual_([sv.id, sv.name, sv.mime_type, created.length], ['F9', 'a.jpg', 'image/jpeg', 1], '存進資料夾');
+  assertThrows_(() => telegramSaveAttachment_({ fileId: 'x', fileName: 'big.bin', mimeType: '', fileSize: 30 * 1048576, kind: 'document' }, {}), '> 20 MB 拒絕');
   // 按鈕審批：decide、answerCallbackQuery、拿掉按鈕、回文字
   const cbUpdate = (data) => ({ update_id: 10, callback_query: { id: 'cb1', data, from: { id: 111 }, message: { message_id: 77, chat: { id: 111 } } } });
   const sentBefore = f.sent.length;
