@@ -1,5 +1,6 @@
 /**
- * @fileoverview session toolset：session_spill_read（分頁讀 ToolExecutor 溢寫到 Drive 的工具結果）、session_search（M3，搜過去的對話；handler 在 Memory.gs）。
+ * @fileoverview session toolset：session_spill_read（分頁讀 ToolExecutor 溢寫到 Drive 的工具結果）、session_search（M3，搜過去的對話；handler 在 Memory.gs）、
+ * session_ask_owner（M7-B：無人模式下向 owner 提問，本輪停在 needs_input，owner 在 Telegram 回覆或管理頁回答後續跑；handler 在 ToolExecutor.gs）。
  * 標 noSpill，讀出的內容不會再被溢寫（否則永遠讀不到）；limit 上限 20000 字。
  */
 
@@ -32,6 +33,19 @@ function sessionTools_() {
         required: ['query'], additionalProperties: false,
       },
       handler: sessionSearch_,
+    },
+    {
+      name: 'session_ask_owner', toolset: 'session', risk: 'R', noSpill: true, ownerOnly: true,
+      description: '無人模式（排程 / 事件觸發）下遇到必須由 owner 決定的事（例如要不要寄、金額對不對、兩個候選選哪個）時，用這個向 owner 提問。呼叫後本輪會立刻結束並等待；owner 回答後系統會以系統訊息把答案接回來續跑。一次只問一個問題，問題要自含（owner 看不到你的上下文），能給選項就給。互動模式（有使用者在線）不要用，直接在回覆裡問。',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: '要問 owner 的問題（自含、具體）' },
+          options: { type: 'array', items: { type: 'string' }, description: '可選的答案（選填，最多 6 個；owner 也可自由回答）' },
+        },
+        required: ['question'], additionalProperties: false,
+      },
+      handler: sessionAskOwner_,
     },
   ];
 }

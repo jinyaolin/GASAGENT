@@ -37,12 +37,14 @@ const TELEGRAM_ACK_TEXT = '收到，處理中…';
 const TELEGRAM_CALLBACK_RE = /^apr:([A-Za-z0-9_-]+):(approve|deny)$/;
 /** Bot API getFile 的單檔上限。 */
 const TELEGRAM_FILE_MAX_BYTES = 20 * 1024 * 1024;
+/** Bot API 上傳檔案上限（sendDocument 50 MB）。 */
+const TELEGRAM_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 /** 附件存放的 Drive 資料夾。 */
 const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments', 'telegram']);
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'answer']);
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
 const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
 /** setWebhook 要收的 update 類型。 */
@@ -144,6 +146,70 @@ function telegramSend_(chatId, text, opts, deps) {
 }
 
 /**
+ * 決定 Drive 檔案要怎麼送到 Telegram：Google 文件 / 試算表 / 簡報匯出 PDF；圖片可用 sendPhoto；其餘原檔 sendDocument。純函式。
+ * @param {string} mimeType
+ * @param {string} name
+ * @param {boolean=} asPhoto
+ * @return {{method: string, exportMime: string, fileName: string}} exportMime 空 = 原檔
+ */
+function telegramFilePlan_(mimeType, name, asPhoto) {
+  const googleTypes = {
+    'application/vnd.google-apps.document': 'application/pdf',
+    'application/vnd.google-apps.spreadsheet': 'application/pdf',
+    'application/vnd.google-apps.presentation': 'application/pdf',
+    'application/vnd.google-apps.drawing': 'image/png',
+  };
+  const base = String(name || 'file');
+  if (googleTypes[mimeType]) {
+    const ext = googleTypes[mimeType] === 'image/png' ? '.png' : '.pdf';
+    return { method: 'sendDocument', exportMime: googleTypes[mimeType], fileName: /\.(pdf|png)$/i.test(base) ? base : base + ext };
+  }
+  if (asPhoto && /^image\/(png|jpe?g|gif|webp)$/i.test(String(mimeType))) return { method: 'sendPhoto', exportMime: '', fileName: base };
+  return { method: 'sendDocument', exportMime: '', fileName: base };
+}
+
+/**
+ * 把 Drive 檔案送到 Telegram chat（multipart 上傳；Google 格式先轉 PDF）。
+ * @param {string} chatId
+ * @param {string} fileId Drive id 或網址
+ * @param {{caption: (string|undefined), asPhoto: (boolean|undefined), replyTo: (number|undefined)}=} opts
+ * @param {{fetch: (Function|undefined), token: (string|undefined), getFile: (Function|undefined)}=} deps
+ * @return {{ok: boolean, method: string, file_name: string, bytes: number, message_id: number}}
+ */
+function telegramSendDocument_(chatId, fileId, opts, deps) {
+  opts = opts || {};
+  deps = deps || {};
+  const token = deps.token !== undefined ? deps.token : getTelegramToken_();
+  if (!token) throw new Error('Telegram bot token 未設定（管理頁「通道」分頁）。');
+  const id = parseDriveId_(fileId);
+  const file = (deps.getFile || ((fid) => DriveApp.getFileById(fid)))(id);
+  const plan = telegramFilePlan_(file.getMimeType(), file.getName(), !!opts.asPhoto);
+  let blob;
+  try {
+    blob = plan.exportMime ? file.getAs(plan.exportMime) : file.getBlob();
+  } catch (err) {
+    throw new Error(`無法讀取 / 轉換檔案 ${file.getName()}：${err && err.message || err}`);
+  }
+  blob.setName(plan.fileName);
+  const bytes = blob.getBytes().length;
+  if (bytes > TELEGRAM_UPLOAD_MAX_BYTES) throw new Error(`檔案 ${plan.fileName} 有 ${Math.round(bytes / 1048576)} MB，超過 Telegram 上傳上限 50 MB；請改給連結。`);
+  const payload = { chat_id: String(chatId) };
+  payload[plan.method === 'sendPhoto' ? 'photo' : 'document'] = blob;
+  if (opts.caption) payload.caption = String(opts.caption).slice(0, 1024);
+  if (opts.replyTo) payload.reply_to_message_id = String(opts.replyTo);
+  const fetch = deps.fetch || ((url, o) => UrlFetchApp.fetch(url, o));
+  // 不設 contentType：payload 含 Blob 時 UrlFetchApp 會自動組 multipart/form-data。
+  const res = fetch(`${TELEGRAM_API_BASE}/bot${token}/${plan.method}`, { method: 'post', payload, muteHttpExceptions: true });
+  const code = res.getResponseCode();
+  let body = null;
+  try { body = JSON.parse(res.getContentText()); } catch (err) { body = null; }
+  if (code >= 300 || !body || !body.ok) {
+    throw new Error(`Telegram ${plan.method} 失敗（HTTP ${code}）：${body && body.description ? body.description : String(res.getContentText()).slice(0, 200)}`);
+  }
+  return { ok: true, method: plan.method, file_name: plan.fileName, bytes, message_id: toNumber_(body.result && body.result.message_id, 0) };
+}
+
+/**
  * 待審批動作的 inline keyboard：每個 approval 一列「批准 / 拒絕」。純函式。
  * @param {!Array<{tool: string, approvalId: string}>} pending
  * @return {?Object} 沒有待審批回 null
@@ -201,7 +267,7 @@ function telegramAttachments_(msg) {
  */
 function parseTelegramUpdate_(update) {
   const u = update || {};
-  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0, attachments: [], chatType: '', mentions: [], replyToUserId: '', replyToIsBot: false };
+  const out = { kind: 'other', updateId: toNumber_(u.update_id, 0), chatId: '', userId: '', username: '', text: '', messageId: 0, callbackId: '', callbackData: '', callbackMessageId: 0, attachments: [], chatType: '', mentions: [], replyToUserId: '', replyToIsBot: false, replyToMessageId: 0 };
   const msg = u.message || u.edited_message || null;
   if (u.callback_query) {
     const cq = u.callback_query;
@@ -224,9 +290,12 @@ function parseTelegramUpdate_(update) {
     out.chatType = msg.chat ? String(msg.chat.type || '') : '';
     const m = out.text.match(/@([A-Za-z0-9_]{3,})/g) || [];
     out.mentions = m.map((x) => x.slice(1).toLowerCase());
-    if (msg.reply_to_message && msg.reply_to_message.from) {
-      out.replyToUserId = String(msg.reply_to_message.from.id || '');
-      out.replyToIsBot = !!msg.reply_to_message.from.is_bot;
+    if (msg.reply_to_message) {
+      out.replyToMessageId = toNumber_(msg.reply_to_message.message_id, 0);
+      if (msg.reply_to_message.from) {
+        out.replyToUserId = String(msg.reply_to_message.from.id || '');
+        out.replyToIsBot = !!msg.reply_to_message.from.is_bot;
+      }
     }
   }
   return out;
@@ -438,6 +507,39 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     return report;
   }
 
+  // M7-B：回答 agent 的提問 —— 回覆 bot 的提問訊息，或 /answer [q_id] 文字。只有白名單（owner）能回答。
+  if (whitelisted && u.kind === 'message' && deps.answer) {
+    const pendingQs = (() => { try { return deps.pendingQuestions ? deps.pendingQuestions() : []; } catch (err) { return []; } })();
+    const cmdAnswer = /^\/answer(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(u.text || '');
+    let target = null;
+    let answerText = '';
+    if (u.replyToIsBot && u.replyToMessageId) {
+      target = pendingQs.find((q) => q.tg_message_id === u.replyToMessageId && (!q.tg_chat_id || q.tg_chat_id === u.chatId)) || null;
+      answerText = u.text;
+    } else if (cmdAnswer) {
+      const rest = String(cmdAnswer[1] || '').trim();
+      const m = /^(q_[0-9a-z_]+)\s*([\s\S]*)$/i.exec(rest);
+      if (m) { target = pendingQs.find((q) => q.id === m[1]) || null; answerText = m[2].trim(); if (!target) { report.text = `找不到待回答的提問 ${m[1]}。`; } }
+      else if (pendingQs.length === 1) { target = pendingQs[0]; answerText = rest; }
+      else if (!pendingQs.length) { report.text = '目前沒有待回答的提問。'; }
+      else { report.text = '有多個待回答的提問，請用 /answer <q_id> <回答>：\n' + pendingQs.map((q) => `• ${q.id}：${truncateText_(q.question, 80).text}`).join('\n'); }
+      if (!target) { send(report.text); report.action = 'answer_lookup'; return report; }
+    }
+    if (target) {
+      if (!answerText) { report.text = `請在同一則訊息給出回答，例如：/answer ${target.id} 第一個`; send(report.text); report.action = 'answer_empty'; return report; }
+      try {
+        const r = deps.answer(target.id, answerText, { via: 'telegram', telegramChatId: u.chatId });
+        report.text = `✅ 已回答 ${target.id}${r.continuation ? '，agent 會接續任務並回覆到這裡。' : '。'}`;
+        report.action = 'answered';
+      } catch (err) {
+        report.text = `回答 ${target.id} 失敗：${err && err.message || err}`;
+        report.action = 'answer_failed'; report.reason = String(err && err.message || err);
+      }
+      send(report.text, { replyTo: u.messageId });
+      return report;
+    }
+  }
+
   // 群聊模式的成員：不吃指令；其餘與白名單成員相同，但 payload.member 讓那一輪 R 以外的工具送審、不帶記憶
   if (member && /^\//.test(u.text) && !u.attachments.length) { report.action = 'ignored'; report.reason = 'member_command'; return report; }
   // 訪客（訪客模式群組的非白名單成員）：不處理指令與附件，純文字進訪客 session
@@ -471,7 +573,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -660,6 +762,8 @@ function telegramWebhook_(e) {
       api: (method, payload) => telegramApi_(method, payload),
       enqueue: (type, payload, sessionId) => enqueue_(type, payload, sessionId),
       decide: (id, approve) => decideApproval_(id, approve),
+      answer: (id, text, opts) => answerQuestion_(id, text, opts),
+      pendingQuestions: () => pendingQuestions_(),
       providers: listProviders_(),
       skills: () => enabledSkills_(getSkillIndex_()),
       setConfig: (values) => setConfigValues_(values),
@@ -668,7 +772,7 @@ function telegramWebhook_(e) {
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };
   }
-  if (report && report.action !== 'enqueued' && report.action !== 'help' && report.action !== 'status') {
+  if (report && ['enqueued', 'help', 'status', 'answered'].indexOf(report.action) === -1) {
     try {
       appendTableRow_('AuditLog', { ts: new Date(), session_id: report.sessionId || '', tool: 'telegram:webhook', args_preview: report.action, result_preview: truncateText_(report.reason || report.text || '', AUDIT_PREVIEW_CHARS).text, ok: report.action !== 'error' && report.action !== 'rejected', ms: 0 });
     } catch (err) { /* 忽略 */ }
@@ -720,6 +824,33 @@ function telegramNotifyOwner_(text, deps) {
     if (!chatId) { out.skipped = 'no_chat_id'; return out; }
     (deps.send || ((c, t, o) => telegramSend_(c, t, o)))(String(chatId), String(text || ''));
     out.ok = true;
+  } catch (err) {
+    out.error = String(err && err.message || err);
+  }
+  return out;
+}
+
+/**
+ * M7-B：把 agent 的提問推到 owner 的 Telegram，回 message_id 供 reply_to 比對。Telegram 沒啟用就 skipped；不 throw。
+ * @param {{id: string, question: string, options: !Array<string>, sessionId: string}} q
+ * @param {{cfg: (ChannelConfig|undefined), api: (Function|undefined)}=} deps
+ * @return {{ok: boolean, message_id: number, chat_id: string, skipped: string, error: string}}
+ */
+function telegramAskOwner_(q, deps) {
+  deps = deps || {};
+  const out = { ok: false, message_id: 0, chat_id: '', skipped: '', error: '' };
+  try {
+    const cfg = deps.cfg || getChannelConfig_();
+    if (!cfg.telegramEnabled) { out.skipped = 'disabled'; return out; }
+    const chatId = cfg.telegramOwnerChatId || cfg.telegramAllowedUserIds[0] || '';
+    if (!chatId) { out.skipped = 'no_chat_id'; return out; }
+    const lines = [`❓ agent 需要你決定（${q.id}）`, '', q.question];
+    if (q.options && q.options.length) lines.push('', '選項：', ...q.options.map((o, i) => `${i + 1}. ${o}`));
+    lines.push('', `直接「回覆」這則訊息作答，或輸入 /answer ${q.id} <回答>。`);
+    const result = (deps.api || ((m, p) => telegramApi_(m, p)))('sendMessage', { chat_id: String(chatId), text: lines.join('\n').slice(0, TELEGRAM_MESSAGE_MAX), disable_web_page_preview: true });
+    out.ok = true;
+    out.chat_id = String(chatId);
+    out.message_id = toNumber_(result && result.message_id, 0);
   } catch (err) {
     out.error = String(err && err.message || err);
   }

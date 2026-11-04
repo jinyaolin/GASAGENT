@@ -10,7 +10,7 @@
     { id: 'tools', label: '工具' },
     { id: 'memory', label: '記憶' },
     { id: 'skills', label: '技能' },
-    { id: 'cron', label: '排程' },
+    { id: 'cron', label: '排程 / 事件' },
     { id: 'channels', label: '通道' },
     { id: 'logs', label: '紀錄' },
     { id: 'settings', label: '設定' },
@@ -1227,6 +1227,7 @@
     }
 
     function approvalCard(a, pending) {
+      if (a.tool === 'session_ask_owner') return questionCard(a, pending);
       const $result = el('div');
       const btnApprove = el('button', { class: 'primary small', onclick: () => decide(a, true, [btnApprove, btnDeny], $result) }, '批准並執行');
       const btnDeny = el('button', { class: 'small danger', onclick: () => decide(a, false, [btnApprove, btnDeny], $result) }, '拒絕');
@@ -1243,6 +1244,37 @@
         isSkill ? skillProposalPreview(parsedArgs) : el('pre', { class: 'approval-args' }, args),
         a.result ? el('div', { class: 'step-result' }, a.result) : null,
         pending ? el('div', { class: 'toolbar' }, [btnApprove, btnDeny]) : null,
+        $result,
+      ]);
+    }
+
+    /** M7-B：agent 的提問卡：顯示問題與選項，owner 填答案送出。 */
+    function questionCard(a, pending) {
+      let q = {};
+      try { q = JSON.parse(a.args); } catch (err) { q = { question: a.args }; }
+      const $result = el('div');
+      const $answer = el('textarea', { rows: 2, style: 'font-family: inherit', placeholder: '輸入回答…' });
+      const btnSend = el('button', { class: 'primary small', onclick: () => submit($answer.value) }, '回答並續跑');
+      const options = (q.options || []).map((o) => el('button', { class: 'small', onclick: () => { $answer.value = o; } }, o));
+      async function submit(text) {
+        if (!String(text || '').trim()) { $result.innerHTML = ''; $result.append(errorBox(new Error('回答不可為空'))); return; }
+        btnSend.disabled = true;
+        $result.innerHTML = '';
+        try {
+          const r = await call('adminAnswerQuestion', a.id, text);
+          $result.append(el('div', { class: 'summary ok' }, '已回答'), r.continuation ? el('div', { class: 'meta' }, `已排續跑 job ${r.continuation}：答案會以系統訊息接回原任務（trigger 一分鐘內處理）。`) : el('div', { class: 'meta' }, '原 session 已關閉，沒有續跑。'));
+          setTimeout(() => { loadApprovals(); loadQueue(); }, 800);
+        } catch (err) { $result.append(errorBox(err)); btnSend.disabled = false; }
+      }
+      return el('div', { class: 'approval ' + (pending ? 'pending' : 'state-' + a.state) }, [
+        el('div', { class: 'step-head' }, [
+          el('span', { class: 'badge' }, pending ? '❓ 等你回答' : '已回答'),
+          el('span', { class: 'meta' }, `${a.id} · ${a.created_at || ''}${a.decided_at ? ' → ' + a.decided_at : ''} · session ${a.job_id}${q.tg_message_id ? ' · 已推到 Telegram' : ''}`),
+        ]),
+        el('div', { class: 'bubble assistant', style: 'max-width:100%' }, q.question || ''),
+        options.length ? el('div', { class: 'toolbar' }, options) : null,
+        a.result ? el('div', { class: 'step-result' }, `回答：${a.result}`) : null,
+        pending ? el('div', { class: 'chat-input' }, [$answer, btnSend]) : null,
         $result,
       ]);
     }
@@ -1314,7 +1346,7 @@
 
   // ---- 排程（Cron）------------------------------------------------------------------------------
 
-  const JOB_STATE_LABEL = { queued: '排隊中', running: '執行中', needs_approval: '待審批', done: '完成', failed: '失敗' };
+  const JOB_STATE_LABEL = { queued: '排隊中', running: '執行中', needs_approval: '待審批', needs_input: '等 owner 回答', done: '完成', failed: '失敗' };
   const DELIVER_LABEL = { doc: 'doc — 建一份 Google 文件（GAS Agent/reports）', email: 'email — 寄給 owner', telegram: 'telegram — 送到 owner 的 Telegram（需先設定通道）', none: 'none — 不投遞' };
 
   async function renderCron(root) {
@@ -1327,6 +1359,7 @@
     const btnReload = el('button', { onclick: () => load() }, '重新整理');
     root.append(el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [btnAdd, btnReload, $status]), $table, $run]), $form);
     let data = { crons: [], providers: [], deliverTargets: ['doc', 'email', 'none'] };
+    renderWatchers(root);
 
     async function load() {
       $table.innerHTML = '';
@@ -1451,6 +1484,156 @@
           await load();
         } catch (err) {
           $msg.append(errorBox(err));
+          btnSave.disabled = false;
+        }
+      }
+    }
+
+    load();
+  }
+
+  // ---- 事件觸發（M7-B watchers）--------------------------------------------------------------------
+
+  const WATCHER_TYPE_LABEL = { gmail: 'gmail — 符合搜尋條件的新郵件', drive: 'drive — 資料夾有新 / 修改的檔案', sheets: 'sheets — 工作表新增列', odoo: 'odoo — Odoo 新記錄' };
+  const WATCHER_CONFIG_FIELDS = {
+    gmail: [{ key: 'query', label: 'Gmail 搜尋條件 *', hint: '例 label:發票 has:attachment、from:boss@company.com；不要帶 after:' }],
+    drive: [{ key: 'folder_id', label: '資料夾 id 或網址 *', hint: '資料夾內新增或修改的檔案都算事件' }],
+    sheets: [{ key: 'spreadsheet_id', label: '試算表 id 或網址 *' }, { key: 'sheet_name', label: '工作表名稱', hint: '省略 = 第一張' }],
+    odoo: [{ key: 'model', label: 'model *', hint: '例 sale.order（須在 Odoo 白名單）' }, { key: 'domain', label: 'domain（JSON）', hint: '例 [["state","=","sale"]]；省略 = 全部' }, { key: 'fields', label: '要帶的欄位', hint: '逗號分隔，例 name,partner_id,amount_total；省略 = display_name / create_date' }],
+  };
+
+  async function renderWatchers(root) {
+    const $status = el('span', { class: 'hint' });
+    const $table = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
+    const $form = el('div', { class: 'panel', style: 'display:none' });
+    const $msg = el('div');
+    const btnAdd = el('button', { class: 'primary', onclick: () => openForm(null) }, '新增 watcher');
+    const btnReload = el('button', { onclick: () => load() }, '重新整理');
+    root.append(
+      el('div', { class: 'panel' }, [
+        el('h3', {}, '事件觸發（watchers）'),
+        el('p', { class: 'field-hint' }, '「某件事發生就跑」：每隔 N 分鐘檢查來源（新郵件 / 資料夾新檔 / 工作表新列 / Odoo 新記錄），有新事件就以指令開一個無人模式任務處理，事件資料附在任務裡，結果依投遞方式送出。建立時先記下目前狀態，只對之後的新事件反應。'),
+        el('div', { class: 'toolbar' }, [btnAdd, btnReload, $status]), $table, $msg,
+      ]),
+      $form,
+    );
+    let data = { watchers: [], types: ['gmail', 'drive', 'sheets', 'odoo'], nextCheck: '' };
+
+    async function load() {
+      $table.innerHTML = '';
+      $table.append(el('div', { class: 'loading' }, '載入中…'));
+      try {
+        data = await call('adminListWatchers');
+        $status.textContent = data.nextCheck ? `下次檢查：${data.nextCheck.slice(0, 16).replace('T', ' ')}Z` : '沒有啟用的 watcher';
+        renderTable();
+      } catch (err) {
+        $table.innerHTML = '';
+        $table.append(errorBox(err));
+      }
+    }
+
+    function renderTable() {
+      $table.innerHTML = '';
+      if (!data.watchers.length) {
+        $table.append(el('div', { class: 'placeholder' }, '尚無 watcher。例如：gmail「label:發票 has:attachment」→「把發票 PDF 做 OCR，整理出廠商 / 金額 / 日期，在 Odoo 建一張供應商帳單草稿」。'));
+        return;
+      }
+      const thead = el('thead', {}, el('tr', {}, ['', '名稱', '來源', '間隔', '下次 / 上次', '投遞', '狀態', ''].map((h) => el('th', {}, h))));
+      const tbody = el('tbody', {}, data.watchers.map((w) => {
+        const btnCheck = el('button', { class: 'small primary', onclick: () => checkNow(w, btnCheck) }, '立刻檢查');
+        const btnEdit = el('button', { class: 'small', onclick: () => openForm(w) }, '編輯');
+        const btnToggle = el('button', { class: 'small', onclick: () => toggle(w, btnToggle) }, w.enabled ? '停用' : '啟用');
+        return el('tr', { class: w.enabled ? '' : 'disabled-row' }, [
+          el('td', {}, el('span', { class: 'dot ' + (w.enabled ? 'on' : 'off') })),
+          el('td', {}, [el('div', {}, w.name), el('div', { class: 'meta' }, w.id), el('div', { class: 'meta', title: w.prompt }, w.prompt.slice(0, 80) + (w.prompt.length > 80 ? '…' : ''))]),
+          el('td', {}, [el('span', { class: 'badge' }, w.type), el('div', { class: 'meta' }, JSON.stringify(w.config))]),
+          el('td', { class: 'nowrap' }, `${w.every_minutes} 分`),
+          el('td', {}, [el('div', { class: 'nowrap' }, (w.next_check || '—').slice(0, 16).replace('T', ' ')), el('div', { class: 'meta nowrap' }, `上次 ${(w.last_check || '—').slice(0, 16).replace('T', ' ')}`), w.last_fired ? el('div', { class: 'meta nowrap' }, `觸發 ${w.last_fired.slice(0, 16).replace('T', ' ')}`) : null]),
+          el('td', {}, w.deliver_to),
+          el('td', {}, [el('div', { class: 'meta' }, w.last_status || ''), el('div', { class: 'meta' }, `cursor ${JSON.stringify(w.cursor)}`)]),
+          el('td', { class: 'actions' }, [btnCheck, btnEdit, btnToggle]),
+        ]);
+      }));
+      $table.append(el('table', { class: 'table' }, [thead, tbody]));
+    }
+
+    async function toggle(w, btn) {
+      btn.disabled = true;
+      try { await call('adminSetWatcherEnabled', w.id, !w.enabled); await load(); } catch (err) { $msg.innerHTML = ''; $msg.append(errorBox(err)); btn.disabled = false; }
+    }
+
+    async function checkNow(w, btn) {
+      btn.disabled = true;
+      $msg.innerHTML = '';
+      try {
+        const r = await call('adminCheckWatcherNow', w.id);
+        $msg.append(el('div', { class: 'summary ' + (r.events ? 'ok' : '') }, r.events ? `觸發 ${r.events} 件：job ${r.jobs.join(', ')}（每分鐘 trigger 會執行，到「紀錄」看進度）` : '沒有新事件'));
+        await load();
+      } catch (err) { $msg.append(errorBox(err)); } finally { btn.disabled = false; }
+    }
+
+    function openForm(w) {
+      const isNew = !w;
+      $form.innerHTML = '';
+      $form.style.display = '';
+      const $name = el('input', { type: 'text', placeholder: '例：發票進來就建帳單草稿' });
+      const $type = el('select', {}, data.types.map((t) => el('option', { value: t }, WATCHER_TYPE_LABEL[t] || t)));
+      const $configBox = el('div', { class: 'form-grid' });
+      const cfgInputs = {};
+      const $prompt = el('textarea', { rows: 4, style: 'font-family: inherit', placeholder: '例：這是一封新收到的發票郵件。把附件存到 Drive「發票」資料夾，OCR 讀出廠商、金額、日期，在 Odoo 建一張供應商帳單草稿（不要過帳），最後回報建了哪一張。' });
+      const $deliver = el('select', {}, ['telegram', 'email', 'doc', 'none'].map((t) => el('option', { value: t }, DELIVER_LABEL[t] || t)));
+      const $every = el('input', { type: 'number', min: 1, max: 1440 });
+      const $skills = el('input', { type: 'text', placeholder: '逗號分隔技能名（選填）' });
+      const $enabled = el('input', { type: 'checkbox' });
+      function renderConfigFields() {
+        $configBox.innerHTML = '';
+        Object.keys(cfgInputs).forEach((k) => delete cfgInputs[k]);
+        (WATCHER_CONFIG_FIELDS[$type.value] || []).forEach((f) => {
+          const input = el('input', { type: 'text' });
+          const cur = w && w.type === $type.value ? w.config[f.key] : undefined;
+          if (cur !== undefined && cur !== null) input.value = typeof cur === 'object' ? JSON.stringify(cur) : String(cur);
+          cfgInputs[f.key] = input;
+          $configBox.append(field(f.label, input, f.hint));
+        });
+      }
+      $type.addEventListener('change', renderConfigFields);
+      if (w) { $name.value = w.name; $type.value = w.type; $prompt.value = w.prompt; $deliver.value = w.deliver_to; $every.value = w.every_minutes; $skills.value = w.skills; $enabled.checked = w.enabled; }
+      else { $deliver.value = 'telegram'; $every.value = 5; $enabled.checked = true; }
+      if (isNew) $type.disabled = false; else $type.disabled = false;
+      renderConfigFields();
+      const $m = el('div');
+      const btnSave = el('button', { class: 'primary', onclick: save }, isNew ? '新增（會先 baseline）' : '儲存');
+      const btnCancel = el('button', { onclick: () => { $form.style.display = 'none'; $form.innerHTML = ''; } }, '取消');
+      $form.append(
+        el('h3', {}, isNew ? '新增 watcher' : `編輯 ${w.name}`),
+        el('div', { class: 'form-grid' }, [
+          field('名稱 *', $name),
+          field('來源 *', $type, '改來源或設定會重做 baseline（只對之後的事件反應）'),
+          field('檢查間隔（分鐘）', $every, '每分鐘 trigger 到了才檢查；gmail / drive 建議 5，odoo 建議 2–5'),
+          field('投遞', $deliver, 'telegram 送到 owner 的 Telegram；任務裡也可用 telegram_send_file 傳檔'),
+          field('模型', el('span', { class: 'meta' }, '（空 = main 備援鏈；要指定請用 watcher_manage 工具的 model_pin）')),
+          field('技能', $skills),
+          field('啟用', el('label', { class: 'checkbox' }, [$enabled, ' 啟用'])),
+        ]),
+        el('h4', { class: 'field-label' }, '來源設定'), $configBox,
+        field('任務指令 *', $prompt, '無人模式執行：事件資料會以資料區塊接在後面；需要你決定的事 agent 會用 session_ask_owner 問你（Telegram 回覆即可）'),
+        el('div', { class: 'toolbar' }, [btnSave, btnCancel]),
+        $m,
+      );
+      $form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      async function save() {
+        btnSave.disabled = true;
+        $m.innerHTML = '';
+        const config = {};
+        Object.keys(cfgInputs).forEach((k) => { const v = cfgInputs[k].value.trim(); if (v) config[k] = v; });
+        if (config.fields) config.fields = config.fields.split(/[,\s]+/).filter(Boolean);
+        try {
+          await call('adminSaveWatcher', { id: w ? w.id : '', name: $name.value, type: $type.value, config: JSON.stringify(config), prompt: $prompt.value, deliver_to: $deliver.value, every_minutes: $every.value, skills: $skills.value, enabled: $enabled.checked });
+          $form.style.display = 'none';
+          $form.innerHTML = '';
+          await load();
+        } catch (err) {
+          $m.append(errorBox(err));
           btnSave.disabled = false;
         }
       }

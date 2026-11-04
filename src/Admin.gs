@@ -570,6 +570,17 @@ function adminListApprovals() {
 }
 
 /**
+ * 紀錄分頁（M7-B）：回答 agent 的提問，答案以系統訊息接回原 session 續跑。
+ * @param {string} id q_…
+ * @param {string} answer
+ * @return {{id: string, state: string, continuation: string, question: string}}
+ */
+function adminAnswerQuestion(id, answer) {
+  assertOwner();
+  return answerQuestion_(String(id || ''), String(answer || ''), { via: 'admin' });
+}
+
+/**
  * 紀錄分頁：批准（立即執行一次）或拒絕。
  * @param {string} id
  * @param {boolean} approve
@@ -721,6 +732,59 @@ function adminSetCronEnabled(id, enabled) {
 function adminRunCronNow(id) {
   assertOwner();
   return publicJob_(runCronNow_(String(id || ''), { cronStore: sheetCronStore_(), queueStore: sheetQueueStore_() }));
+}
+
+// ---- M7-B：事件觸發（watchers）-------------------------------------------------------------------
+
+/** @return {{store: Object, queueStore: Object, providerIds: !Array<string>, odooModels: !Array<string>}} */
+function watcherAdminDeps_() {
+  return { store: sheetWatcherStore_(), queueStore: sheetQueueStore_(), providerIds: listProviders_().map((p) => p.id), odooModels: getToolConfig_().odooAllowedModels };
+}
+
+/**
+ * 排程分頁：全部 watcher + 旗標。
+ * @return {{watchers: !Array<!Object>, types: !Array<string>, nextCheck: string, odooModels: !Array<string>}}
+ */
+function adminListWatchers() {
+  assertOwner();
+  const store = sheetWatcherStore_();
+  const watchers = store.list();
+  try { refreshWatchNextCheckProp_(watchers); } catch (err) { /* 忽略 */ }
+  return { watchers: watchers.map(publicWatcher_), types: WATCHER_TYPES.slice(), nextCheck: getProp_(PROP.WATCH_NEXT_CHECK), odooModels: getToolConfig_().odooAllowedModels };
+}
+
+/**
+ * 排程分頁：新增（無 id）或編輯（有 id）watcher；新建與來源變更會立刻 baseline。
+ * @param {!Object} input
+ * @return {!Object} publicWatcher_
+ */
+function adminSaveWatcher(input) {
+  assertOwner();
+  input = input || {};
+  const deps = watcherAdminDeps_();
+  const w = input.id ? updateWatcher_(String(input.id), input, deps) : createWatcher_(input, deps);
+  return publicWatcher_(w);
+}
+
+/**
+ * 排程分頁：啟用 / 停用（重新啟用會重做 baseline）。
+ * @param {string} id
+ * @param {boolean} enabled
+ * @return {!Object}
+ */
+function adminSetWatcherEnabled(id, enabled) {
+  assertOwner();
+  return publicWatcher_(updateWatcher_(String(id || ''), { enabled: !!enabled }, watcherAdminDeps_()));
+}
+
+/**
+ * 排程分頁：立刻檢查一次。
+ * @param {string} id
+ * @return {{watcher: !Object, events: number, jobs: !Array<string>}}
+ */
+function adminCheckWatcherNow(id) {
+  assertOwner();
+  return checkWatcherNow_(String(id || ''), watcherAdminDeps_());
 }
 
 // ---- M5：技能分頁 -----------------------------------------------------------------------------

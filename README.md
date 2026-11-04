@@ -260,8 +260,10 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) `calendar_delete_event`(**D**，預設關) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) `web_search`(R，Brave Search API 或 Google Programmable Search；key 在 Script Property `WEB_SEARCH_KEY`，不受域名白名單限制，見下方「網路搜尋」) |
+| telegram | `telegram_send_file`(W，把 Drive 檔案直接傳進 Telegram 對話；Google 格式轉 PDF；目標 chat 由系統決定，見「M7-B」) |
+| watcher | `watcher_manage`(W，事件觸發器 list / create / update / delete / check_now；autonomous 只能 list；群組成員永遠鎖定) |
 | odoo | `odoo_models`(R，白名單與連線資訊) `odoo_fields`(R) `odoo_search_read`(R) `odoo_read`(R) `odoo_create`(W) `odoo_write`(W) `odoo_call`(W，工作流方法如 action_confirm；擋私有方法與 unlink / write / create) `odoo_unlink`(**D**，預設關) —— 見下方「Odoo」 |
-| session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
+| session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) `session_ask_owner`(R，ownerOnly，M7-B：無人模式向 owner 提問，本輪停在 needs_input) |
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 | skill | `skill_load`(R，M5：載技能全文) `skill_manage`(W，M5：create / patch **只提案**，owner 批准後才寫入) |
@@ -641,6 +643,38 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 6. 「模型」→ 編輯某 provider → 貼同一把 key → 儲存 → AuditLog 有 `security:provider:key_set`（只有 id）。
 7. 多帳號：`DRY=1 scripts/deploy.sh --account <另一個帳號> x` 印出該帳號的部署 ID、結束後 `cat .clasp.json` 仍是 default 的 scriptId；把某帳號 `deploy.json` 的 scriptId 暫改一碼再跑 → 立刻「scriptId 不一致」拒絕（改回）。
 
+## 事件觸發、向 owner 提問、Telegram 傳檔（M7-B）
+
+讓 agent 從「人叫它」「定時跑」進到「某件事發生就跑，卡住會問你」。三個功能都掛在既有骨架上：Queue job、Approvals 列 + continuation 續跑、Telegram 投遞。
+
+### 事件觸發（watchers）
+
+`Watchers` tab（[Watchers.gs](src/Watchers.gs)）每個 watcher 一列：來源 `type` + `config`、任務 `prompt`、`deliver_to`、`every_minutes`、`cursor`（上次看到哪裡）。每分鐘 trigger 只看 Script Property `WATCH_NEXT_CHECK`，到期才開 sheet 檢查到期的 watcher；有新事件就各 enqueue 一個 `watch` job（新 session、channel `watch`、無人模式），事件資料以 `<<tool_result name=watcher_event … untrusted>>` 區塊接在 prompt 後面，結果依 `deliver_to` 投遞。
+
+| type | config | 事件 | cursor |
+|---|---|---|---|
+| `gmail` | `{query}`（Gmail 搜尋語法，不要帶 after:） | 最後一則晚於上次的新討論串 | `since_ms` + `seen` |
+| `drive` | `{folder_id}` | 資料夾內新增 / 修改的檔案 | `since_ms` + `seen` |
+| `sheets` | `{spreadsheet_id, sheet_name?}` | 工作表新增的列（一次最多 50 列，合成一個事件） | `last_row` |
+| `odoo` | `{model, domain?, fields?}`（model 須在 Odoo 白名單） | `id > last_id` 的新記錄 | `last_id` |
+
+建立、改來源或重新啟用時先做 **baseline**（只記 cursor 不觸發），既有資料不會洪水；一次檢查最多 5 個事件，其餘下次再撿。管理頁「排程 / 事件」分頁下半有 watcher 列表 / 表單 /「立刻檢查」；agent 也能用 `watcher_manage` 工具（排程 / 事件任務執行中只能 list，避免迴圈）。例：gmail `label:發票 has:attachment` → 「把附件存到 Drive『發票』、OCR 讀出廠商 / 金額 / 日期、在 Odoo 建供應商帳單草稿（不過帳）、回報」。
+
+### 向 owner 提問（`session_ask_owner`）
+
+無人模式的任務（排程 / 事件）遇到必須由 owner 決定的事，呼叫 `session_ask_owner({question, options?})`：系統在 Approvals 寫一列 `q_…`、把問題推到 owner 的 Telegram，本輪立刻結束（job 狀態 `needs_input`，排程 / 事件暫不投遞）。你在 Telegram **直接「回覆」那則問題訊息**、或輸入 `/answer [q_id] <回答>`、或在管理頁「紀錄 → 審批」填答案，系統就以系統訊息把答案接回原 session 續跑；排程 / 事件的續跑結果會投遞，也會回到你回答的 Telegram chat。互動模式（聊天台 / Telegram 對話）用這個工具會回錯，模型應直接在回覆裡問；群組成員看不到此工具（`ownerOnly`）。無人模式的 system 指示已改成「能自行判斷就判斷，只有做錯有實際後果的事才問」。
+
+### Telegram 傳檔（`telegram_send_file`）
+
+`telegram_send_file({file_id, caption?, as_photo?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 文件 / 試算表 / 簡報先轉 PDF；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。
+
+### M7-B 驗收步驟（請在瀏覽器與手機操作）
+
+1. Doctor「重新安裝」補 `Watchers` tab（新版本加的 tab；Doctor 會先紅燈）。
+2. 聊天台或 Telegram：「把 <某份文件網址> 傳到 Telegram 給我」→ 手機收到 PDF。
+3. 「排程 / 事件」→ 新增 watcher：type gmail、query `label:agent-test`、prompt「摘要這封信並告訴我寄件者」、投遞 telegram → 儲存（baseline）。寄一封信給自己並加標籤 `agent-test` → 最多等 5 分鐘（或按「立刻檢查」）→ Telegram 收到摘要。
+4. 新增排程 prompt「問 owner 今天要不要寄週報，等回答後回報決定」→「立即執行」→ Telegram 收到 ❓ 問題 → 直接回覆「不用」→ agent 續跑回報「owner 決定不用」。
+
 ## 開發流程
 
 ```bash
@@ -690,6 +724,9 @@ node scripts/local-tests.js
 | `web_search` 回「尚未設定搜尋 API key」 | 到「工具」分頁「網路搜尋」貼 Brave 或 Google 的 key（google 另填 cx），儲存後按「測試搜尋」 |
 | Odoo「測試連線」回「登入失敗」 | 帳號 / API key / 資料庫三者其一不對；Odoo 的 API key 綁定產生它的使用者，登入帳號要填那個使用者的 email。開了雙因素的帳號密碼不能用 RPC，只能用 API key |
 | Odoo 工具回 `AccessError` | agent 用的 Odoo 使用者沒有那個 model 的權限，到 Odoo 設定 → 使用者 → 存取權限調整，不是 agent 這邊的 RBAC |
+| 「排程 / 事件」分頁報 `DB 缺少 tab「Watchers」` | 新版本加了 tab：Doctor 分頁按「重新安裝」（或編輯器執行 `installAgent()`） |
+| Telegram 回覆了提問但 agent 沒續跑 | 要「回覆」bot 的那則 ❓ 訊息（Telegram 的 Reply），或用 `/answer <q_id> <回答>`；一般訊息會當成新任務。管理頁「紀錄 → 審批」也能回答 |
+| watcher 建好後既有的信 / 檔沒觸發 | 刻意的：建立時只記 cursor（baseline），只對之後的新事件反應；要測就寄一封新的 |
 | `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |

@@ -26,8 +26,8 @@
 /** time trigger 指向的函式名；Setup / Doctor 用它找 trigger。 */
 const QUEUE_TICK_HANDLER = 'queueTick';
 
-const QUEUE_JOB_TYPES = Object.freeze(['turn', 'cron', 'continuation', 'curation']);
-const QUEUE_STATES = Object.freeze(['queued', 'running', 'needs_approval', 'done', 'failed']);
+const QUEUE_JOB_TYPES = Object.freeze(['turn', 'cron', 'continuation', 'curation', 'watch']);
+const QUEUE_STATES = Object.freeze(['queued', 'running', 'needs_approval', 'needs_input', 'done', 'failed']);
 /** 同一 job 最多嘗試幾次（例外才算失敗重試；正常結束不會重跑）。 */
 const QUEUE_MAX_ATTEMPTS = 3;
 /** 一次 tick 的整體預算（GAS 單次執行 6 分鐘）。 */
@@ -43,7 +43,7 @@ const QUEUE_RESULT_TEXT_MAX = 6000;
 /** 續跑時給模型的 user 訊息。 */
 const CONTINUATION_PROMPT = '（系統）上一輪因時間預算或步數上限而中止，任務尚未完成。請接續完成剩下的部分：先看前面已完成的工具步驟與結果，不要重做已完成的工作；完成後照常回覆。';
 /** 無人模式（cron）附加的 system 指示。 */
-const AUTONOMOUS_SYSTEM_EXTRA = '本輪是排程自動執行，沒有使用者在線：不要提問或等待確認，自行判斷並完成任務；最後輸出可直接交付給 owner 的結果（會被寫成文件或寄給 owner）。無法完成時說明原因與已完成的部分。';
+const AUTONOMOUS_SYSTEM_EXTRA = '本輪是系統自動執行（排程或事件觸發），沒有使用者在線：能自行判斷的就自行判斷並完成任務，不要在回覆裡反問；只有遇到必須由 owner 決定、做錯會有實際後果的事（寄給誰、金額、要不要刪 / 送出），才用 session_ask_owner 提問，一次一題、問題自含，問完本輪就結束。最後輸出可直接交付給 owner 的結果（會被寫成文件、寄出或送到 Telegram）。無法完成時說明原因與已完成的部分。';
 
 /**
  * @typedef {{
@@ -210,7 +210,8 @@ function jobCreatedAt_(id) {
 function jobSummary_(j) {
   const p = j.payload || {};
   if (j.type === 'cron') return `排程「${p.name || p.cron_id || ''}」`;
-  if (j.type === 'continuation') return `${p.origin === 'approval' ? '審批後續跑' : '續跑'}${p.continuations ? `（第 ${p.continuations} 次）` : ''}${p.cron ? `：排程「${p.cron.name}」` : ''}`;
+  if (j.type === 'watch') return `事件「${p.name || p.watcher_id || ''}」：${(p.event && p.event.title) || ''}`;
+  if (j.type === 'continuation') return `${p.origin === 'approval' ? '審批後續跑' : p.origin === 'answer' ? '回答後續跑' : '續跑'}${p.continuations ? `（第 ${p.continuations} 次）` : ''}${p.cron ? `：${p.cron.watcher_id ? '事件' : '排程'}「${p.cron.name}」` : ''}`;
   if (j.type === 'curation') return '記憶整理';
   const prefix = p.channel === 'telegram' ? '[Telegram] ' : p.channel === 'email' ? `[Email] ${p.email_subject ? p.email_subject + '：' : ''}` : '';
   return prefix + truncateText_(String(p.message || '').replace(/\s+/g, ' '), 80).text;
@@ -234,7 +235,9 @@ function queueTick() {
   const cronDue = !!nextCron && new Date(nextCron).getTime() <= Date.now();
   const nextEmail = getProp_(PROP.EMAIL_NEXT_SCAN);
   const emailDue = !!nextEmail && new Date(nextEmail).getTime() <= Date.now();
-  if (!dirty && !cronDue && !emailDue) return;
+  const nextWatch = getProp_(PROP.WATCH_NEXT_CHECK);
+  const watchDue = !!nextWatch && new Date(nextWatch).getTime() <= Date.now();
+  if (!dirty && !cronDue && !emailDue && !watchDue) return;
   queueTickCore_({});
 }
 
@@ -249,7 +252,7 @@ function queueTickCore_(deps) {
   const now = deps.now || (() => Date.now());
   const started = now();
   const lock = deps.lock || scriptLock_();
-  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '', emailScan: null };
+  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '', emailScan: null, watchScan: null };
   if (!lock.tryLock(5000)) { report.skipped = 'locked'; return report; }
   try {
     const store = deps.store || sheetQueueStore_();
@@ -261,6 +264,14 @@ function queueTickCore_(deps) {
     } catch (err) {
       report.emailScan = { error: String(err && err.message || err) };
       console.warn('掃 Email 指令信失敗：' + report.emailScan.error);
+    }
+
+    // 0b. M7-B：watchers 到期就檢查一次（旗標沒到會立刻回 null）
+    try {
+      report.watchScan = (deps.watchScan || watcherScanIfDue_)(Object.assign({ now, queueStore: store, enqueue: (type, payload, sid) => enqueue_(type, payload, sid, { store }) }, deps.watchDeps || {}));
+    } catch (err) {
+      report.watchScan = { error: String(err && err.message || err) };
+      console.warn('掃 watchers 失敗：' + report.watchScan.error);
     }
 
     // 1. 到期的排程入列
@@ -338,6 +349,8 @@ function runQueueJob_(job, deps) {
       return runCronJob_(job, deps);
     case 'curation':
       return runCurationJob_(job, deps);
+    case 'watch':
+      return runWatchJob_(job, deps);
     default:
       throw new Error(`未知的 job type：${job.type}`);
   }
@@ -401,7 +414,8 @@ function runTurnJob_(job, deps) {
   if (r.sessionId) job.session_id = r.sessionId;
 
   const result = summarizeTurnResult_(r);
-  let state = result.steps.some((s) => s.status === 'pending_approval') ? 'needs_approval' : 'done';
+  let state = result.steps.some((s) => s.status === 'pending_input') ? 'needs_input'
+    : result.steps.some((s) => s.status === 'pending_approval') ? 'needs_approval' : 'done';
   const continuations = toNumber_(p.continuations, 0);
   if (r.stopped === 'time_budget' || r.stopped === 'max_steps') {
     if (continuations < QUEUE_CONTINUATION_MAX) {
@@ -418,13 +432,17 @@ function runTurnJob_(job, deps) {
   }
 
   // M6：Telegram / Email 來的 job 每一輪（含續跑）都把文字送回原通道；待審批附按鈕 / 說明。投遞失敗記 error 但 state 不改。
-  const channelDelivery = deliverTurnToChannel_(p, result, Object.assign({ now: deps.now }, deps.channelDeps || {}));
+  // M7-B：排程 / watch 的 session 由 Telegram 回答提問後，續跑結果也送回那個 chat（payload.reply_channel）。
+  const channelPayload = p.reply_channel === 'telegram' && p.telegram_chat_id ? Object.assign({}, p, { channel: 'telegram' }) : p;
+  const channelDelivery = deliverTurnToChannel_(channelPayload, result, Object.assign({ now: deps.now }, deps.channelDeps || {}));
   if (channelDelivery) result.channel_delivery = channelDelivery;
 
-  // cron：最終才投遞並更新 last_status
+  // cron / watch：最終才投遞並更新 last_status；停在提問時不投遞（回答後的續跑會投遞）
   if (p.cron) {
     if (result.continued_by) {
       recordCronStatus_(p.cron, `running（續跑 job ${result.continued_by}）`, deps);
+    } else if (state === 'needs_input') {
+      recordCronStatus_(p.cron, 'needs_input（等待 owner 回答提問）', deps);
     } else {
       const cronRow = deps.cronStore ? deps.cronStore.get(p.cron.cron_id) : null;
       const cronInfo = Object.assign({ id: p.cron.cron_id, name: p.cron.name, deliver_to: p.cron.deliver_to }, cronRow ? { schedule: cronRow.schedule } : {});

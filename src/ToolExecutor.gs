@@ -59,7 +59,7 @@ const PRINCIPALS = Object.freeze(['owner', 'group_member', 'guest']);
 /** 各 principal 預設可用的 toolset（owner 不限）。 */
 const PRINCIPAL_DEFAULT_TOOLSETS = Object.freeze({ group_member: Object.freeze(['web', 'skill', 'session']) });
 /** 各 principal 永遠拒絕、owner 也無法放寬的 toolset（記憶是 owner 的長期記憶、cronjob 會留下常駐自動化）。 */
-const PRINCIPAL_LOCKED_TOOLSETS = Object.freeze({ group_member: Object.freeze(['memory', 'cronjob']) });
+const PRINCIPAL_LOCKED_TOOLSETS = Object.freeze({ group_member: Object.freeze(['memory', 'cronjob', 'watcher']) });
 /** Workspace / ERP 類 toolset（群組放寬這些時 Doctor 會提醒）。 */
 const WORKSPACE_TOOLSETS = Object.freeze(['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'odoo']);
 
@@ -88,7 +88,7 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
 
 /**
  * @typedef {{
- *   name: string, status: ('ok'|'error'|'denied'|'invalid'|'pending_approval'), ok: boolean,
+ *   name: string, status: ('ok'|'error'|'denied'|'invalid'|'pending_approval'|'pending_input'), ok: boolean,
  *   content: string, result: *, ms: number, approvalId: string, spill: ?{fileId: string, total: number}, error: string
  * }} ToolOutcome
  * content 是回給模型的字串（已截長 / 溢寫）；result 是 handler 原始回傳（只有 ok 時有）。
@@ -463,6 +463,8 @@ function checkPrincipalAccess_(tool, principal, toolsets) {
   const p = normalizePrincipal_(principal);
   if (p === 'owner') return '';
   if (p === 'guest') return '訪客對話沒有任何工具。請用一般知識回答，需要 owner 的資料請對方直接找 owner。';
+  // M7-B：ownerOnly 的工具（session_ask_owner）不論 toolset 是否放寬，非 owner 一律看不到也用不了。
+  if (tool.ownerOnly) return `工具「${tool.name}」只有 owner 的任務能用。`;
   const allowed = principalToolsets_(p, toolsets);
   if (allowed.indexOf(tool.toolset) === -1) {
     return `toolset「${tool.toolset}」在群組對話中不開放（群組成員目前可用：${allowed.join(', ') || '（無）'}）。` +
@@ -721,6 +723,11 @@ function executeTool_(name, args, ctx, deps) {
     return finish('error', toolErrorText_('tool_error', message), { error: message });
   }
 
+  // M7-B：session_ask_owner 回 pending_input → 本輪停下等 owner 回答（Agent.gs 看 status）。
+  if (result && typeof result === 'object' && result.status === 'pending_input' && result.question_id) {
+    return finish('pending_input', stringifyToolResult_(result), { result, questionId: String(result.question_id) });
+  }
+
   let content = stringifyToolResult_(result);
   let spillInfo = null;
   if (!tool.noSpill && content.length > config.spillThreshold) {
@@ -738,6 +745,134 @@ function executeTool_(name, args, ctx, deps) {
     }
   }
   return finish('ok', content, { result, spill: spillInfo, whitelisted });
+}
+
+// ---- 向 owner 提問（M7-B）-------------------------------------------------------------------
+//
+// 無人模式的任務（排程 / 事件觸發）需要 owner 決定時，session_ask_owner 在 Approvals 寫一列（tool=session_ask_owner、
+// state=pending、args={question, options, tg_message_id}），推一則 Telegram 問題，然後回 pending_input 讓本輪停下、
+// job 進 needs_input。owner 在 Telegram 回覆那則訊息 / 用 /answer，或在管理頁「紀錄 → 審批」回答 → answerQuestion_
+// 把答案以系統訊息 enqueue 一個 continuation 接回原 session（與審批續跑同一條路）。
+
+/** Approvals 裡提問列的 tool 名。 */
+const ASK_OWNER_TOOL = 'session_ask_owner';
+const ASK_OWNER_MAX_OPTIONS = 6;
+const ASK_OWNER_QUESTION_MAX = 1500;
+
+/** @return {string} q_<base36 時戳>_<亂數> */
+function newQuestionId_() {
+  let rand;
+  try { rand = Utilities.getUuid().slice(0, 8); } catch (err) { rand = Math.random().toString(36).slice(2, 10); }
+  return 'q_' + Date.now().toString(36) + '_' + rand;
+}
+
+/**
+ * session_ask_owner 的 handler。
+ * @param {{question: string, options: (Array<string>|undefined)}} args
+ * @param {!Object} ctx executor 的 handlerCtx（mode / principal / sessionId / jobId；測試可注入 questionSink / notify）
+ * @return {{status: string, question_id: string, message: string, telegram: Object}}
+ */
+function sessionAskOwner_(args, ctx) {
+  ctx = ctx || {};
+  if ((ctx.mode || 'interactive') !== 'autonomous') {
+    throw new Error('互動模式有使用者在線：請直接在回覆文字裡提問並結束本輪，不要用 session_ask_owner。');
+  }
+  if (normalizePrincipal_(ctx.principal) !== 'owner') throw new Error('只有 owner 的任務可以向 owner 提問。');
+  const question = truncateText_(requireString_(args.question, 'question'), ASK_OWNER_QUESTION_MAX).text;
+  const options = toStringList_(args.options).slice(0, ASK_OWNER_MAX_OPTIONS);
+  const id = newQuestionId_();
+  const sessionId = String(ctx.sessionId || '');
+  const notify = ctx.notify || ((q) => telegramAskOwner_(q));
+  let tg = { ok: false, message_id: 0, chat_id: '', error: '', skipped: '' };
+  try { tg = notify({ id, question, options, sessionId }) || tg; } catch (err) { tg = { ok: false, message_id: 0, chat_id: '', error: String(err && err.message || err), skipped: '' }; }
+  const row = {
+    id, job_id: sessionId, tool: ASK_OWNER_TOOL,
+    args: JSON.stringify({ question, options, tg_message_id: tg.message_id || 0, tg_chat_id: tg.chat_id || '' }),
+    reason: `owner 提問：${truncateText_(question.replace(/\s+/g, ' '), 120).text}`,
+    state: 'pending', decided_at: '', result: '',
+  };
+  (ctx.questionSink || ((r) => appendTableRow_('Approvals', r)))(row);
+  return {
+    status: 'pending_input', question_id: id,
+    message: `問題已送給 owner（${tg.ok ? '已推到 Telegram' : '待 owner 在管理頁「紀錄 → 審批」回答'}）。本輪到此結束；收到回答後系統會以系統訊息接回。不要再做其他事。`,
+    telegram: tg,
+  };
+}
+
+/**
+ * owner 回答一個提問：標記 answered、把答案接回原 session（continuation）。
+ * @param {string} id q_… 
+ * @param {string} answer
+ * @param {{approvalStore: (Object|undefined), sessionStore: (Object|undefined), queueStore: (Object|undefined), enqueue: (Function|undefined),
+ *   cronStore: (Object|undefined), watcherStore: (Object|undefined), via: (string|undefined), telegramChatId: (string|undefined)}=} deps
+ *   via：'telegram' | 'admin'；telegramChatId：回答來自哪個 chat（續跑結果送回該 chat）
+ * @return {{id: string, state: string, continuation: string, question: string}}
+ * @throws {Error} 找不到 / 已回答 / 不是提問
+ */
+function answerQuestion_(id, answer, deps) {
+  deps = deps || {};
+  const approvalStore = deps.approvalStore || sheetApprovalStore_();
+  const row = approvalStore.list().find((r) => r.id === id);
+  if (!row) throw new Error(`找不到提問「${id}」。`);
+  if (row.tool !== ASK_OWNER_TOOL) throw new Error(`「${id}」不是提問（是 ${row.tool} 的審批）。`);
+  if (row.state !== 'pending') throw new Error(`提問「${id}」已回答（${row.state}）。`);
+  const text = String(answer || '').trim();
+  if (!text) throw new Error('回答不可為空。');
+  const parsed = parseJsonArgs_(row.args);
+  approvalStore.update(row, { state: 'answered', decided_at: new Date(), result: truncateText_(text, 2000).text });
+  const sessionId = String(row.job_id || '');
+  let continuation = null;
+  if (sessionId) {
+    let session = null;
+    try { session = (deps.sessionStore || sheetSessionStore_()).get(sessionId); } catch (err) { session = null; }
+    if (session && session.status === 'active') {
+      const payload = Object.assign({
+        message: `（系統）你先前向 owner 提問：「${truncateText_(String(parsed.question || ''), 600).text}」\nowner 的回答：${truncateText_(text, 1500).text}\n請據此接續完成原本的任務並回覆；不要再問同一個問題。`,
+        origin: 'answer', question_id: id, continuations: 0,
+        channel: session.channel || 'admin', mode: /^(cron|watch)$/.test(session.channel) ? 'autonomous' : 'interactive',
+        systemExtra: /^(cron|watch)$/.test(session.channel) ? AUTONOMOUS_SYSTEM_EXTRA : '',
+        external_id: session.external_id || '',
+        telegram_chat_id: session.channel === 'telegram' ? session.external_id : (deps.telegramChatId || ''),
+        email_thread_id: session.channel === 'email' ? session.external_id : '',
+      }, autonomousSessionExtras_(session, deps));
+      // 續跑結果要送回回答的 Telegram chat：排程 / watch 的 session 沒有通道，借用 channel=telegram 的投遞路徑。
+      if (payload.telegram_chat_id && session.channel !== 'telegram' && session.channel !== 'email') payload.reply_channel = 'telegram';
+      try { continuation = (deps.enqueue || enqueue_)('continuation', payload, sessionId, { store: deps.queueStore }); } catch (err) { console.warn('提問回答後續跑 enqueue 失敗：' + (err && err.message || err)); }
+    }
+  }
+  return { id, state: 'answered', continuation: continuation ? continuation.id : '', question: String(parsed.question || '') };
+}
+
+/**
+ * 排程 / watch 的 session 續跑時，補回投遞所需的 cron 資訊（external_id = cron id 或 watcher id）。
+ * @param {!Object} session
+ * @param {{cronStore: (Object|undefined), watcherStore: (Object|undefined)}} deps
+ * @return {!Object} 可能含 cron
+ */
+function autonomousSessionExtras_(session, deps) {
+  const out = {};
+  if (!session || !session.external_id) return out;
+  try {
+    if (session.channel === 'cron') {
+      const c = (deps.cronStore || sheetCronStore_()).get(session.external_id);
+      if (c) out.cron = { cron_id: c.id, name: c.name, deliver_to: c.deliver_to, skills: c.skills };
+    } else if (session.channel === 'watch' && typeof sheetWatcherStore_ === 'function') {
+      const w = (deps.watcherStore || sheetWatcherStore_()).get(session.external_id);
+      if (w) out.cron = { cron_id: '', name: w.name, deliver_to: w.deliver_to, skills: w.skills, watcher_id: w.id };
+    }
+  } catch (err) { /* 查不到就不投遞 */ }
+  return out;
+}
+
+/**
+ * 待回答的提問（給 Telegram 比對 reply_to 與管理頁）。
+ * @param {Object=} approvalStore
+ * @return {!Array<{id: string, question: string, options: !Array<string>, tg_message_id: number, tg_chat_id: string, session_id: string}>}
+ */
+function pendingQuestions_(approvalStore) {
+  return (approvalStore || sheetApprovalStore_()).list()
+    .filter((r) => r.tool === ASK_OWNER_TOOL && r.state === 'pending')
+    .map((r) => { const a = parseJsonArgs_(r.args); return { id: r.id, question: String(a.question || ''), options: toStringList_(a.options), tg_message_id: toNumber_(a.tg_message_id, 0), tg_chat_id: String(a.tg_chat_id || ''), session_id: r.job_id }; });
 }
 
 // ---- 審批 -------------------------------------------------------------------------
@@ -771,7 +906,7 @@ function listApprovals_(state) {
  * @return {string}
  */
 function approvalCreatedAt_(id) {
-  const m = /^apr_([0-9a-z]+)_/.exec(id);
+  const m = /^(?:apr|q)_([0-9a-z]+)_/.exec(id);
   if (!m) return '';
   const ms = parseInt(m[1], 36);
   return isFinite(ms) ? fmtDate_(new Date(ms)) : '';
@@ -807,6 +942,7 @@ function decideApproval_(id, approve, deps) {
   const approvalStore = deps.approvalStore || sheetApprovalStore_();
   const row = approvalStore.list().find((r) => r.id === id);
   if (!row) throw new Error(`找不到審批「${id}」。`);
+  if (row.tool === ASK_OWNER_TOOL) throw new Error(`「${id}」是向 owner 的提問，請用回答（answerQuestion_）而不是批准 / 拒絕。`);
   if (row.state !== 'pending') throw new Error(`審批「${id}」已處理（${row.state}）。`);
   const now = new Date();
   const execDeps = {};
@@ -846,15 +982,16 @@ function enqueueApprovalContinuation_(row, approved, outcome, deps) {
   const text = approved
     ? `（系統）先前待審批的 ${row.tool} 已由 owner 批准並執行，結果：${truncateText_(outcome ? outcome.content : '', 1500).text}`
     : `（系統）先前待審批的 ${row.tool}（參數 ${argsPreview}）已由 owner 拒絕，未執行。`;
-  const payload = {
+  const payload = Object.assign({
     message: text + '\n請據此接續完成原本的任務並回覆（不要再重送同一個動作）。',
     origin: 'approval', approval_id: row.id, continuations: 0,
-    channel: session.channel || 'admin', mode: session.channel === 'cron' ? 'autonomous' : 'interactive',
+    channel: session.channel || 'admin', mode: /^(cron|watch)$/.test(session.channel) ? 'autonomous' : 'interactive',
+    systemExtra: /^(cron|watch)$/.test(session.channel) ? AUTONOMOUS_SYSTEM_EXTRA : '',
     // M6：通道 session 的續跑結果要送回原通道
     external_id: session.external_id || '',
     telegram_chat_id: session.channel === 'telegram' ? session.external_id : '',
     email_thread_id: session.channel === 'email' ? session.external_id : '',
-  };
+  }, autonomousSessionExtras_(session, deps));
   try {
     return (deps.enqueue || enqueue_)('continuation', payload, sessionId, { store: deps.queueStore });
   } catch (err) {

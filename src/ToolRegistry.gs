@@ -26,10 +26,11 @@ const TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
 /**
  * @typedef {{
  *   name: string, toolset: string, description: string, parameters: !Object, risk: string,
- *   handler: function(!Object, !Object): *, noSpill: (boolean|undefined),
+ *   handler: function(!Object, !Object): *, noSpill: (boolean|undefined), ownerOnly: (boolean|undefined),
  *   proposal: (function(!Object, !Object): {reason: string}|undefined),
  *   recipients: (function(!Object): ?Array<string>|undefined)
  * }} ToolDecl
+ * ownerOnly（M7-B）：非 owner 的 principal 一律不可見 / 不可用（不看 toolset 放寬）。
  * recipients（M7）：X 類工具回傳這次的收件人 email（null = 不明）；executor 用它比對 Config gmail_send_whitelist 決定是否免審批。
  * proposal（M5）：有此 hook 的工具在未批准時不執行 handler，executor 改呼叫它驗證並取得 reason，寫 Approvals 後回 pending_approval；
  * owner 批准後才以 approved=true 執行 handler（skill_manage 用）。
@@ -56,6 +57,8 @@ function allToolDeclarations_() {
     calendarTools_(),
     webTools_(),
     odooTools_(),
+    telegramTools_(),
+    watcherTools_(),
     sessionTools_(),
     memoryTools_(),
     cronTools_(),
@@ -252,7 +255,7 @@ function toStringList_(v) {
 function parseDriveId_(v) {
   const s = String(v === null || v === undefined ? '' : v).trim();
   if (!s) return '';
-  const m = /\/d\/([a-zA-Z0-9_-]{10,})/.exec(s) || /[?&]id=([a-zA-Z0-9_-]{10,})/.exec(s);
+  const m = /\/d\/([a-zA-Z0-9_-]{10,})/.exec(s) || /\/folders\/([a-zA-Z0-9_-]{10,})/.exec(s) || /[?&]id=([a-zA-Z0-9_-]{10,})/.exec(s);
   return m ? m[1] : s;
 }
 

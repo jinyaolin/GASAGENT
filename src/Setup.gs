@@ -31,6 +31,7 @@ function installAgent() {
   // M4：CRON_NEXT_RUN 旗標與 Cron tab 對齊（queueTick 閒置時靠它判斷有沒有排程要跑）。
   let cronNextRun = '';
   try { cronNextRun = refreshCronNextRunProp_(sheetCronStore_().list()); } catch (err) { cronNextRun = `failed: ${err && err.message || err}`; }
+  try { refreshWatchNextCheckProp_(sheetWatcherStore_().list()); } catch (err) { /* 沒有 Watchers tab 時略過（下次 installAgent 會補） */ }
   // M5：技能資料夾為空就寫入兩個內建範例技能（weekly-report / deck-planning）。
   let skills = {};
   try { skills = { folder: skillsFolder_().getName(), installed: installBuiltinSkills_() }; } catch (err) { skills = { error: String(err && err.message || err) }; }

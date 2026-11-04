@@ -36,6 +36,8 @@ const PROP = Object.freeze({
   TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
   /** M6：Email 指令信下次掃描時間（ISO）；空 = 停用。queueTick 閒置時連同另兩個旗標一起看。 */
   EMAIL_NEXT_SCAN: 'EMAIL_NEXT_SCAN',
+  /** M7-B：最早到期的 watcher 檢查時間（ISO）；空 = 沒有啟用的 watcher。 */
+  WATCH_NEXT_CHECK: 'WATCH_NEXT_CHECK',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 

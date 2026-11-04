@@ -24,6 +24,7 @@ const DB_SCHEMA = Object.freeze({
   Memory: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],
   UserProfile: ['id', 'content', 'category', 'created', 'updated', 'source_session', 'pinned'],
   Cron: ['id', 'name', 'schedule', 'next_run', 'prompt', 'skills', 'deliver_to', 'model_pin', 'enabled', 'last_run', 'last_status'],
+  Watchers: ['id', 'name', 'type', 'config', 'prompt', 'deliver_to', 'model_pin', 'skills', 'every_minutes', 'enabled', 'cursor', 'next_check', 'last_check', 'last_fired', 'last_status'],
   Queue: ['id', 'type', 'session_id', 'payload', 'state', 'attempts', 'started', 'finished', 'error'],
   Approvals: ['id', 'job_id', 'tool', 'args', 'reason', 'state', 'decided_at', 'result'],
   AuditLog: ['ts', 'session_id', 'tool', 'args_preview', 'result_preview', 'ok', 'ms', 'principal'],
