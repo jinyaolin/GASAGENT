@@ -485,7 +485,47 @@ function adminGetToolSettings() {
       hasKey: !!getProp_(PROP.WEB_SEARCH_KEY),
       keyHint: keyHint_(getProp_(PROP.WEB_SEARCH_KEY)),
     },
+    odoo: {
+      url: config.odooUrl,
+      db: config.odooDb,
+      login: config.odooLogin,
+      allowed_models: config.odooAllowedModels.join('\n'),
+      default_models: ODOO_DEFAULT_MODELS.join('\n'),
+      hasKey: !!getProp_(PROP.ODOO_API_KEY),
+      keyHint: keyHint_(getProp_(PROP.ODOO_API_KEY)),
+    },
   };
+}
+
+/**
+ * 工具分頁：測試 Odoo 連線（authenticate、讀自己、數 res.partner）。
+ * @return {!Object} odooTestConnection_ 的結果
+ */
+function adminTestOdoo() {
+  assertOwner();
+  return odooTestConnection_(getToolConfig_());
+}
+
+/**
+ * 工具分頁：免登入查 Odoo 版本與資料庫清單，幫 owner 填 db。
+ * @param {string} url
+ * @return {{version: string, databases: !Array<string>, error: string}}
+ */
+function adminProbeOdoo(url) {
+  assertOwner();
+  const base = String(url || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\/[^\s/]+/.test(base)) throw new Error('請先填 https:// 開頭的 Odoo 網址。');
+  const out = { version: '', databases: [], error: '' };
+  try {
+    const v = odooRpc_(base, odooRpcPayload_('common', 'version', []));
+    out.version = String(v && v.server_version || '');
+  } catch (err) { out.error = String(err && err.message || err); }
+  try {
+    const res = UrlFetchApp.fetch(base + '/web/database/list', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ jsonrpc: '2.0', method: 'call', params: {} }), muteHttpExceptions: true });
+    const j = JSON.parse(res.getContentText());
+    if (Array.isArray(j.result)) out.databases = j.result.map(String);
+  } catch (err) { /* list_db 關閉時拿不到，讓 owner 手填 */ }
+  return out;
 }
 
 /**

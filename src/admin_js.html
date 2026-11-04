@@ -1027,6 +1027,39 @@
     $searchCx.value = ws.cx || '';
     const $searchKey = el('input', { type: 'password', autocomplete: 'off', placeholder: ws.hasKey ? `已設定（${ws.keyHint}），留空則不變` : '貼上搜尋 API key' });
     let searchClearKey = false;
+    const od = data.odoo || { url: '', db: '', login: '', allowed_models: '', default_models: '', hasKey: false, keyHint: '' };
+    const $odooUrl = el('input', { type: 'text', placeholder: 'https://erp.example.com' });
+    $odooUrl.value = od.url || '';
+    const $odooDbText = el('input', { type: 'text', placeholder: '資料庫名稱' });
+    $odooDbText.value = od.db || '';
+    const $odooLogin = el('input', { type: 'text', autocomplete: 'off', placeholder: 'agent 用的 Odoo 登入帳號（email）' });
+    $odooLogin.value = od.login || '';
+    const $odooKey = el('input', { type: 'password', autocomplete: 'off', placeholder: od.hasKey ? `已設定（${od.keyHint}），留空則不變` : '貼上 Odoo API key（偏好設定 → 帳戶安全性 → 新 API 金鑰）' });
+    let odooClearKey = false;
+    const $odooModels = el('textarea', { rows: 6, placeholder: od.default_models, spellcheck: 'false' });
+    $odooModels.value = od.allowed_models || '';
+    const $odooProbe = el('span', { class: 'meta' });
+    const btnOdooProbe = el('button', { class: 'small', onclick: async () => {
+      btnOdooProbe.disabled = true;
+      $odooProbe.textContent = '查詢中…';
+      try {
+        const r = await call('adminProbeOdoo', $odooUrl.value);
+        $odooProbe.textContent = (r.version ? `Odoo ${r.version}` : r.error) + (r.databases.length ? ` · 資料庫：${r.databases.join(', ')}` : ' · 伺服器未開放列資料庫，請手填');
+        if (r.databases.length === 1 && !$odooDbText.value) $odooDbText.value = r.databases[0];
+      } catch (err) { $odooProbe.innerHTML = ''; $odooProbe.append(errorBox(err)); } finally { btnOdooProbe.disabled = false; }
+    } }, '查詢版本 / 資料庫');
+    const $odooTest = el('span', { class: 'meta' });
+    const btnOdooTest = el('button', { class: 'small', onclick: async () => {
+      btnOdooTest.disabled = true;
+      $odooTest.textContent = '測試中…';
+      try {
+        const r = await call('adminTestOdoo');
+        $odooTest.innerHTML = '';
+        $odooTest.append(r.ok
+          ? el('span', { class: 'summary ok' }, `OK ${r.ms} ms · Odoo ${r.version} · 使用者 ${r.user}（uid ${r.uid}）${r.company ? ' · ' + r.company : ''}${r.partners >= 0 ? ' · res.partner ' + r.partners + ' 筆' : ''}`)
+          : el('span', { class: 'summary fail' }, r.error));
+      } catch (err) { $odooTest.innerHTML = ''; $odooTest.append(errorBox(err)); } finally { btnOdooTest.disabled = false; }
+    } }, '測試連線');
     const $searchTest = el('span', { class: 'meta' });
     const btnTestSearch = el('button', { class: 'small', onclick: async () => {
       btnTestSearch.disabled = true;
@@ -1046,7 +1079,7 @@
 
     $body.append(
       el('div', { class: 'panel' }, [el('h3', {}, 'RBAC：toolset 開關'), $rbac,
-        el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。D 類工具只有 slides_delete_slide（刪簡報的某一頁）與 calendar_delete_event（刪行事曆事件），要用請開該 toolset 的 delete；Gmail / Drive 沒有任何刪除工具。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
+        el('p', { class: 'field-hint' }, '預設 read / write 開、delete / external 關。D 類工具只有 slides_delete_slide（刪簡報的某一頁）、calendar_delete_event（刪行事曆事件）與 odoo_unlink（刪 Odoo 記錄），要用請開該 toolset 的 delete；Gmail / Drive 沒有任何刪除工具。要讓 agent 寄信或分享檔案，請開 gmail / drive 的 external，動作仍會依審批策略送審。')]),
       el('div', { class: 'panel' }, [el('h3', {}, 'Agent 設定'), el('div', { class: 'form-grid' }, [
         field('審批策略（X 類工具）', $policy, 'autonomous_only = 只有排程（無人模式）才送審，聊天台直接執行'),
         field('spill_threshold（字元）', $spill, '工具結果超過此長度就溢寫到 Drive「GAS Agent/spill」，context 只留前 1000 字'),
@@ -1060,6 +1093,14 @@
         field('API key', el('div', { class: 'key-row' }, [$searchKey].concat(ws.hasKey ? [el('button', { class: 'small danger', onclick: () => { searchClearKey = true; $searchKey.value = ''; $searchKey.placeholder = '將於儲存時清除'; } }, '清除 key')] : [])), '只寫入 Script Property WEB_SEARCH_KEY，不存 sheet、不回傳明文'),
         field('測試', el('div', { class: 'key-row' }, [btnTestSearch, $searchTest]), '先儲存再測；搜一個固定關鍵字回結果數'),
       ])]),
+      el('div', { class: 'panel' }, [el('h3', {}, 'Odoo（ERP）'), el('div', { class: 'form-grid' }, [
+        field('Odoo 網址', el('div', { class: 'key-row' }, [$odooUrl, btnOdooProbe]), '只到網域；工具走 /jsonrpc'),
+        field('', $odooProbe),
+        field('資料庫', $odooDbText, '查詢只有一個資料庫時會自動帶入'),
+        field('登入帳號', $odooLogin, '建議在 Odoo 另建一個 agent 專用使用者並只給需要的權限群組；agent 的能力受該使用者的 Odoo 存取權限制'),
+        field('API key', el('div', { class: 'key-row' }, [$odooKey].concat(od.hasKey ? [el('button', { class: 'small danger', onclick: () => { odooClearKey = true; $odooKey.value = ''; $odooKey.placeholder = '將於儲存時清除'; } }, '清除 key')] : [])), '只寫入 Script Property ODOO_API_KEY；Odoo 14+ 的 API key 可單獨撤銷，比密碼安全'),
+        field('測試', el('div', { class: 'key-row' }, [btnOdooTest, $odooTest]), '先儲存再測：登入、讀自己、數聯絡人'),
+      ]), field('model 白名單（一行一個）', $odooModels, 'agent 只能讀寫這些 model；空白 = 全部拒絕。灰字是預設清單，清空再儲存會變成全部拒絕（不會回填預設）')]),
       el('div', { class: 'panel' }, [el('h3', {}, '寄信白名單（免審批）'), field('一行一個 email；*@domain.com 代表整個網域。gmail_send / gmail_forward 的收件人（含 cc / bcc）全部在名單內時直接寄出、不送審批；任何一個不在、寄草稿或回覆討論串（收件人不明）、或由群組成員觸發，仍走審批。Telegram 也可用 /white list | add | delete <email> 修改；異動記 AuditLog。空白 = 全部要審批。', $whitelist)]),
       el('div', { class: 'panel' }, [el('h3', {}, '人格（persona）'), field('system prompt 開頭；留空用預設（灰字）', $persona)]),
       el('div', { class: 'toolbar' }, [btnSave, btnReload, $msg]),
@@ -1075,6 +1116,7 @@
           rbac, approval_policy: $policy.value, spill_threshold: $spill.value, max_tool_steps: $steps.value,
           web_allowed_domains: $domains.value, gmail_send_whitelist: $whitelist.value, persona: $persona.value, slides_template_id: $slidesTpl.value,
           web_search_engine: $searchEngine.value, web_search_cx: $searchCx.value, web_search_key: $searchKey.value, web_search_clear_key: searchClearKey,
+          odoo_url: $odooUrl.value, odoo_db: $odooDbText.value, odoo_login: $odooLogin.value, odoo_allowed_models: $odooModels.value, odoo_key: $odooKey.value, odoo_clear_key: odooClearKey,
         });
         $msg.append(el('span', { class: 'summary ok' }, '已儲存'));
         setTimeout(() => { root.innerHTML = ''; renderTools(root); }, 600);

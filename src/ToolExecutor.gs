@@ -31,6 +31,10 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   GMAIL_SEND_WHITELIST: 'gmail_send_whitelist',
   WEB_SEARCH_ENGINE: 'web_search_engine',
   WEB_SEARCH_CX: 'web_search_cx',
+  ODOO_URL: 'odoo_url',
+  ODOO_DB: 'odoo_db',
+  ODOO_LOGIN: 'odoo_login',
+  ODOO_ALLOWED_MODELS: 'odoo_allowed_models',
 });
 
 /** RBAC 設定 key 前綴：rbac.<toolset>。 */
@@ -56,8 +60,8 @@ const PRINCIPALS = Object.freeze(['owner', 'group_member', 'guest']);
 const PRINCIPAL_DEFAULT_TOOLSETS = Object.freeze({ group_member: Object.freeze(['web', 'skill', 'session']) });
 /** 各 principal 永遠拒絕、owner 也無法放寬的 toolset（記憶是 owner 的長期記憶、cronjob 會留下常駐自動化）。 */
 const PRINCIPAL_LOCKED_TOOLSETS = Object.freeze({ group_member: Object.freeze(['memory', 'cronjob']) });
-/** Workspace 類 toolset（群組放寬這些時 Doctor 會提醒）。 */
-const WORKSPACE_TOOLSETS = Object.freeze(['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar']);
+/** Workspace / ERP 類 toolset（群組放寬這些時 Doctor 會提醒）。 */
+const WORKSPACE_TOOLSETS = Object.freeze(['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'odoo']);
 
 /** 新 toolset 的預設開關。 */
 const DEFAULT_TOOLSET_PERMS = Object.freeze({ read: true, write: true, delete: false, external: false });
@@ -77,7 +81,8 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
  *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string,
- *   gmailSendWhitelist: !Array<string>, webSearchEngine: string, webSearchCx: string
+ *   gmailSendWhitelist: !Array<string>, webSearchEngine: string, webSearchCx: string,
+ *   odooUrl: string, odooDb: string, odooLogin: string, odooAllowedModels: !Array<string>
  * }} ToolConfig
  */
 
@@ -122,6 +127,10 @@ function parseToolConfig_(map) {
     webSearchEngine: WEB_SEARCH_ENGINES.indexOf(String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] || '').trim().toLowerCase()) === -1
       ? WEB_SEARCH_DEFAULT_ENGINE : String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE]).trim().toLowerCase(),
     webSearchCx: String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] || '').trim(),
+    odooUrl: String(map[TOOL_CONFIG_KEYS.ODOO_URL] || '').trim().replace(/\/+$/, ''),
+    odooDb: String(map[TOOL_CONFIG_KEYS.ODOO_DB] || '').trim(),
+    odooLogin: String(map[TOOL_CONFIG_KEYS.ODOO_LOGIN] || '').trim(),
+    odooAllowedModels: parseOdooModels_(map[TOOL_CONFIG_KEYS.ODOO_ALLOWED_MODELS]),
   };
 }
 
@@ -209,6 +218,10 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST in map)) missing[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = '';
   if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] = WEB_SEARCH_DEFAULT_ENGINE;
   if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_CX in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] = '';
+  if (!(TOOL_CONFIG_KEYS.ODOO_URL in map)) missing[TOOL_CONFIG_KEYS.ODOO_URL] = '';
+  if (!(TOOL_CONFIG_KEYS.ODOO_DB in map)) missing[TOOL_CONFIG_KEYS.ODOO_DB] = '';
+  if (!(TOOL_CONFIG_KEYS.ODOO_LOGIN in map)) missing[TOOL_CONFIG_KEYS.ODOO_LOGIN] = '';
+  if (!(TOOL_CONFIG_KEYS.ODOO_ALLOWED_MODELS in map)) missing[TOOL_CONFIG_KEYS.ODOO_ALLOWED_MODELS] = ODOO_DEFAULT_MODELS.join('\n');
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   Object.keys(CHANNEL_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = CHANNEL_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
@@ -270,6 +283,28 @@ function saveToolConfig_(input) {
   } else if (input.web_search_clear_key) {
     setProp_(PROP.WEB_SEARCH_KEY, '');
     securityAudit_('web_search_key:cleared', 'web_search API key 已清除');
+  }
+  // Odoo（M7-B）：URL / db / 登入 / model 白名單進 Config；key 只進 Script Property。
+  if (input.odoo_url !== undefined) {
+    const url = String(input.odoo_url || '').trim().replace(/\/+$/, '');
+    if (url && !/^https:\/\/[^\s/]+/.test(url)) throw new Error('odoo_url 必須是 https:// 開頭的網址（只到網域，例 https://erp.example.com）。');
+    values[TOOL_CONFIG_KEYS.ODOO_URL] = url;
+  }
+  if (input.odoo_db !== undefined) values[TOOL_CONFIG_KEYS.ODOO_DB] = String(input.odoo_db || '').trim();
+  if (input.odoo_login !== undefined) values[TOOL_CONFIG_KEYS.ODOO_LOGIN] = String(input.odoo_login || '').trim();
+  if (input.odoo_allowed_models !== undefined) {
+    const next = parseOdooModels_(input.odoo_allowed_models);
+    const prev = getToolConfig_().odooAllowedModels;
+    values[TOOL_CONFIG_KEYS.ODOO_ALLOWED_MODELS] = next.join('\n');
+    if (next.join(',') !== prev.join(',')) securityAudit_('odoo_models:set', `Odoo model 白名單由管理頁改為 ${next.length} 筆`);
+  }
+  if (typeof input.odoo_key === 'string' && input.odoo_key.trim()) {
+    setProp_(PROP.ODOO_API_KEY, input.odoo_key.trim());
+    try { CacheService.getScriptCache().removeAll(['odoo_uid:' + String(input.odoo_db || '') + ':' + String(input.odoo_login || '')]); } catch (err) { /* 快取清不掉就等過期 */ }
+    securityAudit_('odoo_key:set', 'Odoo API key 已由管理頁寫入（不記值）');
+  } else if (input.odoo_clear_key) {
+    setProp_(PROP.ODOO_API_KEY, '');
+    securityAudit_('odoo_key:cleared', 'Odoo API key 已清除');
   }
   setConfigValues_(values);
   return getToolConfig_();

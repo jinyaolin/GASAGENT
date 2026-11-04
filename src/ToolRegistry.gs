@@ -55,6 +55,7 @@ function allToolDeclarations_() {
     gmailTools_(),
     calendarTools_(),
     webTools_(),
+    odooTools_(),
     sessionTools_(),
     memoryTools_(),
     cronTools_(),

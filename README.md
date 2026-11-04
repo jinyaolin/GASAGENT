@@ -260,12 +260,13 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) `calendar_delete_event`(**D**，預設關) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) `web_search`(R，Brave Search API 或 Google Programmable Search；key 在 Script Property `WEB_SEARCH_KEY`，不受域名白名單限制，見下方「網路搜尋」) |
+| odoo | `odoo_models`(R，白名單與連線資訊) `odoo_fields`(R) `odoo_search_read`(R) `odoo_read`(R) `odoo_create`(W) `odoo_write`(W) `odoo_call`(W，工作流方法如 action_confirm；擋私有方法與 unlink / write / create) `odoo_unlink`(**D**，預設關) —— 見下方「Odoo」 |
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 | skill | `skill_load`(R，M5：載技能全文) `skill_manage`(W，M5：create / patch **只提案**，owner 批准後才寫入) |
 
-D 類工具只有 `slides_delete_slide`（刪簡報某一頁）與 `calendar_delete_event`（刪行事曆事件），RBAC delete 預設關，要用自己開；Gmail / Drive 沒有任何刪除工具（連垃圾桶都沒有）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
+D 類工具只有 `slides_delete_slide`（刪簡報某一頁）、`calendar_delete_event`（刪行事曆事件）與 `odoo_unlink`（刪 Odoo 記錄），RBAC delete 預設關，要用自己開；Gmail / Drive 沒有任何刪除工具（連垃圾桶都沒有）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
 
 ### 網路搜尋（`web_search`）
 
@@ -277,6 +278,22 @@ D 類工具只有 `slides_delete_slide`（刪簡報某一頁）與 `calendar_del
 | `google` | API key + `cx` | <https://programmablesearchengine.google.com> 建一個「搜尋整個網路」的引擎複製其 id 當 `cx`；key 在 Google Cloud Console 開 Custom Search JSON API；每日 100 次免費，單次最多 10 筆 |
 
 key 只寫入 Script Property `WEB_SEARCH_KEY`（頁面只顯示末 4 碼，寫入 / 清除記 AuditLog 不記值），引擎與 `cx` 存 Config `web_search_engine` / `web_search_cx`。兩家的 key 都走 HTTP header 不進 URL。工具參數：`query`、`max_results`（≤ 20）、`freshness`（day / week / month / year）、`language`（如 `zh-hant`）。搜尋結果只是連結與摘要，不受域名白名單限制，模型要讀全文仍得走 `web_fetch`。「測試搜尋」按鈕用目前設定搜一個固定關鍵字。
+
+### Odoo（`odoo_*`）
+
+讓 agent 讀寫自家 Odoo（實測 Odoo 18 Enterprise）。全部走 Odoo 的 JSON-RPC `/jsonrpc`（`common.authenticate` 取 uid、`object.execute_kw` 做事），不需要在 Odoo 裝任何模組。在管理頁「工具」分頁的「Odoo（ERP）」區塊設定：
+
+| 欄位 | 存哪 | 說明 |
+|---|---|---|
+| Odoo 網址 | Config `odoo_url` | 只到網域，例 `https://erp.example.com`。「查詢版本 / 資料庫」免登入打 `version` 與 `/web/database/list`，只有一個資料庫會自動帶入 |
+| 資料庫 | Config `odoo_db` | 伺服器關閉列資料庫時手填 |
+| 登入帳號 | Config `odoo_login` | **建議在 Odoo 另建 agent 專用使用者**，只給需要的權限群組：agent 能做什麼，上限就是這個使用者在 Odoo 的存取權 |
+| API key | Script Property `ODOO_API_KEY` | Odoo 偏好設定 → 帳戶安全性 → 新 API 金鑰；密碼也能用但 API key 可單獨撤銷。頁面只顯示末 4 碼，寫入 / 清除記 AuditLog 不記值 |
+| model 白名單 | Config `odoo_allowed_models` | 一行一個；agent 只能碰這些 model，空白 = 全部拒絕。預設帶常用的 40 個（res.partner、sale.order、account.move、product.*、crm.lead、project.*、hr.*、stock.*…） |
+
+工具用法：先 `odoo_models` 看能動哪些 model，`odoo_fields` 查欄位（必填排前、含 selection 選項與關聯 model），`odoo_search_read` 用 domain 找（`[["name","ilike","王"]]`，many2one 回 `{id, name}`，有 `count_only` 與分頁），`odoo_create` / `odoo_write` 改資料，`odoo_call` 按工作流按鈕（`sale.order` 的 `action_confirm`、`account.move` 的 `action_post`、`purchase.order` 的 `button_confirm`…）。domain / values / args / kwargs 可給結構或 JSON 字串（Gemini 的 schema 不吃自由結構，所以宣告成 string | object）。
+
+安全邊界：model 白名單、`odoo_call` 擋 `_` 開頭私有方法與 `unlink` / `write` / `create` / `sudo` 等、`odoo_unlink` 獨立成 D 類預設關；`odoo` 列入 Workspace 類 toolset，群聊成員預設看不到；uid 進 CacheService 6 小時，換 key 時清掉。Doctor 在填了網址時多兩項（設定完整、key 存在）。
 
 ### 執行流程（`ToolExecutor.gs executeTool_`）
 
@@ -671,6 +688,8 @@ node scripts/local-tests.js
 | 新增第二個同協定 provider 後第一個不見了 | 舊版會以 id 覆寫（範本預設 id 相同）。現在新增時 id 重複會被拒絕、範本會自動帶 `gemini-2` 之類的 id；被覆寫的那組請重新新增並貼 key |
 | 聊天台選「自動」回「沒有可用的 provider」 | 沒有 enabled 的 `main` provider；到「模型」分頁新增或啟用 |
 | `web_search` 回「尚未設定搜尋 API key」 | 到「工具」分頁「網路搜尋」貼 Brave 或 Google 的 key（google 另填 cx），儲存後按「測試搜尋」 |
+| Odoo「測試連線」回「登入失敗」 | 帳號 / API key / 資料庫三者其一不對；Odoo 的 API key 綁定產生它的使用者，登入帳號要填那個使用者的 email。開了雙因素的帳號密碼不能用 RPC，只能用 API key |
+| Odoo 工具回 `AccessError` | agent 用的 Odoo 使用者沒有那個 model 的權限，到 Odoo 設定 → 使用者 → 存取權限調整，不是 agent 這邊的 RBAC |
 | `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |

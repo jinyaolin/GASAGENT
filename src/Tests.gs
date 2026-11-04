@@ -63,6 +63,8 @@ function smokeTestTable_() {
     ['registry: 重名 / 壞 schema 的宣告被拒；listToolsForProvider_ 依 RBAC 過濾', testRegistryRejectsBad_, 'pure'],
     ['web_search: Brave / Google 請求（key 走 header 不進 URL、freshness / 語言 / 筆數上限、google 缺 cx 報錯）與回應整理（去 HTML、截長、無 url 丟棄）', testWebSearchAdapter_, 'pure'],
     ['sheets: uniqueSheetName_ 重名加序號（不分大小寫）；web_search 設定 parse / save 驗證引擎', testSheetsAndSearchConfig_, 'pure'],
+    ['odoo: model 白名單解析與拒絕、私有 / 封鎖方法拒絕、domain 驗證、ids 正規化、JSON-RPC payload、錯誤解析、記錄正規化（many2one → {id,name}）、fields 摘要', testOdooPure_, 'pure'],
+    ['odoo: execute 流程（authenticate 取 uid 進快取、第二次不再登入、execute_kw args 順序）、search_read / create / call handler 透過 fetch stub；白名單外 model 不打網路；odoo_call 不能叫 unlink', testOdooFlow_, 'pure'],
     ['executor: 參數驗證（required、未宣告參數拒絕、型別、enum、字串轉型）', testValidateArgs_, 'pure'],
     ['executor: RBAC 拒絕（toolset 未宣告 / 權限關閉）且 handler 不執行', testRbacDenied_, 'pure'],
     ['executor: 審批策略 always / autonomous_only / never 與 approved 略過', testApprovalPolicy_, 'pure'],
@@ -639,8 +641,8 @@ function execFake_(name, args, ctx, cfg, registry) {
 function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
   assert_(registry.list.length >= 50, `工具數應 ≥ 50，實際 ${registry.list.length}`);
-  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob', 'skill'], 'toolset 順序');
-  assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name).sort(), ['calendar_delete_event', 'slides_delete_slide'], 'D 類只有刪簡報頁與刪行事曆事件（RBAC delete 預設關）');
+  assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'odoo', 'session', 'memory', 'cronjob', 'skill'], 'toolset 順序');
+  assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name).sort(), ['calendar_delete_event', 'odoo_unlink', 'slides_delete_slide'], 'D 類只有刪簡報頁、刪行事曆事件、刪 Odoo 記錄（RBAC delete 預設關）');
   ['drive_copy', 'drive_list_permissions', 'drive_unshare', 'sheets_list_sheets', 'sheets_find', 'sheets_copy_sheet', 'calendar_delete_event', 'web_search']
     .forEach((n) => assert_(!!registry.byName[n], `應有工具 ${n}`));
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_forward', 'gmail_send'], 'X 類只有 share / send / forward');
@@ -716,6 +718,99 @@ function testSheetsAndSearchConfig_() {
   assertEqual_([cfg.webSearchEngine, cfg.webSearchCx], ['google', 'cx1'], 'web_search 設定解析（小寫、去空白）');
   assertEqual_(parseToolConfig_({ web_search_engine: 'bing' }).webSearchEngine, 'brave', '未知引擎退回預設 brave');
   assertEqual_(parseToolConfig_({}).webSearchEngine, 'brave', '沒設定 → brave');
+}
+
+function testOdooPure_() {
+  assertEqual_(parseOdooModels_('res.partner\nSale.Order, account.move;bad model\nres.partner'), ['res.partner', 'sale.order', 'account.move'], '白名單解析：小寫、去重、丟不合法');
+  assertEqual_(odooAssertModel_('Res.Partner', ['res.partner']), 'res.partner', '白名單比對不分大小寫');
+  assertThrows_(() => odooAssertModel_('res.users', ['res.partner']), '白名單外拒絕');
+  assertThrows_(() => odooAssertModel_('res.partner', []), '空白名單一律拒絕');
+  assertEqual_(odooAssertMethod_('action_confirm'), 'action_confirm', '合法方法');
+  assertThrows_(() => odooAssertMethod_('_compute_amount'), '私有方法');
+  assertThrows_(() => odooAssertMethod_('unlink'), 'unlink 封鎖');
+  assertThrows_(() => odooAssertMethod_('sudo'), 'sudo 封鎖');
+  assertThrows_(() => odooAssertMethod_('a b'), '方法名不合法');
+  assertEqual_(odooValidateDomain_(undefined), [], '省略 domain = []');
+  assertEqual_(odooValidateDomain_(['|', ['name', 'ilike', '王'], ['email', '=', false]]), ['|', ['name', 'ilike', '王'], ['email', '=', false]], '合法 domain 原樣');
+  assertThrows_(() => odooValidateDomain_({ name: 'x' }), 'domain 非陣列');
+  assertThrows_(() => odooValidateDomain_([['name', 'ilike']]), '二元組');
+  assertThrows_(() => odooValidateDomain_([['name', 'contains', 'x']]), '未知運算子');
+  assertThrows_(() => odooValidateDomain_([['name; drop', '=', 'x']]), '欄位名不合法');
+  assertEqual_(odooNormalizeIds_([1, '2', 3.0]), [1, 2, 3], 'ids 轉整數');
+  assertThrows_(() => odooNormalizeIds_([]), '空 ids');
+  assertThrows_(() => odooNormalizeIds_([0]), 'id 0');
+  assertThrows_(() => odooNormalizeIds_(['a']), 'id 非數字');
+  const p = odooExecutePayload_({ db: 'mydb' }, 7, 'KEY', 'res.partner', 'search_read', [[['x', '=', 1]]], { limit: 5 });
+  assertEqual_([p.jsonrpc, p.method, p.params.service, p.params.method], ['2.0', 'call', 'object', 'execute_kw'], 'payload 外層');
+  assertEqual_(p.params.args, ['mydb', 7, 'KEY', 'res.partner', 'search_read', [[['x', '=', 1]]], { limit: 5 }], 'execute_kw 參數順序');
+  assertEqual_(odooParseResponse_({ jsonrpc: '2.0', result: [1, 2] }), [1, 2], 'result 直接回');
+  const err = assertThrows_(() => odooParseResponse_({ error: { code: 200, message: 'Odoo Server Error', data: { name: 'odoo.exceptions.AccessError', message: 'You are not allowed to access' } } }), 'error 丟出');
+  assert_(/AccessError/.test(err.message) && /not allowed/.test(err.message) && err.odooName === 'AccessError', '錯誤訊息含類型與 message：' + err.message);
+  assertThrows_(() => odooParseResponse_(null), '非物件');
+  assertEqual_(odooNormalizeRecord_({ id: 3, name: 'A', partner_id: [5, 'B 公司'], email: false, tag_ids: [1, 2, 3], amount: 10.5 }),
+    { id: 3, name: 'A', partner_id: { id: 5, name: 'B 公司' }, email: null, tag_ids: [1, 2, 3], amount: 10.5 }, 'many2one → {id,name}，false → null，x2many 原樣');
+  const fg = { name: { string: '名稱', type: 'char', required: true }, partner_id: { string: '客戶', type: 'many2one', relation: 'res.partner', required: true }, state: { string: '狀態', type: 'selection', selection: [['draft', 'Draft'], ['sale', 'Sales Order']], readonly: true }, note: { string: '備註', type: 'html', help: 'h'.repeat(300) } };
+  const sum = odooSummarizeFields_(fg, {});
+  assertEqual_(sum.count, 4, 'fields 數');
+  assertEqual_(sum.fields.map((f) => f.name), ['name', 'partner_id', 'note', 'state'], '必填排前、其餘字母序');
+  assertEqual_(sum.fields[1], { name: 'partner_id', label: '客戶', type: 'many2one', required: true, relation: 'res.partner' }, '關聯欄位');
+  assertEqual_(sum.fields[3].selection, ['draft', 'sale'], 'selection 只留值');
+  assert_(sum.fields[2].help.length <= 121, 'help 截長');
+  assertEqual_(odooSummarizeFields_(fg, { search: '客' }).fields.map((f) => f.name), ['partner_id'], 'search 過濾標籤');
+  assertEqual_(odooSummarizeFields_(fg, { requiredOnly: true }).count, 2, 'required_only');
+  assertEqual_(odooRecordUrl_({ odooUrl: 'https://erp.example.com/' }, 'sale.order', 9), 'https://erp.example.com/odoo/sale.order/9', '記錄網址');
+}
+
+function testOdooFlow_() {
+  const config = Object.assign(fakeToolConfig_(), { odooUrl: 'https://erp.example.com', odooDb: 'db1', odooLogin: 'agent@example.com', odooAllowedModels: ['res.partner', 'sale.order'] });
+  const calls = [];
+  const store = {};
+  const cache = { get: (k) => (k in store ? store[k] : null), put: (k, v) => { store[k] = v; }, remove: (k) => { delete store[k]; } };
+  const fetch = (url, opts) => {
+    const body = JSON.parse(opts.payload);
+    calls.push({ url, body });
+    const m = body.params.method;
+    let result;
+    if (m === 'authenticate') result = 42;
+    else {
+      const [, uid, key, model, method, args, kwargs] = body.params.args;
+      assertEqual_([uid, key], [42, 'K'], 'execute_kw 帶 uid 與 key');
+      if (method === 'search_read') result = [{ id: 1, name: '甲', parent_id: [9, '母公司'], email: false }];
+      else if (method === 'search_count') result = 1;
+      else if (method === 'create') result = 77;
+      else if (method === 'read') result = [{ id: args[0][0], display_name: '新客戶', state: 'sale' }];
+      else if (method === 'action_confirm') result = true;
+      else result = null;
+    }
+    return fakeResponse_(200, { jsonrpc: '2.0', id: body.id, result });
+  };
+  const deps = { fetch, cache, key: 'K' };
+  const r1 = odooExecute_(config, 'res.partner', 'search_read', [[]], { limit: 5 }, deps);
+  assertEqual_(r1.length, 1, 'search_read 回一筆');
+  assertEqual_(calls.map((c) => c.body.params.method), ['authenticate', 'execute_kw'], '先 authenticate 再 execute_kw');
+  assertEqual_(calls[0].body.params.args, ['db1', 'agent@example.com', 'K', {}], 'authenticate 參數');
+  assert_(calls.every((c) => c.url === 'https://erp.example.com/jsonrpc'), '打 /jsonrpc');
+  odooExecute_(config, 'res.partner', 'search_count', [[]], {}, deps);
+  assertEqual_(calls.filter((c) => c.body.params.method === 'authenticate').length, 1, 'uid 進快取後不再登入');
+  // 沒 key
+  assertThrows_(() => odooExecute_(config, 'res.partner', 'search_read', [[]], {}, { fetch, cache, key: '' }), 'key 空');
+  // 未設定
+  assertThrows_(() => odooExecute_(fakeToolConfig_(), 'res.partner', 'search_read', [[]], {}, deps), 'odoo 未設定');
+
+  // handler 層：用 ctx.config，key / fetch 走 Script Property 與 UrlFetchApp —— 這裡改以注入版包一層
+  const before = calls.length;
+  const ctx = { config };
+  assertThrows_(() => odooSearchRead_({ model: 'res.users' }, ctx), '白名單外 model');
+  assertEqual_(calls.length, before, '白名單外不打網路');
+  assertThrows_(() => odooCall_({ model: 'sale.order', method: 'unlink', ids: [1] }, ctx), 'odoo_call 不能叫 unlink');
+  assertThrows_(() => odooCreate_({ model: 'res.partner', values: {} }, ctx), 'values 空');
+  assertThrows_(() => odooWrite_({ model: 'res.partner', ids: [1], values: [] }, ctx), 'values 非 object');
+  assertThrows_(() => odooWrite_({ model: 'res.partner', ids: [1], values: '{bad' }, ctx), 'values 壞 JSON 字串');
+  assertEqual_(calls.length, before, '參數錯不打網路');
+  assertEqual_(odooJsonArg_('[["a","=",1]]', 'domain', 'array'), [['a', '=', 1]], 'JSON 字串 → 陣列');
+  assertEqual_(odooJsonArg_({ x: 1 }, 'values', 'object'), { x: 1 }, 'object 原樣');
+  assertEqual_(odooJsonArg_(undefined, 'kwargs', 'object', true), null, '選填省略 → null');
+  assertThrows_(() => odooJsonArg_('{"x":1}', 'domain', 'array'), '型別不符');
 }
 
 function testRegistryRejectsBad_() {
@@ -2905,7 +3000,7 @@ function testMemberToolsetsConfig_() {
   assert_(/成員只能用公開工具/.test(handleTelegramUpdate_(tgGroupMessage_('/group', 111, -100), f.deps).text), '/group 狀態');
   assert_(/看不到 owner 的 Gmail/.test(handleTelegramUpdate_(tgMessage_('/help', 111), f.deps).text), '/help 說明');
   // Doctor 用的常數
-  assertEqual_(WORKSPACE_TOOLSETS, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar'], 'Workspace toolsets');
+  assertEqual_(WORKSPACE_TOOLSETS, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'odoo'], 'Workspace toolsets（含 odoo）');
   assertEqual_(PRINCIPAL_LOCKED_TOOLSETS.group_member, ['memory', 'cronjob'], '鎖定清單');
 }
 

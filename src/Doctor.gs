@@ -235,6 +235,22 @@ function runDoctor() {
     }
   }
 
+  // 11b. Odoo（M7-B）：只在填了 URL 時檢查
+  if (ss) {
+    try {
+      const tcfg = getToolConfig_();
+      if (tcfg.odooUrl) {
+        const key = getProp_(PROP.ODOO_API_KEY);
+        push('odoo_config', `Odoo 已設定（${tcfg.odooUrl}）`, tcfg.odooDb && tcfg.odooLogin ? 'ok' : 'fail',
+          tcfg.odooDb && tcfg.odooLogin ? `db ${tcfg.odooDb}、帳號 ${tcfg.odooLogin}、白名單 ${tcfg.odooAllowedModels.length} 個 model` : '缺 db 或登入帳號，到「工具」分頁 Odoo 區塊補齊。');
+        push('odoo_key', 'Odoo API key 已設定', key ? 'ok' : 'fail', key ? keyHint_(key) : '到「工具」分頁 Odoo 區塊貼入 API key（Odoo 偏好設定 → 帳戶安全性 → 新 API 金鑰）。');
+        if (!tcfg.odooAllowedModels.length) push('odoo_models', 'Odoo model 白名單非空', 'warn', '白名單空白時所有 odoo_* 工具一律拒絕。');
+      }
+    } catch (err) {
+      push('odoo_config', 'Odoo 設定', 'fail', String(err && err.message || err));
+    }
+  }
+
   // 12. 通道（M6）：只在啟用時檢查
   if (ss) {
     try {
