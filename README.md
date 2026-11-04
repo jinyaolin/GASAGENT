@@ -664,6 +664,10 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 
 無人模式的任務（排程 / 事件）遇到必須由 owner 決定的事，呼叫 `session_ask_owner({question, options?})`：系統在 Approvals 寫一列 `q_…`、把問題推到 owner 的 Telegram，本輪立刻結束（job 狀態 `needs_input`，排程 / 事件暫不投遞）。你在 Telegram **直接「回覆」那則問題訊息**、或輸入 `/answer [q_id] <回答>`、或在管理頁「紀錄 → 審批」填答案，系統就以系統訊息把答案接回原 session 續跑；排程 / 事件的續跑結果會投遞，也會回到你回答的 Telegram chat。互動模式（聊天台 / Telegram 對話）用這個工具會回錯，模型應直接在回覆裡問；群組成員看不到此工具（`ownerOnly`）。無人模式的 system 指示已改成「能自行判斷就判斷，只有做錯有實際後果的事才問」。
 
+### Telegram 審批指令（`/approve`）
+
+`/approve`（或 `/pending`）列出所有待審批的動作：每筆一列「✅ #n 批准 / ❌ #n 拒絕」按鈕（與原本回覆裡的按鈕同一個 callback 格式），附參數摘要、原因與 id；待回答的提問另列一段並提示 `/answer`。`/approve <apr_id>`、`/deny <apr_id>` 直接決定。一次最多列 10 筆。只有白名單（owner）能用；群聊成員的指令一律忽略。
+
 ### Telegram 傳檔（`telegram_send_file`）
 
 `telegram_send_file({file_id, caption?, as_photo?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 文件 / 試算表 / 簡報先轉 PDF；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。

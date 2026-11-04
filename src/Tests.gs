@@ -67,6 +67,7 @@ function smokeTestTable_() {
     // M7-B：watchers / ask_owner / telegram 傳檔
     ['telegram_send_file: 檔案計畫（Google 格式轉 PDF、圖片可 sendPhoto）、目標 chat（telegram session 回同 chat 去 :guest；其他送 owner；未啟用報錯）、multipart 上傳 payload、50 MB 上限、handler', testTelegramSendFile_, 'pure'],
     ['ask_owner: 互動模式拒絕、非 owner 看不到（ownerOnly）、autonomous 寫 Approvals q_ 列 + 推 Telegram → pending_input；runTurn_ 立刻停（needs_input）；job 進 needs_input 且 cron 不投遞；answerQuestion_ 標 answered 並 enqueue 回答續跑（cron 帶投遞、reply_channel telegram）；decideApproval_ 拒收提問列', testAskOwner_, 'pure'],
+    ['telegram: /approve 列待審清單（每筆批准 / 拒絕按鈕、提問另列）、/approve <id> 與 /deny <id> 直接決定、壞 id 提示、空清單文字；成員不吃指令', testTelegramApproveCommand_, 'pure'],
     ['telegram: 回覆 bot 的提問訊息即回答；/answer <q_id> 文字、/answer 單一待答直接答、多筆列清單、沒有待答提示；非白名單不處理', testTelegramAnswer_, 'pure'],
     ['watchers: 輸入 / config 驗證（四種 type、odoo 白名單、after: 拒絕）；gmail / drive baseline → 新事件 → cursor 推進與 seen 去重、一次最多 5 件；sheets 新列成一事件；odoo id > last_id', testWatcherCheck_, 'pure'],
     ['watchers: create 立刻 baseline 並寫旗標；scanIfDue 旗標沒到不開 sheet、到期檢查入列 watch job、next_check 推進；watch job 建 session（channel watch、autonomous）、user 訊息含事件資料區塊、投遞、更新 last_status；update 改來源重做 baseline；watcher_manage autonomous 只能 list', testWatcherFlow_, 'pure'],
@@ -931,6 +932,42 @@ function testAskOwner_() {
   assert_(/owner 的回答/.test(cont2.calls[0].messages[cont2.calls[0].messages.length - 1].content), '回答以 user 訊息進模型');
   setProp_(PROP.QUEUE_DIRTY, '');
   setProp_(PROP.CRON_NEXT_RUN, '');
+}
+
+function testTelegramApproveCommand_() {
+  const approvals = [
+    { id: 'apr_a1', tool: 'gmail_send', args: '{"to":"x@y.com","subject":"報價"}', reason: '風險 X（外發）；審批策略 always；模式 autonomous', created_at: '2026-11-04T10:00:00' },
+    { id: 'apr_a2', tool: 'drive_share', args: '{"file_id":"F","email":"a@b.com"}', reason: '風險 X', created_at: '2026-11-04T10:05:00' },
+  ];
+  const questions = [{ id: 'q_1', question: '要過帳嗎？', options: [], tg_message_id: 1, tg_chat_id: '111', session_id: 's' }];
+  const list = telegramPendingList_(approvals, questions);
+  assert_(/待審批 2 筆/.test(list.text) && /#1 gmail_send/.test(list.text) && /to=x@y.com、subject=報價/.test(list.text) && /id apr_a2/.test(list.text) && /❓ 待回答的提問 1 筆/.test(list.text) && /q_1：要過帳嗎？/.test(list.text), '清單文字：' + list.text);
+  assertEqual_(list.replyMarkup.inline_keyboard.map((row) => row.map((b) => b.callback_data)), [['apr:apr_a1:approve', 'apr:apr_a1:deny'], ['apr:apr_a2:approve', 'apr:apr_a2:deny']], '每筆一列按鈕，callback 與原審批格式相同');
+  assert_(/#1 批准 gmail_send/.test(list.replyMarkup.inline_keyboard[0][0].text), '按鈕文字帶序號');
+  assertEqual_(telegramPendingList_([], []), { text: '目前沒有待審批的動作，也沒有待回答的提問。', replyMarkup: null, truncated: false }, '空清單');
+  const many = []; for (let i = 0; i < 15; i++) many.push({ id: 'apr_' + i, tool: 't', args: '{}', reason: 'r', created_at: '' });
+  const big = telegramPendingList_(many, []);
+  assert_(big.truncated && big.replyMarkup.inline_keyboard.length === 10 && /只列前 10/.test(big.text), '超過 10 筆截斷');
+  // handler
+  const f = fakeTelegramDeps_({ pendingApprovals: () => approvals, pendingQuestions: () => questions });
+  let r = handleTelegramUpdate_(tgMessage_('/approve', 111), f.deps);
+  assertEqual_([r.action, r.pending, f.sent[0].opts.replyMarkup.inline_keyboard.length, f.jobs.length], ['pending_list', 2, 2, 0], '/approve 列清單並附按鈕、不排 job');
+  r = handleTelegramUpdate_(tgMessage_('/pending', 111), f.deps);
+  assertEqual_(r.action, 'pending_list', '/pending 同義');
+  r = handleTelegramUpdate_(tgMessage_('/approve apr_a1', 111), f.deps);
+  assertEqual_([r.action, f.decided[0]], ['approved', ['apr_a1', true]], '/approve <id>');
+  assert_(/已批准 apr_a1/.test(r.text) && /已執行/.test(r.text) && /接續/.test(r.text), '批准文字：' + r.text);
+  r = handleTelegramUpdate_(tgMessage_('/deny apr_a2', 111), f.deps);
+  assertEqual_([r.action, f.decided[1]], ['denied', ['apr_a2', false]], '/deny <id>');
+  r = handleTelegramUpdate_(tgMessage_('/approve apr_bad', 111), f.deps);
+  assert_(r.action === 'decide_failed' && /已處理/.test(r.text), '已處理的 id 回錯');
+  r = handleTelegramUpdate_(tgMessage_('/approve 123', 111), f.deps);
+  assert_(r.action === 'approve_bad_id' && /apr_/.test(r.text), '壞 id 提示');
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/approve', 999), f.deps).action, 'rejected', '非白名單');
+  assert_(/\/approve/.test(handleTelegramUpdate_(tgMessage_('/help', 111), f.deps).text), '/help 提到 /approve');
+  // 群聊成員打 /approve 被忽略（成員不吃指令）
+  const g = fakeTelegramDeps_({ pendingApprovals: () => approvals, botUsername: 'MyAgentBot', botId: '999', cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_open_groups: '-100' }) });
+  assertEqual_(handleTelegramUpdate_(tgGroupMessage_('@MyAgentBot /approve', 222, -100), g.deps).action, 'ignored', '群組成員不能用 /approve');
 }
 
 function testTelegramAnswer_() {

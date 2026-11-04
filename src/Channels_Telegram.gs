@@ -44,7 +44,9 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'answer']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'answer', 'approve', 'deny', 'pending']);
+/** /approve 清單一次最多列幾筆（每筆兩個按鈕；Telegram inline keyboard 不宜太長）。 */
+const TELEGRAM_PENDING_MAX = 10;
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
 const TELEGRAM_GUEST_DEFAULT_MESSAGE = '你好';
 /** setWebhook 要收的 update 類型。 */
@@ -220,6 +222,38 @@ function telegramApprovalKeyboard_(pending) {
     { text: `❌ 拒絕`, callback_data: `apr:${p.approvalId}:deny` },
   ]);
   return rows.length ? { inline_keyboard: rows } : null;
+}
+
+/**
+ * /approve 的待審清單：文字 + 每筆一列「批准 / 拒絕」按鈕（callback 與訊息回覆的按鈕同一格式）。純函式。
+ * @param {!Array<{id: string, tool: string, args: string, reason: string, created_at: string}>} approvals
+ * @param {!Array<{id: string, question: string}>} questions
+ * @return {{text: string, replyMarkup: ?Object, truncated: boolean}}
+ */
+function telegramPendingList_(approvals, questions) {
+  const items = (approvals || []).slice(0, TELEGRAM_PENDING_MAX);
+  const qs = (questions || []).slice(0, TELEGRAM_PENDING_MAX);
+  if (!items.length && !qs.length) return { text: '目前沒有待審批的動作，也沒有待回答的提問。', replyMarkup: null, truncated: false };
+  const lines = [];
+  if (items.length) {
+    lines.push(`⏸ 待審批 ${(approvals || []).length} 筆${(approvals || []).length > items.length ? `（只列前 ${items.length}）` : ''}：`);
+    items.forEach((a, i) => {
+      let args = String(a.args || '');
+      try { const parsed = JSON.parse(args); args = Object.keys(parsed).map((k) => `${k}=${typeof parsed[k] === 'string' ? parsed[k] : JSON.stringify(parsed[k])}`).join('、'); } catch (err) { /* 原樣 */ }
+      lines.push('', `#${i + 1} ${a.tool}  ${a.created_at ? a.created_at.slice(5, 16).replace('T', ' ') : ''}`, truncateText_(args.replace(/\s+/g, ' '), 200).text, `↳ ${truncateText_(String(a.reason || ''), 80).text}`, `id ${a.id}`);
+    });
+    lines.push('', '按下方按鈕決定，或輸入 /approve <id>、/deny <id>。');
+  }
+  if (qs.length) {
+    lines.push('', `❓ 待回答的提問 ${qs.length} 筆：`);
+    qs.forEach((q) => lines.push(`• ${q.id}：${truncateText_(q.question.replace(/\s+/g, ' '), 100).text}`));
+    lines.push('回覆原本的 ❓ 訊息，或 /answer <q_id> <回答>。');
+  }
+  const rows = items.map((a, i) => [
+    { text: `✅ #${i + 1} 批准 ${a.tool}`.slice(0, 60), callback_data: `apr:${a.id}:approve` },
+    { text: `❌ #${i + 1} 拒絕`, callback_data: `apr:${a.id}:deny` },
+  ]);
+  return { text: lines.join('\n'), replyMarkup: rows.length ? { inline_keyboard: rows } : null, truncated: (approvals || []).length > items.length };
 }
 
 // ---- update 解析與驗證 ----------------------------------------------------------------------------------
@@ -573,7 +607,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -607,6 +641,36 @@ function handleTelegramUpdate_(rawUpdate, deps) {
       report.action = 'group';
     }
     send(report.text); return report;
+  }
+  // M7-B：/approve（列待審 + 按鈕）、/approve <id>、/deny <id>、/pending（同 /approve 無參數）
+  if (cmd.command === 'approve' || cmd.command === 'deny' || cmd.command === 'pending') {
+    const idArg = /^(apr_[0-9a-z_]+)$/i.exec(cmd.rest.trim());
+    if (cmd.command !== 'pending' && cmd.rest.trim() && !idArg) {
+      report.text = `請給審批 id（apr_… 開頭），例如 /${cmd.command} apr_xxx；輸入 /approve 不帶參數可列出待審清單。`;
+      send(report.text); report.action = 'approve_bad_id'; return report;
+    }
+    if (idArg) {
+      const approve = cmd.command === 'approve';
+      try {
+        const r = deps.decide(idArg[1], approve);
+        report.text = approve
+          ? `✅ 已批准 ${idArg[1]}${r.outcome ? (r.outcome.ok ? `，已執行（${r.outcome.ms} ms）` : `，但執行失敗：${r.outcome.status}`) : ''}${r.continuation ? '；agent 會接續回覆。' : '。'}`
+          : `❌ 已拒絕 ${idArg[1]}${r.continuation ? '；agent 會接續回覆。' : '。'}`;
+        report.action = approve ? 'approved' : 'denied';
+      } catch (err) {
+        report.text = `審批 ${idArg[1]} 失敗：${err && err.message || err}`;
+        report.action = 'decide_failed'; report.reason = String(err && err.message || err);
+      }
+      send(report.text); return report;
+    }
+    let approvals = [];
+    let questions = [];
+    try { approvals = deps.pendingApprovals ? deps.pendingApprovals() : []; } catch (err) { report.text = `讀取待審清單失敗：${err && err.message || err}`; send(report.text); report.action = 'pending_failed'; return report; }
+    try { questions = deps.pendingQuestions ? deps.pendingQuestions() : []; } catch (err) { questions = []; }
+    const list = telegramPendingList_(approvals, questions);
+    report.text = list.text;
+    send(list.text, { replyMarkup: list.replyMarkup });
+    report.action = 'pending_list'; report.pending = approvals.length; return report;
   }
   if (TELEGRAM_LIST_COMMANDS[cmd.command]) {
     report.text = telegramListCommand_(cmd.command, cmd.rest, u, deps);
@@ -764,6 +828,7 @@ function telegramWebhook_(e) {
       decide: (id, approve) => decideApproval_(id, approve),
       answer: (id, text, opts) => answerQuestion_(id, text, opts),
       pendingQuestions: () => pendingQuestions_(),
+      pendingApprovals: () => listApprovals_('pending').filter((r) => r.tool !== ASK_OWNER_TOOL).map((r) => ({ id: r.id, tool: r.tool, args: r.args, reason: r.reason, created_at: r.created_at })),
       providers: listProviders_(),
       skills: () => enabledSkills_(getSkillIndex_()),
       setConfig: (values) => setConfigValues_(values),
@@ -772,7 +837,7 @@ function telegramWebhook_(e) {
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };
   }
-  if (report && ['enqueued', 'help', 'status', 'answered'].indexOf(report.action) === -1) {
+  if (report && ['enqueued', 'help', 'status', 'answered', 'pending_list'].indexOf(report.action) === -1) {
     try {
       appendTableRow_('AuditLog', { ts: new Date(), session_id: report.sessionId || '', tool: 'telegram:webhook', args_preview: report.action, result_preview: truncateText_(report.reason || report.text || '', AUDIT_PREVIEW_CHARS).text, ok: report.action !== 'error' && report.action !== 'rejected', ms: 0 });
     } catch (err) { /* 忽略 */ }
