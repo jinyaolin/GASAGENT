@@ -29,6 +29,8 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   SLIDES_TEMPLATE_ID: 'slides_template_id',
   SKILLS_FOLDER_ID: 'skills_folder_id',
   GMAIL_SEND_WHITELIST: 'gmail_send_whitelist',
+  WEB_SEARCH_ENGINE: 'web_search_engine',
+  WEB_SEARCH_CX: 'web_search_cx',
 });
 
 /** RBAC 設定 key 前綴：rbac.<toolset>。 */
@@ -75,7 +77,7 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
  *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string,
- *   gmailSendWhitelist: !Array<string>
+ *   gmailSendWhitelist: !Array<string>, webSearchEngine: string, webSearchCx: string
  * }} ToolConfig
  */
 
@@ -117,6 +119,9 @@ function parseToolConfig_(map) {
     slidesTemplateId: String(map[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] || '').trim(),
     skillsFolderId: String(map[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] || '').trim(),
     gmailSendWhitelist: parseEmailWhitelist_(map[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST]),
+    webSearchEngine: WEB_SEARCH_ENGINES.indexOf(String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] || '').trim().toLowerCase()) === -1
+      ? WEB_SEARCH_DEFAULT_ENGINE : String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE]).trim().toLowerCase(),
+    webSearchCx: String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] || '').trim(),
   };
 }
 
@@ -202,6 +207,8 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID in map)) missing[TOOL_CONFIG_KEYS.SLIDES_TEMPLATE_ID] = '';
   if (!(TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID in map)) missing[TOOL_CONFIG_KEYS.SKILLS_FOLDER_ID] = '';
   if (!(TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST in map)) missing[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = '';
+  if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] = WEB_SEARCH_DEFAULT_ENGINE;
+  if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_CX in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] = '';
   Object.keys(AGENT_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = AGENT_CONFIG_DEFAULTS[k]; });
   Object.keys(CHANNEL_CONFIG_DEFAULTS).forEach((k) => { if (!(k in map)) missing[k] = CHANNEL_CONFIG_DEFAULTS[k]; });
   const keys = Object.keys(missing);
@@ -249,6 +256,20 @@ function saveToolConfig_(input) {
     const prev = parseToolConfig_(getConfigMap_()).gmailSendWhitelist;
     values[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = next.join('\n');
     if (next.join(',') !== prev.join(',')) securityAudit_('whitelist:set', `寄信白名單由管理頁改為 ${next.length} 筆：${next.join(', ') || '（空）'}`);
+  }
+  // 網路搜尋（M7-B）：引擎與 cx 進 Config；key 只進 Script Property，非空才寫、clear 才清。
+  if (input.web_search_engine !== undefined) {
+    const engine = String(input.web_search_engine || WEB_SEARCH_DEFAULT_ENGINE).trim().toLowerCase();
+    if (WEB_SEARCH_ENGINES.indexOf(engine) === -1) throw new Error(`web_search_engine 必須是 ${WEB_SEARCH_ENGINES.join(' / ')}`);
+    values[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] = engine;
+  }
+  if (input.web_search_cx !== undefined) values[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] = String(input.web_search_cx || '').trim();
+  if (typeof input.web_search_key === 'string' && input.web_search_key.trim()) {
+    setProp_(PROP.WEB_SEARCH_KEY, input.web_search_key.trim());
+    securityAudit_('web_search_key:set', 'web_search API key 已由管理頁寫入（不記值）');
+  } else if (input.web_search_clear_key) {
+    setProp_(PROP.WEB_SEARCH_KEY, '');
+    securityAudit_('web_search_key:cleared', 'web_search API key 已清除');
   }
   setConfigValues_(values);
   return getToolConfig_();

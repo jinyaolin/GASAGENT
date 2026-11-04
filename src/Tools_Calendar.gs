@@ -1,5 +1,5 @@
 /**
- * @fileoverview calendar toolset：列事件 / 建事件 / 改事件。用 CalendarApp（預設日曆；可給 calendar_id）。
+ * @fileoverview calendar toolset：列事件 / 建事件 / 改事件 / 刪事件（D，RBAC delete 預設關）。用 CalendarApp（預設日曆；可給 calendar_id）。
  * 建事件可加 guests，但 M2 不寄邀請（sendInvites=false），邀請屬外發行為留待日後以 X 類工具處理。
  */
 
@@ -64,6 +64,16 @@ function calendarTools_() {
         required: ['event_id'], additionalProperties: false,
       },
       handler: calendarUpdateEvent_,
+    },
+    {
+      name: 'calendar_delete_event', toolset: 'calendar', risk: 'D',
+      description: '刪除（取消）一個事件（刪除動作：owner 需開啟 calendar 的 delete 權限）。要改時間請用 calendar_update_event，不要刪了再建。',
+      parameters: {
+        type: 'object',
+        properties: { event_id: { type: 'string', description: 'calendar_list_events 回的 event_id' }, calendar_id: calId },
+        required: ['event_id'], additionalProperties: false,
+      },
+      handler: calendarDeleteEvent_,
     },
   ];
 }
@@ -158,4 +168,13 @@ function calendarUpdateEvent_(args) {
     changed.push('time');
   }
   return Object.assign({ calendar: cal.getName(), changed }, calendarEventInfo_(ev));
+}
+
+function calendarDeleteEvent_(args) {
+  const cal = resolveCalendar_(args.calendar_id);
+  const ev = cal.getEventById(requireString_(args.event_id, 'event_id'));
+  if (!ev) throw new Error(`找不到事件 ${args.event_id}。`);
+  const info = calendarEventInfo_(ev);
+  ev.deleteEvent();
+  return Object.assign({ calendar: cal.getName(), deleted: true }, info);
 }

@@ -5,6 +5,10 @@
 
 const SHEETS_READ_MAX_ROWS = 500;
 const SHEETS_READ_DEFAULT_ROWS = 200;
+const SHEETS_FIND_DEFAULT = 50;
+const SHEETS_FIND_MAX = 200;
+/** 列工作表時表頭最多回幾格。 */
+const SHEETS_HEADER_PREVIEW_COLS = 30;
 const SHEETS_WRITE_MAX_CELLS = 5000;
 const SHEETS_CHART_TYPES = Object.freeze(['line', 'bar', 'column', 'pie', 'scatter', 'area']);
 
@@ -27,6 +31,48 @@ function sheetsTools_() {
         required: ['title'], additionalProperties: false,
       },
       handler: sheetsCreate_,
+    },
+    {
+      name: 'sheets_list_sheets', toolset: 'sheets', risk: 'R',
+      description: '列出試算表的所有工作表：名稱、有資料的列 / 欄數、是否隱藏、表頭列（第一列前 30 格）。讀資料前先用這個確認工作表名稱。',
+      parameters: {
+        type: 'object',
+        properties: { spreadsheet_id: ssId },
+        required: ['spreadsheet_id'], additionalProperties: false,
+      },
+      handler: sheetsListSheets_,
+    },
+    {
+      name: 'sheets_find', toolset: 'sheets', risk: 'R',
+      description: '在試算表裡找含有 query 文字的儲存格（預設全部工作表、不分大小寫、部分比對），回傳每個命中的工作表 / 位置 / 顯示值。適合在大表裡定位某筆資料再用 sheets_read_range 讀該列。',
+      parameters: {
+        type: 'object',
+        properties: {
+          spreadsheet_id: ssId,
+          query: { type: 'string', description: '要找的文字' },
+          sheet_name: { type: 'string', description: '只找這張工作表（選填）' },
+          match_case: { type: 'boolean', description: '區分大小寫，預設 false' },
+          entire_cell: { type: 'boolean', description: '整格完全相符才算，預設 false' },
+          max_results: { type: 'integer', description: `預設 ${SHEETS_FIND_DEFAULT}，上限 ${SHEETS_FIND_MAX}` },
+        },
+        required: ['spreadsheet_id', 'query'], additionalProperties: false,
+      },
+      handler: sheetsFind_,
+    },
+    {
+      name: 'sheets_copy_sheet', toolset: 'sheets', risk: 'W',
+      description: '把某份試算表的一張工作表整張複製到另一份試算表（保留公式、格式、驗證、合併格；來源只要有檢視權即可，例如別人分享的表）。target_spreadsheet_id 可與來源相同（同檔複製）。注意：公式若引用來源的其他工作表，複製後會變 #REF!。',
+      parameters: {
+        type: 'object',
+        properties: {
+          source_spreadsheet_id: { type: 'string', description: '來源試算表 id' },
+          sheet_name: { type: 'string', description: '來源工作表名稱' },
+          target_spreadsheet_id: { type: 'string', description: '目標試算表 id' },
+          new_name: { type: 'string', description: '新工作表名稱（選填，預設同來源；重名自動加序號）' },
+        },
+        required: ['source_spreadsheet_id', 'sheet_name', 'target_spreadsheet_id'], additionalProperties: false,
+      },
+      handler: sheetsCopySheet_,
     },
     {
       name: 'sheets_read_range', toolset: 'sheets', risk: 'R',
@@ -141,7 +187,86 @@ function ssInfo_(ss) {
   return { id: ss.getId(), title: ss.getName(), url: ss.getUrl() };
 }
 
+/**
+ * 在試算表裡找一個沒被用掉的工作表名：name、name (2)、name (3)…。純函式（傳入既有名稱清單）。
+ * @param {string} name
+ * @param {!Array<string>} existing
+ * @return {string}
+ */
+function uniqueSheetName_(name, existing) {
+  const base = String(name || '').trim() || '工作表';
+  const taken = (existing || []).map((n) => String(n).toLowerCase());
+  if (taken.indexOf(base.toLowerCase()) === -1) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base} (${i})`;
+    if (taken.indexOf(candidate.toLowerCase()) === -1) return candidate;
+  }
+  throw new Error(`找不到可用的工作表名稱（${base}）。`);
+}
+
 // ---- handlers ------------------------------------------------------------------------
+
+function sheetsListSheets_(args) {
+  const ss = SpreadsheetApp.openById(requireString_(args.spreadsheet_id, 'spreadsheet_id'));
+  const sheets = ss.getSheets().map((sheet, i) => {
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    const header = lastRow >= 1 && lastCol >= 1
+      ? sheet.getRange(1, 1, 1, Math.min(lastCol, SHEETS_HEADER_PREVIEW_COLS)).getDisplayValues()[0]
+      : [];
+    return {
+      index: i + 1, name: sheet.getName(), sheet_id: sheet.getSheetId(), hidden: sheet.isSheetHidden(),
+      rows: lastRow, cols: lastCol, frozen_rows: sheet.getFrozenRows(), header,
+    };
+  });
+  return Object.assign(ssInfo_(ss), { count: sheets.length, sheets });
+}
+
+function sheetsFind_(args) {
+  const ss = SpreadsheetApp.openById(requireString_(args.spreadsheet_id, 'spreadsheet_id'));
+  const query = requireString_(args.query, 'query');
+  const max = clampInt_(args.max_results, SHEETS_FIND_DEFAULT, 1, SHEETS_FIND_MAX);
+  const scope = args.sheet_name ? resolveSheet_(ss, args.sheet_name) : ss;
+  const finder = scope.createTextFinder(query).matchCase(!!args.match_case).matchEntireCell(!!args.entire_cell);
+  const all = finder.findAll();
+  const matches = all.slice(0, max).map((r) => ({
+    sheet: r.getSheet().getName(), cell: r.getA1Notation(), row: r.getRow(), col: r.getColumn(), value: r.getDisplayValue(),
+  }));
+  return Object.assign(ssInfo_(ss), { query, scope: args.sheet_name || '(全部工作表)', count: all.length, truncated: all.length > max, matches });
+}
+
+function sheetsCopySheet_(args) {
+  const srcId = requireString_(args.source_spreadsheet_id, 'source_spreadsheet_id');
+  const dstId = requireString_(args.target_spreadsheet_id, 'target_spreadsheet_id');
+  const src = SpreadsheetApp.openById(srcId);
+  const sheet = resolveSheet_(src, requireString_(args.sheet_name, 'sheet_name'));
+  const dst = srcId === dstId ? src : SpreadsheetApp.openById(dstId);
+  let copy;
+  try {
+    copy = sheet.copyTo(dst);
+  } catch (err) {
+    throw new Error(`複製工作表失敗（來源若設「禁止下載 / 列印 / 複製」會被擋）：${err && err.message || err}`);
+  }
+  const wanted = args.new_name ? String(args.new_name).trim() : sheet.getName();
+  const others = dst.getSheets().filter((s) => s.getSheetId() !== copy.getSheetId()).map((s) => s.getName());
+  const finalName = uniqueSheetName_(wanted, others);
+  copy.setName(finalName);
+  // 公式若引用來源其他工作表會變 #REF!，掃一下提醒模型
+  let refErrors = 0;
+  try {
+    const range = copy.getDataRange();
+    if (range.getNumRows() && range.getNumColumns()) {
+      range.getDisplayValues().forEach((row) => row.forEach((v) => { if (v === '#REF!') refErrors++; }));
+    }
+  } catch (err) { refErrors = -1; }
+  return {
+    source: Object.assign(ssInfo_(src), { sheet: sheet.getName() }),
+    target: Object.assign(ssInfo_(dst), { sheet: finalName, renamed_from_default: finalName !== wanted ? wanted : '' }),
+    rows: copy.getLastRow(), cols: copy.getLastColumn(),
+    ref_errors: refErrors,
+    note: refErrors > 0 ? `有 ${refErrors} 格 #REF!：公式引用了來源試算表的其他工作表，請改用值或一併複製被引用的工作表。` : '',
+  };
+}
 
 function sheetsCreate_(args) {
   const ss = SpreadsheetApp.create(requireString_(args.title, 'title'));

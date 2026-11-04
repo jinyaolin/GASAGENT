@@ -478,6 +478,13 @@ function adminGetToolSettings() {
     slides_template_id: config.slidesTemplateId,
     default_perms: DEFAULT_TOOLSET_PERMS,
     policies: APPROVAL_POLICIES.slice(),
+    web_search: {
+      engine: config.webSearchEngine,
+      engines: WEB_SEARCH_ENGINES.slice(),
+      cx: config.webSearchCx,
+      hasKey: !!getProp_(PROP.WEB_SEARCH_KEY),
+      keyHint: keyHint_(getProp_(PROP.WEB_SEARCH_KEY)),
+    },
   };
 }
 
@@ -490,6 +497,21 @@ function adminSaveToolSettings(input) {
   assertOwner();
   saveToolConfig_(input || {});
   return adminGetToolSettings();
+}
+
+/**
+ * 工具分頁：測試網路搜尋（用目前設定搜一個固定關鍵字，回結果數與第一筆）。
+ * @return {{ok: boolean, engine: string, count: number, first: ?Object, ms: number, error: string}}
+ */
+function adminTestWebSearch() {
+  assertOwner();
+  const t0 = Date.now();
+  try {
+    const r = webSearch_({ query: 'Google Apps Script', max_results: 3 }, { config: getToolConfig_() });
+    return { ok: true, engine: r.engine, count: r.count, first: r.results[0] || null, ms: Date.now() - t0, error: '' };
+  } catch (err) {
+    return { ok: false, engine: getToolConfig_().webSearchEngine, count: 0, first: null, ms: Date.now() - t0, error: String(err && err.message || err) };
+  }
 }
 
 // ---- M2：紀錄 / 審批 -----------------------------------------------------------------

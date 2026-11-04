@@ -253,19 +253,30 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 
 | toolset | 工具（風險） |
 |---|---|
-| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_export_pdf`(W) `drive_share`(**X**) |
+| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_copy`(W，整份複製) `drive_export_pdf`(W) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
-| sheets | `sheets_create`(W) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) |
+| sheets | `sheets_create`(W) `sheets_list_sheets`(R，工作表清單與表頭) `sheets_find`(R，TextFinder 找儲存格) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) `sheets_copy_sheet`(W，跨試算表整張複製，保留公式 / 格式；來源有檢視權即可) |
 | slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
-| calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) |
-| web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) |
+| calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) `calendar_delete_event`(**D**，預設關) |
+| web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) `web_search`(R，Brave Search API 或 Google Programmable Search；key 在 Script Property `WEB_SEARCH_KEY`，不受域名白名單限制，見下方「網路搜尋」) |
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) |
 | memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 | skill | `skill_load`(R，M5：載技能全文) `skill_manage`(W，M5：create / patch **只提案**，owner 批准後才寫入) |
 
-唯一的 D 類工具是 `slides_delete_slide`（刪簡報某一頁；RBAC delete 預設關，要用自己開），Gmail / Drive 沒有任何刪除工具。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
+D 類工具只有 `slides_delete_slide`（刪簡報某一頁）與 `calendar_delete_event`（刪行事曆事件），RBAC delete 預設關，要用自己開；Gmail / Drive 沒有任何刪除工具（連垃圾桶都沒有）。`docs_create` / `docs_append` 的內容支援輕量 markdown（`#` / `##` / `###` 標題、`-` 項目、`1.` 編號、空行分段）。每個讀取類工具都有筆數 / 字元上限（搜尋 ≤ 50 筆、郵件 ≤ 25 串、內文 ≤ 20000 字…），避免撐爆 context 與 6 分鐘限制。
+
+### 網路搜尋（`web_search`）
+
+`web_fetch` 只能抓白名單域名的指定網址，`web_search` 補上「不知道網址」的情況。在管理頁「工具」分頁的「網路搜尋」設定：
+
+| 引擎 | 設定 | 取得 key |
+|---|---|---|
+| `brave`（預設） | 只要 API key | <https://api-dashboard.search.brave.com> 申請，免費方案每月 2,000 次 |
+| `google` | API key + `cx` | <https://programmablesearchengine.google.com> 建一個「搜尋整個網路」的引擎複製其 id 當 `cx`；key 在 Google Cloud Console 開 Custom Search JSON API；每日 100 次免費，單次最多 10 筆 |
+
+key 只寫入 Script Property `WEB_SEARCH_KEY`（頁面只顯示末 4 碼，寫入 / 清除記 AuditLog 不記值），引擎與 `cx` 存 Config `web_search_engine` / `web_search_cx`。兩家的 key 都走 HTTP header 不進 URL。工具參數：`query`、`max_results`（≤ 20）、`freshness`（day / week / month / year）、`language`（如 `zh-hant`）。搜尋結果只是連結與摘要，不受域名白名單限制，模型要讀全文仍得走 `web_fetch`。「測試搜尋」按鈕用目前設定搜一個固定關鍵字。
 
 ### 執行流程（`ToolExecutor.gs executeTool_`）
 
@@ -658,6 +669,8 @@ node scripts/local-tests.js
 | Z.ai 回 401 | coding plan 的 key 只能打 `https://api.z.ai/api/coding/paas/v4`，不能打 bigmodel.cn 一般 endpoint |
 | 新增第二個同協定 provider 後第一個不見了 | 舊版會以 id 覆寫（範本預設 id 相同）。現在新增時 id 重複會被拒絕、範本會自動帶 `gemini-2` 之類的 id；被覆寫的那組請重新新增並貼 key |
 | 聊天台選「自動」回「沒有可用的 provider」 | 沒有 enabled 的 `main` provider；到「模型」分頁新增或啟用 |
+| `web_search` 回「尚未設定搜尋 API key」 | 到「工具」分頁「網路搜尋」貼 Brave 或 Google 的 key（google 另填 cx），儲存後按「測試搜尋」 |
+| `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |
 | 聊天台跑了很久才回「系統中止：已達單輪時間預算」 | 一輪工具太多或某個工具（PDF OCR、大試算表）太慢。拆成幾則訊息下指令，或調低讀取類工具的 max_* 參數 |

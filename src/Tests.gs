@@ -61,6 +61,8 @@ function smokeTestTable_() {
     // M2
     ['registry: 全部工具無重名、schema 合法、名稱以 toolset 開頭', testRegistryValid_, 'pure'],
     ['registry: 重名 / 壞 schema 的宣告被拒；listToolsForProvider_ 依 RBAC 過濾', testRegistryRejectsBad_, 'pure'],
+    ['web_search: Brave / Google 請求（key 走 header 不進 URL、freshness / 語言 / 筆數上限、google 缺 cx 報錯）與回應整理（去 HTML、截長、無 url 丟棄）', testWebSearchAdapter_, 'pure'],
+    ['sheets: uniqueSheetName_ 重名加序號（不分大小寫）；web_search 設定 parse / save 驗證引擎', testSheetsAndSearchConfig_, 'pure'],
     ['executor: 參數驗證（required、未宣告參數拒絕、型別、enum、字串轉型）', testValidateArgs_, 'pure'],
     ['executor: RBAC 拒絕（toolset 未宣告 / 權限關閉）且 handler 不執行', testRbacDenied_, 'pure'],
     ['executor: 審批策略 always / autonomous_only / never 與 approved 略過', testApprovalPolicy_, 'pure'],
@@ -636,9 +638,11 @@ function execFake_(name, args, ctx, cfg, registry) {
 
 function testRegistryValid_() {
   const registry = buildToolRegistry_(allToolDeclarations_());
-  assert_(registry.list.length >= 35, `工具數應 ≥ 35，實際 ${registry.list.length}`);
+  assert_(registry.list.length >= 50, `工具數應 ≥ 50，實際 ${registry.list.length}`);
   assertEqual_(registry.toolsets, ['drive', 'docs', 'sheets', 'slides', 'gmail', 'calendar', 'web', 'session', 'memory', 'cronjob', 'skill'], 'toolset 順序');
-  assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name), ['slides_delete_slide'], 'D 類只有刪簡報頁（RBAC delete 預設關）');
+  assertEqual_(registry.list.filter((t) => t.risk === 'D').map((t) => t.name).sort(), ['calendar_delete_event', 'slides_delete_slide'], 'D 類只有刪簡報頁與刪行事曆事件（RBAC delete 預設關）');
+  ['drive_copy', 'drive_list_permissions', 'drive_unshare', 'sheets_list_sheets', 'sheets_find', 'sheets_copy_sheet', 'calendar_delete_event', 'web_search']
+    .forEach((n) => assert_(!!registry.byName[n], `應有工具 ${n}`));
   assertEqual_(registry.list.filter((t) => t.risk === 'X').map((t) => t.name).sort(), ['drive_share', 'gmail_forward', 'gmail_send'], 'X 類只有 share / send / forward');
   registry.list.forEach((t) => {
     validateToolDeclaration_(t);
@@ -668,6 +672,50 @@ function testRegistryValid_() {
   assertEqual_(docsCreate.parameters.required, ['title'], 'required 保留');
   assertEqual_(geminiCleanSchema_({ type: ['string', 'array'], items: { type: ['number', 'null'] }, title: 'x', default: 1 }), { type: 'string' }, 'type 陣列收斂成 string 並去掉 items / title / default');
   assertEqual_(geminiCleanSchema_({ type: ['array', 'null'], items: { type: 'integer', title: 'n' } }), { type: 'array', items: { type: 'integer' } }, '無 string 取第一個非 null，items 保留');
+}
+
+function testWebSearchAdapter_() {
+  const b = webSearchBuildRequest_('brave', { query: '台北 天氣', count: 5, freshness: 'week', language: 'zh-hant' }, 'BSA-key');
+  assert_(b.url.indexOf('https://api.search.brave.com/res/v1/web/search?q=%E5%8F%B0%E5%8C%97%20%E5%A4%A9%E6%B0%A3') === 0, 'brave URL 與 query 編碼：' + b.url);
+  assert_(/&count=5\b/.test(b.url) && /&freshness=pw\b/.test(b.url) && /&search_lang=zh-hant\b/.test(b.url), 'brave count / freshness / lang：' + b.url);
+  assertEqual_(b.headers['X-Subscription-Token'], 'BSA-key', 'brave key header');
+  assert_(b.url.indexOf('BSA-key') === -1, 'key 不可進 URL');
+  const b2 = webSearchBuildRequest_('brave', { query: 'x', count: 999 }, 'k');
+  assert_(/&count=20\b/.test(b2.url) && b2.url.indexOf('freshness') === -1, '筆數夾到上限 20、無 freshness：' + b2.url);
+
+  const g = webSearchBuildRequest_('google', { query: 'gas', count: 15, freshness: 'month', language: 'zh-hant' }, 'AIza', 'cx123');
+  assert_(g.url.indexOf('https://www.googleapis.com/customsearch/v1?cx=cx123&q=gas&num=10') === 0, 'google URL（num 上限 10）：' + g.url);
+  assert_(/&dateRestrict=m1\b/.test(g.url) && /&lr=lang_zh-TW\b/.test(g.url), 'google dateRestrict / lr：' + g.url);
+  assertEqual_(g.headers['X-Goog-Api-Key'], 'AIza', 'google key header');
+  assert_(g.url.indexOf('AIza') === -1, 'google key 不可進 URL');
+  assertThrows_(() => webSearchBuildRequest_('google', { query: 'x' }, 'k', ''), 'google 缺 cx');
+  assertThrows_(() => webSearchBuildRequest_('bing', { query: 'x' }, 'k'), '未知引擎');
+
+  const brave = webSearchParseResponse_('brave', { web: { results: [
+    { title: '<strong>GAS</strong> &amp; Sheets', url: 'https://a.example', description: 'desc <b>one</b>', age: '2 days ago' },
+    { title: 'no url', description: 'x' },
+    { title: 'long', url: 'https://b.example', description: 'y'.repeat(1000) },
+  ] } }, 10);
+  assertEqual_(brave.results.length, 2, '無 url 的丟棄');
+  assertEqual_(brave.results[0], { title: 'GAS & Sheets', url: 'https://a.example', snippet: 'desc one', age: '2 days ago' }, 'brave 去 HTML / entity');
+  assert_(brave.results[1].snippet.length <= WEB_SEARCH_SNIPPET_CHARS + 1, '摘要截長');
+  const google = webSearchParseResponse_('google', { items: [{ title: 'T', link: 'https://g.example', snippet: 'S\nmulti  space' }], searchInformation: { formattedTotalResults: '1,234' } }, 1);
+  assertEqual_(google.results, [{ title: 'T', url: 'https://g.example', snippet: 'S multi space', age: '' }], 'google 整理（空白壓縮）');
+  assertEqual_(google.total_hint, '1,234', 'google total');
+  assertEqual_(webSearchParseResponse_('brave', {}, 5).results, [], '空回應');
+  assertEqual_(webSearchErrorMessage_('{"error":{"message":"bad key"}}'), 'bad key', '錯誤訊息 error.message');
+  assertEqual_(webSearchErrorMessage_('{"message":"rate"}'), 'rate', '錯誤訊息 message');
+}
+
+function testSheetsAndSearchConfig_() {
+  assertEqual_(uniqueSheetName_('報表', ['其他']), '報表', '不重名原樣');
+  assertEqual_(uniqueSheetName_('報表', ['報表']), '報表 (2)', '重名加 (2)');
+  assertEqual_(uniqueSheetName_('Sheet1', ['sheet1', 'Sheet1 (2)']), 'Sheet1 (3)', '不分大小寫、跳過已用序號');
+  assertEqual_(uniqueSheetName_('', []), '工作表', '空名給預設');
+  const cfg = parseToolConfig_({ web_search_engine: 'Google', web_search_cx: ' cx1 ' });
+  assertEqual_([cfg.webSearchEngine, cfg.webSearchCx], ['google', 'cx1'], 'web_search 設定解析（小寫、去空白）');
+  assertEqual_(parseToolConfig_({ web_search_engine: 'bing' }).webSearchEngine, 'brave', '未知引擎退回預設 brave');
+  assertEqual_(parseToolConfig_({}).webSearchEngine, 'brave', '沒設定 → brave');
 }
 
 function testRegistryRejectsBad_() {
@@ -2709,7 +2757,7 @@ function testPrincipalAccess_() {
   // 工具清單同步過濾
   const names = (p, ts) => listToolsForProvider_(registry, cfg.rbac, (t) => !checkPrincipalAccess_(t, p, ts)).map((t) => t.name);
   assert_(names('owner').indexOf('fake_echo') !== -1 && names('owner').indexOf('memory_manage') !== -1, 'owner 全部');
-  assertEqual_(names('group_member'), ['session_spill_read', 'session_search', 'web_fetch'], 'group_member 預設只看到 session / web');
+  assertEqual_(names('group_member'), ['session_spill_read', 'session_search', 'web_fetch', 'web_search'], 'group_member 預設只看到 session / web');
   assertEqual_(names('group_member', ['fake', 'memory']), decls.filter((d) => d.toolset === 'fake').map((d) => d.name), '放寬 fake；memory 仍看不到');
   assertEqual_(names('guest'), [], 'guest 看不到任何工具');
   // runTurn_ 把 principal 傳給 execute、工具清單過濾、steps 帶 error

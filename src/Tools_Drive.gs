@@ -1,5 +1,5 @@
 /**
- * @fileoverview drive toolset：搜尋 / 列表 / 讀文字 / 建資料夾 / 移動 / 改名 / 匯出 PDF / 分享（X）。
+ * @fileoverview drive toolset：搜尋 / 列表 / 讀文字 / 建資料夾 / 移動 / 改名 / 複製 / 匯出 PDF / 分享（X）/ 列權限 / 取消分享。
  * 全部用內建 DriveApp（不開 advanced service）；PDF 轉文字走 Drive REST v3 的 OCR 匯入（UrlFetch + OAuth token）。
  */
 
@@ -89,6 +89,20 @@ function driveTools_() {
       handler: driveRename_,
     },
     {
+      name: 'drive_copy', toolset: 'drive', risk: 'W',
+      description: '複製一份檔案（Google 文件 / 試算表 / 簡報或一般檔案都可，含格式與內容；資料夾不支援）。預設放在原檔同一資料夾、檔名「原檔名 的副本」。回傳新檔 id 與網址。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_id: idProp('來源檔案'),
+          name: { type: 'string', description: '新檔名（選填）' },
+          folder_id: idProp('目標資料夾（選填）'),
+        },
+        required: ['file_id'], additionalProperties: false,
+      },
+      handler: driveCopy_,
+    },
+    {
       name: 'drive_export_pdf', toolset: 'drive', risk: 'W',
       description: '把 Google 文件 / 試算表 / 簡報匯出成 PDF 檔存到 Drive（預設存在原檔同一資料夾）。',
       parameters: {
@@ -115,6 +129,30 @@ function driveTools_() {
         required: ['file_id', 'email'], additionalProperties: false,
       },
       handler: driveShare_,
+    },
+    {
+      name: 'drive_list_permissions', toolset: 'drive', risk: 'R',
+      description: '列出檔案或資料夾目前分享給誰（擁有者、編輯者、檢視者 / 評論者）與連結分享狀態。',
+      parameters: {
+        type: 'object',
+        properties: { file_id: idProp('檔案或資料夾') },
+        required: ['file_id'], additionalProperties: false,
+      },
+      handler: driveListPermissions_,
+    },
+    {
+      name: 'drive_unshare', toolset: 'drive', risk: 'W',
+      description: '收回分享：移除某個 email 的存取權（email），或把「知道連結的任何人」改回私人（revoke_link=true）；兩者可同時給。不會影響擁有者。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_id: idProp('檔案或資料夾'),
+          email: { type: 'string', description: '要移除存取權的 email（選填）' },
+          revoke_link: { type: 'boolean', description: 'true = 關閉連結分享，改為只有被明確加入的人能開（選填）' },
+        },
+        required: ['file_id'], additionalProperties: false,
+      },
+      handler: driveUnshare_,
     },
   ];
 }
@@ -330,6 +368,75 @@ function driveExportPdf_(args) {
     throw new Error(`無法把 ${file.getMimeType()} 轉成 PDF：${err && err.message || err}`);
   }
   return driveFileInfo_(folder.createFile(blob));
+}
+
+function driveCopy_(args) {
+  const got = driveGetItem_(args.file_id);
+  if (got.kind === 'folder') throw new Error('資料夾不支援複製，請建新資料夾後逐檔複製。');
+  const file = got.item;
+  const name = args.name ? String(args.name).trim() : `${file.getName()} 的副本`;
+  let folder = null;
+  if (args.folder_id) {
+    folder = DriveApp.getFolderById(String(args.folder_id));
+  } else {
+    const parents = file.getParents();
+    if (parents.hasNext()) folder = parents.next();
+  }
+  const copy = folder ? file.makeCopy(name, folder) : file.makeCopy(name);
+  return { copied_from: { id: file.getId(), name: file.getName() }, copy: driveFileInfo_(copy), folder: folder ? driveFolderInfo_(folder) : null };
+}
+
+/**
+ * @param {!Array<GoogleAppsScript.Base.User>} users
+ * @return {!Array<string>}
+ */
+function userEmails_(users) {
+  return (users || []).map((u) => u.getEmail()).filter(Boolean);
+}
+
+function driveListPermissions_(args) {
+  const got = driveGetItem_(args.file_id);
+  const item = got.item;
+  const owner = item.getOwner();
+  let access = '';
+  let permission = '';
+  try { access = String(item.getSharingAccess()); permission = String(item.getSharingPermission()); } catch (err) { access = '(無法讀取)'; }
+  const editors = userEmails_(item.getEditors());
+  const viewers = userEmails_(item.getViewers());
+  return {
+    item: got.kind === 'folder' ? driveFolderInfo_(item) : driveFileInfo_(item),
+    owner: owner ? owner.getEmail() : '',
+    editors,
+    viewers_and_commenters: viewers,
+    link_sharing: { access, permission, is_private: access === 'PRIVATE' },
+    shared_with_count: editors.length + viewers.length,
+  };
+}
+
+function driveUnshare_(args) {
+  const got = driveGetItem_(args.file_id);
+  const item = got.item;
+  const email = args.email ? String(args.email).trim() : '';
+  const revokeLink = !!args.revoke_link;
+  if (!email && !revokeLink) throw new Error('請給 email 或 revoke_link=true 至少一個。');
+  const removed = [];
+  if (email) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error(`email 格式不正確：${email}`);
+    const owner = item.getOwner();
+    if (owner && owner.getEmail().toLowerCase() === email.toLowerCase()) throw new Error('不能移除擁有者的存取權。');
+    const before = userEmails_(item.getEditors()).concat(userEmails_(item.getViewers())).map((e) => e.toLowerCase());
+    if (before.indexOf(email.toLowerCase()) === -1) throw new Error(`${email} 目前沒有這個項目的存取權。`);
+    try { item.removeEditor(email); } catch (err) { /* 不是編輯者 */ }
+    try { item.removeViewer(email); } catch (err) { /* 不是檢視者 */ }
+    if (got.kind === 'file') { try { item.removeCommenter(email); } catch (err) { /* 不是評論者 */ } }
+    removed.push(email);
+  }
+  let linkChanged = false;
+  if (revokeLink) {
+    const access = String(item.getSharingAccess());
+    if (access !== 'PRIVATE') { item.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE); linkChanged = true; }
+  }
+  return Object.assign({ removed, link_sharing_revoked: linkChanged }, driveListPermissions_({ file_id: item.getId() }));
 }
 
 function driveShare_(args) {

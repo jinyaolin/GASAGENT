@@ -21,6 +21,8 @@ const PROP = Object.freeze({
    * 讓每分鐘 trigger 在閒置時幾乎不耗 trigger 配額。
    */
   QUEUE_DIRTY: 'QUEUE_DIRTY',
+  /** web_search 的搜尋 API key（Brave / Google Programmable Search）；引擎與 cx 在 Config。 */
+  WEB_SEARCH_KEY: 'WEB_SEARCH_KEY',
   /**
    * 最早到期的排程時間（ISO）。Cron 有異動時由 refreshCronNextRunProp_ 更新；queueTick 閒置時連同 QUEUE_DIRTY
    * 一起看，兩者都沒到就不開 spreadsheet。
