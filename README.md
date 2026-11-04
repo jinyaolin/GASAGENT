@@ -650,6 +650,7 @@ node scripts/local-tests.js
 |---|---|
 | `clasp push` 回 `User has not enabled the Apps Script API` | 到 <https://script.google.com/home/usersettings> 開啟 API，等一分鐘重試 |
 | `scripts/install.sh` 在 `create-script` 失敗 | 同上（API 沒開或剛開還沒生效）；或登入的不是目標帳號：`clasp -u <代號> logout` 後重跑 |
+| `deploy.sh` 對某帳號回 `invalid_grant … invalid_rapt` | 該帳號的 clasp 登入憑證被 Google 要求重新驗證（Workspace 帳號的定期重驗、改密碼、長期沒用都會）。本機重登再推：`clasp -u <代號> login`（瀏覽器選**該**帳號）→ `scripts/deploy.sh --account <代號> "說明"`。其他帳號不受影響 |
 | 多帳號切換後 `clasp` 指令打到錯的專案 | 腳本結束會把根目錄 `.clasp.json` 還原成執行前的那個（通常是 default）；要對別的帳號手動下 `clasp` 指令請 `cp accounts/<代號>/clasp.json .clasp.json` 並用 `clasp -u <代號>`，做完記得換回 |
 | `scripts/deploy.sh` 說「scriptId 不一致」或「同時出現在兩個帳號」 | `accounts/<代號>/clasp.json` 與 `deploy.json` 被別的帳號的檔案覆蓋，或兩個資料夾指到同一個 Apps Script 專案。到 Apps Script 編輯器「專案設定」核對 scriptId 後修正檔案，不要硬推 |
 | 群組成員 @bot 問 owner 的信 / 檔案，bot 回「這個功能只有 owner 本人能用」 | 刻意限制（principal `group_member`）：群聊模式成員只能用「通道」分頁勾選的 toolset（預設 web / skill / session）。真的要開就在「通道」勾 gmail / drive…（Doctor 會提醒），或改由白名單成員自己問 |
