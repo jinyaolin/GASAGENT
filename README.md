@@ -668,6 +668,10 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 
 `/approve`（或 `/pending`）列出所有待審批的動作：每筆一列「✅ #n 批准 / ❌ #n 拒絕」按鈕（與原本回覆裡的按鈕同一個 callback 格式），附參數摘要、原因與 id；待回答的提問另列一段並提示 `/answer`。`/approve <apr_id>`、`/deny <apr_id>` 直接決定。一次最多列 10 筆。只有白名單（owner）能用；群聊成員的指令一律忽略。
 
+### 技能提案推 Telegram
+
+agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技能提案時，除了寫進 Approvals，系統會**直接把提案內容推到 owner 的 Telegram**：新建 / 修補哪個技能、說明、觸發詞、正文預覽（patch 顯示找到 → 取代成），附「批准 / 拒絕」按鈕；批准後才寫進 Drive 技能資料夾。任何通道（聊天台、排程、事件、Email、Telegram）都會推，不必開管理頁；`/approve` 清單裡的技能提案也用同樣摘要顯示。回覆文字會註明「內容與按鈕已另送到你的 Telegram」。
+
 ### Telegram 傳檔（`telegram_send_file`）
 
 `telegram_send_file({file_id, caption?, as_photo?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 文件 / 試算表 / 簡報先轉 PDF；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。

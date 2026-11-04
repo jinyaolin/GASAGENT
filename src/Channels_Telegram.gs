@@ -239,8 +239,12 @@ function telegramPendingList_(approvals, questions) {
     lines.push(`⏸ 待審批 ${(approvals || []).length} 筆${(approvals || []).length > items.length ? `（只列前 ${items.length}）` : ''}：`);
     items.forEach((a, i) => {
       let args = String(a.args || '');
-      try { const parsed = JSON.parse(args); args = Object.keys(parsed).map((k) => `${k}=${typeof parsed[k] === 'string' ? parsed[k] : JSON.stringify(parsed[k])}`).join('、'); } catch (err) { /* 原樣 */ }
-      lines.push('', `#${i + 1} ${a.tool}  ${a.created_at ? a.created_at.slice(5, 16).replace('T', ' ') : ''}`, truncateText_(args.replace(/\s+/g, ' '), 200).text, `↳ ${truncateText_(String(a.reason || ''), 80).text}`, `id ${a.id}`);
+      if (a.tool === 'skill_manage') {
+        args = skillProposalSummary_(a.args, 200).join('\n');
+      } else {
+        try { const parsed = JSON.parse(args); args = truncateText_(Object.keys(parsed).map((k) => `${k}=${typeof parsed[k] === 'string' ? parsed[k] : JSON.stringify(parsed[k])}`).join('、').replace(/\s+/g, ' '), 200).text; } catch (err) { args = truncateText_(args, 200).text; }
+      }
+      lines.push('', `#${i + 1} ${a.tool === 'skill_manage' ? '💡 skill_manage' : a.tool}  ${a.created_at ? a.created_at.slice(5, 16).replace('T', ' ') : ''}`, args, `↳ ${truncateText_(String(a.reason || ''), 80).text}`, `id ${a.id}`);
     });
     lines.push('', '按下方按鈕決定，或輸入 /approve <id>、/deny <id>。');
   }
@@ -923,6 +927,56 @@ function telegramAskOwner_(q, deps) {
 }
 
 /**
+ * skill_manage 提案參數 → 給 owner 看的摘要行（名稱、動作、說明、觸發詞、正文 / 修補預覽）。純函式。
+ * @param {*} args skill_manage 的參數（object 或 JSON 字串）
+ * @param {number=} previewChars 正文預覽字數
+ * @return {!Array<string>}
+ */
+function skillProposalSummary_(args, previewChars) {
+  const a = parseJsonArgs_(args);
+  const max = previewChars || 400;
+  const lines = [`${a.action === 'patch' ? '修補' : '新建'}技能「${a.name || '?'}」`];
+  if (a.description) lines.push(`說明：${truncateText_(String(a.description).replace(/\s+/g, ' '), 160).text}`);
+  const triggers = toStringList_(a.triggers);
+  if (triggers.length) lines.push(`觸發詞：${triggers.join('、')}`);
+  if (a.action === 'patch') {
+    if (a.patch_find !== undefined) lines.push(`找到：${truncateText_(String(a.patch_find).replace(/\s+/g, ' '), 150).text}`, `取代成：${truncateText_(String(a.patch_replace || '（刪除）').replace(/\s+/g, ' '), 150).text}`);
+    if (a.content) lines.push('整份新正文：', truncateText_(String(a.content), max).text);
+  } else if (a.content) {
+    lines.push('正文：', truncateText_(String(a.content), max).text);
+  }
+  return lines;
+}
+
+/**
+ * M7-B：agent 提了技能提案（skill_manage 進 Approvals）→ 推一則含摘要與「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram，
+ * 不必開管理頁。任何通道都推（Telegram 來源的回覆只有一行文字提示，提案內容靠這則）。不 throw。
+ * @param {{approvalId: string, args: *, sessionId: string, channel: string}} info
+ * @param {{cfg: (ChannelConfig|undefined), send: (Function|undefined)}=} deps
+ * @return {{ok: boolean, chatId: string, skipped: string, error: string}}
+ */
+function notifySkillProposalTelegram_(info, deps) {
+  deps = deps || {};
+  const out = { ok: false, chatId: '', skipped: '', error: '' };
+  try {
+    const cfg = deps.cfg || getChannelConfig_();
+    if (!cfg.telegramEnabled || !cfg.telegramNotifyApprovals) { out.skipped = 'disabled'; return out; }
+    const chatId = cfg.telegramOwnerChatId || cfg.telegramAllowedUserIds[0] || '';
+    if (!chatId) { out.skipped = 'no_chat_id'; return out; }
+    if (!info || !info.approvalId) { out.skipped = 'no_approval'; return out; }
+    const source = { admin: '管理頁聊天台', email: 'Email 指令信', cron: '排程', watch: '事件任務', telegram: 'Telegram 對話' }[info.channel] || info.channel || '';
+    const lines = [`💡 agent 想把這次的做法存成技能（${info.approvalId}${source ? '，來自' + source : ''}）`, ''].concat(skillProposalSummary_(info.args, 500));
+    lines.push('', '批准後才會寫進 Drive 的技能資料夾並開始生效；拒絕則丟棄。也可用 /approve 看全部待審。');
+    (deps.send || ((c, t, o) => telegramSend_(c, t, o)))(String(chatId), lines.join('\n'), { replyMarkup: telegramApprovalKeyboard_([{ tool: 'skill_manage', approvalId: info.approvalId }]) });
+    out.ok = true;
+    out.chatId = String(chatId);
+  } catch (err) {
+    out.error = String(err && err.message || err);
+  }
+  return out;
+}
+
+/**
  * 任何通道（聊天台 / Email / 排程）停在審批時，推一則帶「批准 / 拒絕」按鈕的通知到 owner 的 Telegram。
  * Telegram 自己來的任務不用（回覆本身就帶按鈕）。不 throw。
  * @param {{channel: string, sessionId: string, steps: !Array<TurnStep>, message: (string|undefined)}} info
@@ -941,8 +995,11 @@ function notifyApprovalsTelegram_(info, deps) {
     if (!pending.length) { out.skipped = 'nothing_pending'; return out; }
     const source = { admin: '管理頁聊天台', email: 'Email 指令信', cron: '排程' }[info.channel] || info.channel;
     const lines = [`⏸ 來自${source}的任務需要你審批${info.message ? `：「${truncateText_(String(info.message).replace(/\s+/g, ' '), 80).text}」` : ''}`, ''];
-    pending.forEach((s) => lines.push(`• ${s.tool} ${truncateText_(s.argsPreview || '', 200).text}`));
-    lines.push('', `session ${info.sessionId}。按按鈕決定，或到管理頁「紀錄 → 審批」。`);
+    pending.forEach((s) => {
+      if (s.tool === 'skill_manage' && s.args) lines.push(`• 💡 技能提案：${skillProposalSummary_(s.args, 300).join('\n  ')}`);
+      else lines.push(`• ${s.tool} ${truncateText_(s.argsPreview || '', 200).text}`);
+    });
+    lines.push('', `session ${info.sessionId}。按按鈕決定，或 /approve 看全部待審。`);
     (deps.send || ((c, t, o) => telegramSend_(c, t, o)))(String(chatId), lines.join('\n'), { replyMarkup: telegramApprovalKeyboard_(pending) });
     out.ok = true;
     out.chatId = String(chatId);

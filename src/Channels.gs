@@ -165,6 +165,6 @@ function channelReplyText_(result, opts) {
   const pending = (result.steps || []).filter((s) => s.status === 'pending_approval');
   if (pending.length) lines.push('', `⏸ 待你審批：${pending.map((s) => s.tool).join(', ')}。${(opts && opts.approvalHint) || ''}${result.approval_notice && result.approval_notice.ok ? '（也已推到 Telegram，可直接按按鈕）' : ''}`.trim());
   if (result.continued_by) lines.push('', '（任務尚未完成，系統已排續跑，稍後會再回覆。）');
-  if (result.skillProposal && result.skillProposal.proposed) lines.push('', `💡 agent 提了一個技能提案（${result.skillProposal.approvalId}），到管理頁「紀錄 → 審批」決定。`);
+  if (result.skillProposal && result.skillProposal.proposed) lines.push('', `💡 agent 提了一個技能提案（${result.skillProposal.approvalId}）${result.skillProposal.notified ? '，內容與批准 / 拒絕按鈕已另送到你的 Telegram。' : '，用 /approve 或管理頁「紀錄 → 審批」決定。'}`);
   return lines.join('\n');
 }

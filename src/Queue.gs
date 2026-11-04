@@ -380,7 +380,7 @@ function summarizeTurnResult_(r) {
     ms: r.ms || 0,
     compacted: !!r.compacted,
     skills: r.skills || null,
-    skillProposal: r.skillProposal ? { proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', text: truncateText_(r.skillProposal.text, 300).text } : null,
+    skillProposal: r.skillProposal ? { proposed: !!r.skillProposal.proposed, approvalId: r.skillProposal.approvalId || '', text: truncateText_(r.skillProposal.text, 300).text, notified: !!(r.skillProposal.notice && r.skillProposal.notice.ok) } : null,
     approval_notice: r.approvalNotice || null,
   };
 }

@@ -638,7 +638,12 @@ function runSessionTurn_(input, deps) {
         status: proposalStep ? proposalStep.status : '',
         text: truncateText_(nudge.text, 500).text,
         steps: nudge.steps,
+        notice: null,
       };
+      // M7-B：提案內容與批准 / 拒絕按鈕直接推到 owner 的 Telegram（多數人不會開管理頁）。
+      if (skillProposal.proposed) {
+        skillProposal.notice = (deps.notifySkillProposal || notifySkillProposalTelegram_)({ approvalId: skillProposal.approvalId, args: proposalStep.args, sessionId: session.id, channel });
+      }
       r.usage.prompt += nudge.usage.prompt;
       r.usage.completion += nudge.usage.completion;
       r.costEst = Math.round((r.costEst + nudge.costEst) * 1e6) / 1e6;

@@ -2674,8 +2674,10 @@ function testSkillAutoProposal_() {
     five('b'), { text: '第二輪完成。', stop: 'end' },
   ]);
   const skills = memorySkillStore_();
-  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_() });
+  const proposalNotices = [];
+  const deps = fakeSessionDeps_(fake.chat, { skillStore: skills.store, registry: fakeM5Registry_(), toolConfig: fakeM5ToolConfig_(), notifySkillProposal: (info) => { proposalNotices.push(info); return { ok: true, chatId: '111', skipped: '', error: '' }; } });
   const r1 = runSessionTurn_({ message: '盤點我的 Drive' }, deps);
+  assertEqual_([proposalNotices.length, proposalNotices[0].approvalId === r1.skillProposal.approvalId, proposalNotices[0].args.name, proposalNotices[0].channel, r1.skillProposal.notice.ok], [1, true, 'drive-audit', 'admin', true], 'M7-B：提案推 Telegram（帶 skill_manage 參數）');
   assertEqual_([r1.steps.length, r1.text, fake.calls.length, r1.llmCalls], [5, '整理完成。', 4, 4], '主輪 2 次 + 評估 2 次模型呼叫');
   assert_(/本輪共呼叫了 5 次工具/.test(fake.calls[2].messages[fake.calls[2].messages.length - 1].content), '第 3 次呼叫是評估訊息');
   assertEqual_(fake.calls[2].messages.length, 1 + 1 + 1 + 5 + 1 + 1, '評估帶完整本輪歷史（system + user + assistant + 5 tool + assistant 文字 + 評估訊息）');
@@ -2799,8 +2801,18 @@ function testTelegramParse_() {
   assertEqual_(newWebhookSecret_().length, 32, 'secret 32 字');
   assertThrows_(() => setTelegramToken_('not-a-token'), 'token 格式');
   // 回覆文字
-  const text = channelReplyText_({ text: '做好了', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }], continued_by: 'job_2', skillProposal: { proposed: true, approvalId: 'apr_9' } }, { approvalHint: '按鈕' });
-  assert_(/^做好了/.test(text) && /待你審批：gmail_send。按鈕/.test(text) && /已排續跑/.test(text) && /技能提案（apr_9）/.test(text), '回覆文字：' + text);
+  const text = channelReplyText_({ text: '做好了', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }], continued_by: 'job_2', skillProposal: { proposed: true, approvalId: 'apr_9', notified: true } }, { approvalHint: '按鈕' });
+  assert_(/^做好了/.test(text) && /待你審批：gmail_send。按鈕/.test(text) && /已排續跑/.test(text) && /技能提案（apr_9），內容與批准 \/ 拒絕按鈕已另送到你的 Telegram/.test(text), '回覆文字：' + text);
+  assert_(/\/approve 或管理頁/.test(channelReplyText_({ text: 'x', steps: [], skillProposal: { proposed: true, approvalId: 'apr_9', notified: false } }, {})), '沒推 Telegram 時提示 /approve');
+  // M7-B：技能提案的 Telegram 通知
+  const sentP = [];
+  const pn = notifySkillProposalTelegram_({ approvalId: 'apr_9', args: { action: 'create', name: 'drive-audit', description: '盤點 Drive', triggers: ['盤點'], content: '# 步驤\n1. 列檔\n2. 整理' }, sessionId: 's1', channel: 'admin' }, { cfg: parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '999' }), send: (c, t, o) => sentP.push({ c, t, o }) });
+  assertEqual_([pn.ok, pn.chatId, sentP[0].c], [true, '999', '999'], '推到 owner chat');
+  assert_(/💡 agent 想把這次的做法存成技能（apr_9，來自管理頁聊天台）/.test(sentP[0].t) && /新建技能「drive-audit」/.test(sentP[0].t) && /說明：盤點 Drive/.test(sentP[0].t) && /觸發詞：盤點/.test(sentP[0].t) && /正文：\n# 步驤/.test(sentP[0].t), '提案訊息：' + sentP[0].t);
+  assertEqual_(sentP[0].o.replyMarkup.inline_keyboard[0].map((b) => b.callback_data), ['apr:apr_9:approve', 'apr:apr_9:deny'], '提案按鈕');
+  assertEqual_(notifySkillProposalTelegram_({ approvalId: 'apr_9', args: {} }, { cfg: parseChannelConfig_({}) }).skipped, 'disabled', 'Telegram 未啟用略過');
+  assertEqual_(skillProposalSummary_({ action: 'patch', name: 'x', patch_find: 'a', patch_replace: 'b' }), ['修補技能「x」', '找到：a', '取代成：b'], 'patch 摘要');
+  assert_(/#1 💡 skill_manage/.test(telegramPendingList_([{ id: 'apr_s', tool: 'skill_manage', args: '{"action":"create","name":"k","description":"d","content":"c"}', reason: '技能提案', created_at: '' }], []).text), '/approve 清單對技能提案用摘要');
   assertEqual_(channelReplyText_({ text: '', steps: [] }, {}), '（這輪沒有文字結果）', '空結果');
   // 通道設定
   const c = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, abc, 222', email_scan_every_minutes: '0', email_inbox_label: '' });
