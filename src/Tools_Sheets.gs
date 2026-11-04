@@ -276,7 +276,7 @@ function sheetsCreate_(args) {
     sheet.getRange(1, 1, 1, args.header.length).setValues([args.header.map(String)]).setFontWeight('bold');
     sheet.setFrozenRows(1);
   }
-  if (args.folder_id) DriveApp.getFileById(ss.getId()).moveTo(DriveApp.getFolderById(String(args.folder_id)));
+  if (args.folder_id) DriveApp.getFileById(ss.getId()).moveTo(requireFolder_(args.folder_id));
   return Object.assign(ssInfo_(ss), { sheet: sheet.getName() });
 }
 

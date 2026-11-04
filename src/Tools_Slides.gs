@@ -456,7 +456,7 @@ function slidesCreateDeck_(args, ctx) {
   specs.forEach((spec) => addSlideFromSpec_(presentation, spec));
   initial.forEach((s) => s.remove());
   presentation.saveAndClose();
-  if (args.folder_id) DriveApp.getFileById(presentation.getId()).moveTo(DriveApp.getFolderById(String(args.folder_id)));
+  if (args.folder_id) DriveApp.getFileById(presentation.getId()).moveTo(requireFolder_(args.folder_id));
   return Object.assign(presInfo_(SlidesApp.openById(presentation.getId())), { from_template: fromTemplate ? templateId : '' });
 }
 

@@ -354,7 +354,7 @@ function gmailSaveAttachments_(args) {
     if (!messages.length) throw new Error(`討論串裡沒有訊息 ${args.message_id}。`);
   }
   const needle = String(args.name_contains || '').trim().toLowerCase();
-  const folder = args.folder_id ? DriveApp.getFolderById(String(args.folder_id)) : folderByPath_(ATTACHMENT_FOLDER_PATH);
+  const folder = args.folder_id ? requireFolder_(args.folder_id) : folderByPath_(ATTACHMENT_FOLDER_PATH);
   const files = [];
   let skipped = 0;
   messages.forEach((m) => {

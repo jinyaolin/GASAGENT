@@ -151,7 +151,7 @@ function docsCreate_(args) {
     }
   }
   doc.saveAndClose();
-  if (args.folder_id) DriveApp.getFileById(doc.getId()).moveTo(DriveApp.getFolderById(String(args.folder_id)));
+  if (args.folder_id) DriveApp.getFileById(doc.getId()).moveTo(requireFolder_(args.folder_id));
   return Object.assign(docInfo_(doc), { blocks });
 }
 

@@ -44,7 +44,7 @@ const sandbox = {
     base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')),
     base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
   },
-  MimeType: { PLAIN_TEXT: 'text/plain', PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document', GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet', GOOGLE_SLIDES: 'application/vnd.google-apps.presentation' },
+  MimeType: { PLAIN_TEXT: 'text/plain', FOLDER: 'application/vnd.google-apps.folder', PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document', GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet', GOOGLE_SLIDES: 'application/vnd.google-apps.presentation' },
   Charts: { ChartType: {} },
   SlidesApp: { PredefinedLayout: {}, PlaceholderType: {}, ListPreset: {}, PageElementType: {} },
   DocumentApp: { ParagraphHeading: {}, GlyphType: {}, ElementType: {} },

@@ -189,19 +189,30 @@ function driveFolderInfo_(folder) {
 }
 
 /**
- * id 可能是檔案或資料夾；先當檔案，不行再當資料夾。
+ * 嚴格取資料夾：id（或網址）必須真的是資料夾，否則報清楚的錯。各工具的 folder_id / parent_id 都走這裡。
+ * @param {*} id
+ * @param {string=} field 錯誤訊息用的參數名
+ * @return {GoogleAppsScript.Drive.Folder}
+ * @throws {Error} 不是資料夾
+ */
+function requireFolder_(id, field) {
+  const got = driveGetItem_(id);
+  if (got.kind !== 'folder') throw new Error(`${field || 'folder_id'}「${got.item.getName()}」是檔案（${got.item.getMimeType()}），不是資料夾。`);
+  return got.item;
+}
+
+/**
+ * id 可能是檔案或資料夾，用 mimeType 判斷。
+ * 注意：DriveApp.getFolderById 拿到「檔案」的 id **不會丟錯**，會回一個空的假資料夾（2026-11-04 agent 把別人分享的簡報
+ * 當成空資料夾就是這樣來的），所以不能用「先當資料夾試」的寫法；getFileById 對資料夾 id 則正常回 File，mimeType 是 folder。
  * @param {string} id
  * @return {{kind: string, item: (GoogleAppsScript.Drive.File|GoogleAppsScript.Drive.Folder)}}
  */
 function driveGetItem_(id) {
-  id = requireString_(id, 'file_id');
-  try {
-    const folder = DriveApp.getFolderById(id);
-    // getFolderById 對檔案 id 會丟錯；走到這裡表示真的是資料夾。
-    return { kind: 'folder', item: folder };
-  } catch (err) {
-    return { kind: 'file', item: DriveApp.getFileById(id) };
-  }
+  id = parseDriveId_(requireString_(id, 'file_id')) || requireString_(id, 'file_id');
+  const file = DriveApp.getFileById(id);
+  if (file.getMimeType() === MimeType.FOLDER) return { kind: 'folder', item: DriveApp.getFolderById(id) };
+  return { kind: 'file', item: file };
 }
 
 /**
@@ -228,7 +239,14 @@ function driveSearch_(args) {
 }
 
 function driveList_(args) {
-  const folder = args.folder_id ? DriveApp.getFolderById(String(args.folder_id)) : DriveApp.getRootFolder();
+  let folder;
+  if (args.folder_id) {
+    const got = driveGetItem_(args.folder_id);
+    if (got.kind !== 'folder') throw new Error(`「${got.item.getName()}」是檔案（${got.item.getMimeType()}），不是資料夾；要讀內容請用 drive_read_text，要複製請用 drive_copy。`);
+    folder = got.item;
+  } else {
+    folder = DriveApp.getRootFolder();
+  }
   const max = clampInt_(args.max_results, DRIVE_DEFAULT_RESULTS, 1, DRIVE_MAX_RESULTS);
   const items = [];
   driveCollect_(folder.getFolders(), max, driveFolderInfo_, items);
@@ -333,12 +351,12 @@ function ocrToText_(file, contentType) {
 
 function driveCreateFolder_(args) {
   const name = requireString_(args.name, 'name');
-  const parent = args.parent_id ? DriveApp.getFolderById(String(args.parent_id)) : DriveApp.getRootFolder();
+  const parent = args.parent_id ? requireFolder_(args.parent_id, 'parent_id') : DriveApp.getRootFolder();
   return driveFolderInfo_(parent.createFolder(name));
 }
 
 function driveMove_(args) {
-  const target = DriveApp.getFolderById(requireString_(args.folder_id, 'folder_id'));
+  const target = requireFolder_(requireString_(args.folder_id, 'folder_id'));
   const got = driveGetItem_(args.file_id);
   got.item.moveTo(target);
   return { moved: got.kind === 'folder' ? driveFolderInfo_(got.item) : driveFileInfo_(got.item), to: driveFolderInfo_(target) };
@@ -355,7 +373,7 @@ function driveExportPdf_(args) {
   const file = DriveApp.getFileById(requireString_(args.file_id, 'file_id'));
   let folder;
   if (args.folder_id) {
-    folder = DriveApp.getFolderById(String(args.folder_id));
+    folder = requireFolder_(args.folder_id);
   } else {
     const parents = file.getParents();
     folder = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
@@ -377,7 +395,7 @@ function driveCopy_(args) {
   const name = args.name ? String(args.name).trim() : `${file.getName()} 的副本`;
   let folder = null;
   if (args.folder_id) {
-    folder = DriveApp.getFolderById(String(args.folder_id));
+    folder = requireFolder_(args.folder_id);
   } else {
     const parents = file.getParents();
     if (parents.hasNext()) folder = parents.next();
