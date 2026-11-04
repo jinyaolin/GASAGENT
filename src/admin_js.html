@@ -262,7 +262,7 @@
 
   /** 新增表單的預設值範本；選了只是填欄位，仍可改。 */
   const PROVIDER_PRESETS = [
-    { id: 'zai-glm', label: 'Z.ai GLM（coding plan）', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4', model: 'glm-4.6', max_tokens: 4096, extra_body: '{"thinking": {"type": "disabled"}}' },
+    { id: 'zai-glm', label: 'Z.ai GLM（coding plan）', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4', model: 'glm-5.3', max_tokens: 4096, extra_body: '{"reasoning_effort": "low"}' },
     { id: 'openrouter', label: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', extra_headers: '{"HTTP-Referer": "https://script.google.com", "X-Title": "GAS Agent"}' },
     { id: 'deepseek', label: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com', model: 'deepseek-chat', max_tokens: 4096 },
     { id: 'openai', label: 'OpenAI', protocol: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
@@ -288,7 +288,7 @@
     { key: 'priority', label: '優先序', type: 'number', hint: '同角色由小到大組備援鏈', value: 10 },
     { key: 'max_tokens', label: 'max_tokens', type: 'number', hint: '回覆上限；GAS 單次執行 6 分鐘，建議設' },
     { key: 'extra_headers', label: 'extra_headers（JSON）', type: 'textarea', hint: '例：{"X-Title": "GAS Agent"}' },
-    { key: 'extra_body', label: 'extra_body（JSON）', type: 'textarea', hint: '合併進請求 body；GLM 建議 {"thinking": {"type": "disabled"}}；值為 null 可移除預設欄位' },
+    { key: 'extra_body', label: 'extra_body（JSON）', type: 'textarea', hint: '合併進請求 body；GLM-5.3 系列只能調思考深度 {"reasoning_effort": "low"}（不接受 thinking disabled）；GLM-4.6 / 5.2 可用 {"thinking": {"type": "disabled"}}；值為 null 可移除預設欄位' },
     { key: 'cost_in_per_m', label: '輸入單價（USD / 百萬 tokens）', type: 'number', step: '0.01' },
     { key: 'cost_out_per_m', label: '輸出單價（USD / 百萬 tokens）', type: 'number', step: '0.01' },
   ];

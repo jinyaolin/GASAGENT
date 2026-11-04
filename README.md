@@ -182,12 +182,12 @@ clasp deploy -i <deploymentId> -d "說明"
 | id | `zai-glm` |
 | protocol | `openai` |
 | base_url | `https://api.z.ai/api/coding/paas/v4` |
-| model | `glm-4.6` |
+| model | `glm-5.3`（或 `glm-5.3-flash`） |
 | role / priority | `main` / `10` |
 | max_tokens | `4096` |
-| extra_body | `{"thinking": {"type": "disabled"}}` |
+| extra_body | `{"reasoning_effort": "low"}` |
 
-> Z.ai coding plan 的 key **只能打這個 coding endpoint**，拿去打官方 `open.bigmodel.cn` 的一般 endpoint 會 401。GLM 系列預設會開 thinking，推理一長就可能撞到 GAS 6 分鐘上限，所以用 `extra_body` 關掉，或至少把 `max_tokens` 設低。
+> Z.ai coding plan 的 key **只能打這個 coding endpoint**，拿去打官方 `open.bigmodel.cn` 的一般 endpoint 會 401。GLM 預設會開 thinking，推理一長就可能撞到 GAS 6 分鐘上限：**GLM-5.3 / 5.3-flash 不能關 thinking**（送 `{"thinking":{"type":"disabled"}}` 會回 400「This model always engages in thinking and cannot be disabled; please use low, high, or max」），只能用 `reasoning_effort` 調 low / high / max（預設 max）；GLM-4.6 / 5 / 5.1 / 5.2 才接受 `{"thinking": {"type": "disabled"}}`。不確定就用 `reasoning_effort: low`，兩類模型都吃。
 
 ### 範例：Anthropic / Gemini（當備援與 fast 角色）
 
@@ -717,7 +717,8 @@ node scripts/local-tests.js
 | 沒登入的瀏覽器也看得到管理頁 | 該部署存取權被設成「任何人」。「以我執行」下 `getEffectiveUser()` 永遠是 owner，`assertOwner()` 因此改用 `getActiveUser()`（匿名為空字串即拒絕）；仍請把部署改回「只有我自己」 |
 | DB 被誤刪 | `installAgent()` 偵測到檔案在垃圾桶會建新的；要救回舊資料請先從垃圾桶還原再執行 |
 | 升到 M1 後 Doctor 說 `Providers` / `Usage` tab 缺欄位 | 新版本加了欄位：Doctor 分頁按「重新安裝」（或編輯器執行 `installAgent()`）往右補欄，既有資料不動 |
-| 測試連線 / 聊天台等很久才回錯 | UrlFetch 無法設 timeout；請把該 provider 的 `max_tokens` 調低、GLM 類在 `extra_body` 關 thinking |
+| 測試連線 / 聊天台等很久才回錯 | UrlFetch 無法設 timeout；請把該 provider 的 `max_tokens` 調低、GLM 類在 `extra_body` 設 `{"reasoning_effort": "low"}` |
+| Z.ai 回 400 `This model always engages in thinking and cannot be disabled` | 模型換成 GLM-5.3 系列後舊的 `{"thinking":{"type":"disabled"}}` 不再接受：到「模型」分頁編輯該 provider，extra_body 改成 `{"reasoning_effort": "low"}`。400 屬請求本身的問題，備援鏈刻意不換下一個 |
 | Z.ai 回 401 | coding plan 的 key 只能打 `https://api.z.ai/api/coding/paas/v4`，不能打 bigmodel.cn 一般 endpoint |
 | 新增第二個同協定 provider 後第一個不見了 | 舊版會以 id 覆寫（範本預設 id 相同）。現在新增時 id 重複會被拒絕、範本會自動帶 `gemini-2` 之類的 id；被覆寫的那組請重新新增並貼 key |
 | 聊天台選「自動」回「沒有可用的 provider」 | 沒有 enabled 的 `main` provider；到「模型」分頁新增或啟用 |
