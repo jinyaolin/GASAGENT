@@ -148,33 +148,25 @@ function telegramSend_(chatId, text, opts, deps) {
 }
 
 /**
- * 決定 Drive 檔案要怎麼送到 Telegram：Google 文件 / 試算表 / 簡報匯出 PDF；圖片可用 sendPhoto；其餘原檔 sendDocument。純函式。
+ * 決定 Drive 檔案要怎麼送到 Telegram：Google 格式依 format 轉檔（auto：試算表 xlsx、文件 / 簡報 pdf；見 driveExportPlan_）；
+ * 圖片可用 sendPhoto；其餘原檔 sendDocument。純函式。
  * @param {string} mimeType
  * @param {string} name
  * @param {boolean=} asPhoto
- * @return {{method: string, exportMime: string, fileName: string}} exportMime 空 = 原檔
+ * @param {string=} format 'auto' | 'pdf' | 'office'
+ * @return {{method: string, exportMime: string, fileName: string, kind: string}} exportMime 空 = 原檔
  */
-function telegramFilePlan_(mimeType, name, asPhoto) {
-  const googleTypes = {
-    'application/vnd.google-apps.document': 'application/pdf',
-    'application/vnd.google-apps.spreadsheet': 'application/pdf',
-    'application/vnd.google-apps.presentation': 'application/pdf',
-    'application/vnd.google-apps.drawing': 'image/png',
-  };
-  const base = String(name || 'file');
-  if (googleTypes[mimeType]) {
-    const ext = googleTypes[mimeType] === 'image/png' ? '.png' : '.pdf';
-    return { method: 'sendDocument', exportMime: googleTypes[mimeType], fileName: /\.(pdf|png)$/i.test(base) ? base : base + ext };
-  }
-  if (asPhoto && /^image\/(png|jpe?g|gif|webp)$/i.test(String(mimeType))) return { method: 'sendPhoto', exportMime: '', fileName: base };
-  return { method: 'sendDocument', exportMime: '', fileName: base };
+function telegramFilePlan_(mimeType, name, asPhoto, format) {
+  if (asPhoto && /^image\/(png|jpe?g|gif|webp)$/i.test(String(mimeType))) return { method: 'sendPhoto', exportMime: '', fileName: String(name || 'file'), kind: 'raw' };
+  const plan = driveExportPlan_(mimeType, name, format || 'auto');
+  return { method: 'sendDocument', exportMime: plan.kind === 'raw' ? '' : plan.mime, fileName: plan.fileName, kind: plan.kind };
 }
 
 /**
  * 把 Drive 檔案送到 Telegram chat（multipart 上傳；Google 格式先轉 PDF）。
  * @param {string} chatId
  * @param {string} fileId Drive id 或網址
- * @param {{caption: (string|undefined), asPhoto: (boolean|undefined), replyTo: (number|undefined)}=} opts
+ * @param {{caption: (string|undefined), asPhoto: (boolean|undefined), format: (string|undefined), replyTo: (number|undefined)}=} opts
  * @param {{fetch: (Function|undefined), token: (string|undefined), getFile: (Function|undefined)}=} deps
  * @return {{ok: boolean, method: string, file_name: string, bytes: number, message_id: number}}
  */
@@ -185,10 +177,10 @@ function telegramSendDocument_(chatId, fileId, opts, deps) {
   if (!token) throw new Error('Telegram bot token 未設定（管理頁「通道」分頁）。');
   const id = parseDriveId_(fileId);
   const file = (deps.getFile || ((fid) => DriveApp.getFileById(fid)))(id);
-  const plan = telegramFilePlan_(file.getMimeType(), file.getName(), !!opts.asPhoto);
+  const plan = telegramFilePlan_(file.getMimeType(), file.getName(), !!opts.asPhoto, opts.format);
   let blob;
   try {
-    blob = plan.exportMime ? file.getAs(plan.exportMime) : file.getBlob();
+    blob = driveExportBlob_(file, { kind: plan.kind, mime: plan.exportMime, fileName: plan.fileName }, deps.exportDeps);
   } catch (err) {
     throw new Error(`無法讀取 / 轉換檔案 ${file.getName()}：${err && err.message || err}`);
   }

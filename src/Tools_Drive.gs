@@ -7,6 +7,16 @@ const DRIVE_MAX_RESULTS = 50;
 const DRIVE_DEFAULT_RESULTS = 20;
 const DRIVE_READ_MAX_CHARS = 50000;
 const DRIVE_READ_DEFAULT_CHARS = 20000;
+/** Google 格式匯出成 Office / CSV 的對應（Drive REST v3 export；DriveApp.getAs 只會 PDF）。 */
+const DRIVE_OFFICE_EXPORT = Object.freeze({
+  'application/vnd.google-apps.spreadsheet': { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ext: '.xlsx', label: 'xlsx' },
+  'application/vnd.google-apps.document': { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', ext: '.docx', label: 'docx' },
+  'application/vnd.google-apps.presentation': { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', ext: '.pptx', label: 'pptx' },
+});
+/** drive_export 可選格式。 */
+const DRIVE_EXPORT_FORMATS = Object.freeze(['pdf', 'xlsx', 'docx', 'pptx', 'csv']);
+/** Drive REST export 單檔上限 10 MB。 */
+const DRIVE_EXPORT_MAX_BYTES = 10 * 1024 * 1024;
 /** PDF / 圖片 OCR 上限（bytes）；UrlFetch payload 上限 50 MB，保守取 10 MB。 */
 const DRIVE_PDF_MAX_BYTES = 10 * 1024 * 1024;
 /**
@@ -115,6 +125,21 @@ function driveTools_() {
         required: ['file_id'], additionalProperties: false,
       },
       handler: driveExportPdf_,
+    },
+    {
+      name: 'drive_export', toolset: 'drive', risk: 'W',
+      description: '把 Google 試算表 / 文件 / 簡報匯出成指定格式存到 Drive：xlsx（試算表）、docx（文件）、pptx（簡報）、csv（試算表第一張工作表）或 pdf。要給別人可編輯的檔案時用 xlsx / docx / pptx，不要給 PDF。預設存在原檔同一資料夾，回傳新檔 id 與網址（可接著用 attachment_file_ids 寄出或 telegram_send_file 傳送）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_id: idProp('來源檔案'),
+          format: { type: 'string', enum: DRIVE_EXPORT_FORMATS.slice(), description: 'xlsx / docx / pptx / csv / pdf；格式要跟來源類型相符' },
+          folder_id: idProp('目標資料夾（選填）'),
+          name: { type: 'string', description: '檔名（選填，預設「原檔名.副檔名」）' },
+        },
+        required: ['file_id', 'format'], additionalProperties: false,
+      },
+      handler: driveExport_,
     },
     {
       name: 'drive_share', toolset: 'drive', risk: 'X',
@@ -455,6 +480,83 @@ function driveUnshare_(args) {
     if (access !== 'PRIVATE') { item.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE); linkChanged = true; }
   }
   return Object.assign({ removed, link_sharing_revoked: linkChanged }, driveListPermissions_({ file_id: item.getId() }));
+}
+
+/**
+ * 決定一個 Drive 檔案要怎麼匯出。純函式。
+ * @param {string} mimeType 來源 mimeType
+ * @param {string} name 來源檔名
+ * @param {string} format 'auto' | 'pdf' | 'office' | 'xlsx' | 'docx' | 'pptx' | 'csv'
+ *   auto：試算表 → xlsx，文件 / 簡報 → pdf，非 Google 格式原檔；office：Google 格式一律對應的 Office 格式
+ * @return {{kind: ('raw'|'getAs'|'export'), mime: string, fileName: string, label: string}}
+ * @throws {Error} 格式與來源不符
+ */
+function driveExportPlan_(mimeType, name, format) {
+  const f = String(format || 'auto').toLowerCase();
+  const isGoogle = String(mimeType || '').indexOf('application/vnd.google-apps.') === 0;
+  const base = String(name || 'file').replace(/\.(pdf|xlsx|docx|pptx|csv)$/i, '');
+  const office = DRIVE_OFFICE_EXPORT[mimeType];
+  if (!isGoogle) {
+    if (f === 'auto' || f === 'office' || f === 'raw') return { kind: 'raw', mime: String(mimeType || ''), fileName: String(name || 'file'), label: 'raw' };
+    throw new Error(`${name} 不是 Google 文件 / 試算表 / 簡報（${mimeType}），不能轉成 ${f}；直接用原檔即可。`);
+  }
+  const pdf = () => ({ kind: 'getAs', mime: 'application/pdf', fileName: base + '.pdf', label: 'pdf' });
+  if (f === 'pdf') return pdf();
+  if (f === 'auto') return mimeType === 'application/vnd.google-apps.spreadsheet' && office ? { kind: 'export', mime: office.mime, fileName: base + office.ext, label: office.label } : pdf();
+  if (f === 'office') {
+    if (!office) throw new Error(`${name}（${mimeType}）沒有對應的 Office 格式，請用 pdf。`);
+    return { kind: 'export', mime: office.mime, fileName: base + office.ext, label: office.label };
+  }
+  if (f === 'csv') {
+    if (mimeType !== 'application/vnd.google-apps.spreadsheet') throw new Error('csv 只能從試算表匯出。');
+    return { kind: 'export', mime: 'text/csv', fileName: base + '.csv', label: 'csv' };
+  }
+  if (f === 'xlsx' || f === 'docx' || f === 'pptx') {
+    if (!office || office.label !== f) throw new Error(`${name} 是 ${isGoogle ? mimeType.replace('application/vnd.google-apps.', 'Google ') : mimeType}，不能匯出成 ${f}（試算表 → xlsx、文件 → docx、簡報 → pptx）。`);
+    return { kind: 'export', mime: office.mime, fileName: base + office.ext, label: f };
+  }
+  throw new Error(`不支援的格式：${format}（可用 ${DRIVE_EXPORT_FORMATS.join(' / ')}）。`);
+}
+
+/**
+ * 依 plan 取得 Blob：raw 原檔、getAs（PDF）、export（Drive REST v3 匯出 Office / CSV，走 OAuth token）。
+ * @param {GoogleAppsScript.Drive.File} file
+ * @param {{kind: string, mime: string, fileName: string}} plan
+ * @param {{fetch: (Function|undefined), token: (string|undefined)}=} deps 測試注入
+ * @return {GoogleAppsScript.Base.Blob}
+ */
+function driveExportBlob_(file, plan, deps) {
+  deps = deps || {};
+  if (plan.kind === 'raw') return file.getBlob();
+  if (plan.kind === 'getAs') return file.getAs(plan.mime).setName(plan.fileName);
+  const fetch = deps.fetch || ((u, o) => UrlFetchApp.fetch(u, o));
+  const token = deps.token !== undefined ? deps.token : ScriptApp.getOAuthToken();
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.getId())}/export?mimeType=${encodeURIComponent(plan.mime)}`;
+  const res = fetch(url, { method: 'get', headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+  const code = res.getResponseCode();
+  if (code >= 300) {
+    let msg = '';
+    try { msg = JSON.parse(res.getContentText()).error.message; } catch (err) { msg = String(res.getContentText()).slice(0, 200); }
+    throw new Error(`匯出 ${plan.fileName} 失敗（HTTP ${code}）：${msg}${code === 403 && /too large/i.test(msg) ? '；Drive 匯出單檔上限 10 MB，請拆小或改 PDF' : ''}`);
+  }
+  return res.getBlob().setName(plan.fileName);
+}
+
+function driveExport_(args, ctx) {
+  const file = DriveApp.getFileById(parseDriveId_(requireString_(args.file_id, 'file_id')));
+  const plan = driveExportPlan_(file.getMimeType(), file.getName(), requireString_(args.format, 'format'));
+  if (plan.kind === 'raw') throw new Error(`${file.getName()} 不是 Google 格式，不需要匯出。`);
+  let folder;
+  if (args.folder_id) {
+    folder = requireFolder_(args.folder_id);
+  } else {
+    const parents = file.getParents();
+    folder = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  }
+  const blob = driveExportBlob_(file, plan, (ctx && ctx.exportDeps) || undefined);
+  if (args.name) blob.setName(String(args.name));
+  const out = folder.createFile(blob);
+  return Object.assign({ source: { id: file.getId(), name: file.getName() }, format: plan.label }, driveFileInfo_(out));
 }
 
 function driveShare_(args) {

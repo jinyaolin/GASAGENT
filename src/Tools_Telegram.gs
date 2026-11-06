@@ -10,13 +10,14 @@ function telegramTools_() {
   return [
     {
       name: 'telegram_send_file', toolset: 'telegram', risk: 'W',
-      description: '把 Drive 檔案直接傳進 Telegram 對話（Google 文件 / 試算表 / 簡報會轉成 PDF；其他檔原樣；上限 50 MB）。任務來自 Telegram 就送回同一個對話，否則送 owner 的 Telegram。做好報告 / 簡報要給 owner 看時用這個，比只給連結方便。',
+      description: '把 Drive 檔案直接傳進 Telegram 對話（Google 試算表預設轉 xlsx、文件 / 簡報預設轉 PDF，format 可改；其他檔原樣；上限 50 MB）。任務來自 Telegram 就送回同一個對話，否則送 owner 的 Telegram。做好報告 / 簡報要給 owner 看時用這個，比只給連結方便。',
       parameters: {
         type: 'object',
         properties: {
           file_id: { type: 'string', description: 'Drive 檔案 id 或網址' },
           caption: { type: 'string', description: '附在檔案下方的說明（≤ 1024 字，選填）' },
           as_photo: { type: 'boolean', description: '圖片以照片形式傳（會被 Telegram 壓縮；預設 false 以檔案傳）' },
+          format: { type: 'string', enum: ['auto', 'pdf', 'office'], description: 'Google 格式怎麼轉：auto（預設）試算表 xlsx、其餘 pdf；office 一律 xlsx / docx / pptx；pdf 一律 PDF' },
         },
         required: ['file_id'], additionalProperties: false,
       },
@@ -50,6 +51,6 @@ function telegramSendFile_(args, ctx) {
     try { session = (ctx.sessionStore || sheetSessionStore_()).get(ctx.sessionId); } catch (err) { session = null; }
   }
   const target = telegramTargetChat_(session, ccfg);
-  const r = (ctx.sendDocument || telegramSendDocument_)(target.chatId, requireString_(args.file_id, 'file_id'), { caption: args.caption ? String(args.caption) : '', asPhoto: !!args.as_photo });
+  const r = (ctx.sendDocument || telegramSendDocument_)(target.chatId, requireString_(args.file_id, 'file_id'), { caption: args.caption ? String(args.caption) : '', asPhoto: !!args.as_photo, format: args.format || 'auto' });
   return { sent: true, target: target.target, chat_id: target.chatId, method: r.method, file_name: r.file_name, bytes: r.bytes };
 }

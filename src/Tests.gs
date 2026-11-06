@@ -65,6 +65,7 @@ function smokeTestTable_() {
     ['sheets: uniqueSheetName_ 重名加序號（不分大小寫）；web_search 設定 parse / save 驗證引擎', testSheetsAndSearchConfig_, 'pure'],
     ['odoo: model 白名單解析與拒絕、私有 / 封鎖方法拒絕、domain 驗證、ids 正規化、JSON-RPC payload、錯誤解析、記錄正規化（many2one → {id,name}）、fields 摘要', testOdooPure_, 'pure'],
     // M7-B：watchers / ask_owner / telegram 傳檔
+    ['export: driveExportPlan_（auto：試算表 xlsx / 文件 簡報 pdf / 非 Google 原檔；office / pdf / csv / xlsx docx pptx 與來源不符報錯）、driveExportBlob_ 走 Drive REST export、gmail 附件預設試算表 xlsx、attachment_format=office / pdf、drive_export 工具宣告', testOfficeExport_, 'pure'],
     ['telegram_send_file: 檔案計畫（Google 格式轉 PDF、圖片可 sendPhoto）、目標 chat（telegram session 回同 chat 去 :guest；其他送 owner；未啟用報錯）、multipart 上傳 payload、50 MB 上限、handler', testTelegramSendFile_, 'pure'],
     ['ask_owner: 互動模式拒絕、非 owner 看不到（ownerOnly）、autonomous 寫 Approvals q_ 列 + 推 Telegram → pending_input；runTurn_ 立刻停（needs_input）；job 進 needs_input 且 cron 不投遞；answerQuestion_ 標 answered 並 enqueue 回答續跑（cron 帶投遞、reply_channel telegram）；decideApproval_ 拒收提問列', testAskOwner_, 'pure'],
     ['telegram: /approve 列待審清單（每筆批准 / 拒絕按鈕、提問另列）、/approve <id> 與 /deny <id> 直接決定、壞 id 提示、空清單文字；成員不吃指令', testTelegramApproveCommand_, 'pure'],
@@ -822,12 +823,59 @@ function testOdooFlow_() {
 
 // ---- M7-B：telegram_send_file / ask_owner / watchers --------------------------------------------------
 
+function testOfficeExport_() {
+  const SHEET = 'application/vnd.google-apps.spreadsheet';
+  const DOC = 'application/vnd.google-apps.document';
+  const SLIDES = 'application/vnd.google-apps.presentation';
+  const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  assertEqual_(driveExportPlan_(SHEET, '帳目', 'auto'), { kind: 'export', mime: XLSX, fileName: '帳目.xlsx', label: 'xlsx' }, 'auto：試算表 → xlsx');
+  assertEqual_(driveExportPlan_(DOC, '合約', 'auto'), { kind: 'getAs', mime: 'application/pdf', fileName: '合約.pdf', label: 'pdf' }, 'auto：文件 → pdf');
+  assertEqual_(driveExportPlan_(SLIDES, '簡報.pdf', 'auto').fileName, '簡報.pdf', 'auto：簡報 → pdf，不重複副檔名');
+  assertEqual_(driveExportPlan_('application/pdf', 'x.pdf', 'auto'), { kind: 'raw', mime: 'application/pdf', fileName: 'x.pdf', label: 'raw' }, '非 Google 原檔');
+  assertEqual_(driveExportPlan_(DOC, '合約', 'office').fileName, '合約.docx', 'office：文件 → docx');
+  assertEqual_(driveExportPlan_(SLIDES, '簡報', 'office').fileName, '簡報.pptx', 'office：簡報 → pptx');
+  assertEqual_(driveExportPlan_(SHEET, '帳目', 'pdf').label, 'pdf', 'pdf 強制');
+  assertEqual_(driveExportPlan_(SHEET, '帳目.xlsx', 'csv'), { kind: 'export', mime: 'text/csv', fileName: '帳目.csv', label: 'csv' }, 'csv');
+  assertEqual_(driveExportPlan_(SHEET, '帳目', 'xlsx').label, 'xlsx', 'xlsx 明指');
+  assertThrows_(() => driveExportPlan_(DOC, '合約', 'xlsx'), '文件不能 xlsx');
+  assertThrows_(() => driveExportPlan_(DOC, '合約', 'csv'), '文件不能 csv');
+  assertThrows_(() => driveExportPlan_('application/pdf', 'x.pdf', 'xlsx'), '非 Google 不能轉');
+  assertThrows_(() => driveExportPlan_(SHEET, 'x', 'odt'), '未知格式');
+  // driveExportBlob_：export 走 REST（帶 token、mimeType），getAs 走 file.getAs
+  const calls = [];
+  const blob = (name, bytes) => ({ _name: name || '', _bytes: bytes || 3, setName: function (n) { this._name = n; return this; }, getName: function () { return this._name; }, getBytes: function () { return new Array(this._bytes); } });
+  const file = (mime, name, id) => ({ getId: () => id || 'F1', getMimeType: () => mime, getName: () => name, getAs: (m) => blob('as:' + m), getBlob: () => blob('raw') });
+  const fetchOk = (url, opts) => { calls.push({ url, opts }); return { getResponseCode: () => 200, getBlob: () => blob('exported', 7), getContentText: () => '' }; };
+  const b1 = driveExportBlob_(file(SHEET, '帳目'), driveExportPlan_(SHEET, '帳目', 'auto'), { fetch: fetchOk, token: 'TOK' });
+  assertEqual_(b1.getName(), '帳目.xlsx', 'export 後命名');
+  assert_(calls[0].url === `https://www.googleapis.com/drive/v3/files/F1/export?mimeType=${encodeURIComponent(XLSX)}` && calls[0].opts.headers.Authorization === 'Bearer TOK', 'REST export URL 與 token：' + calls[0].url);
+  assertEqual_(driveExportBlob_(file(DOC, '合約'), driveExportPlan_(DOC, '合約', 'auto'), { fetch: fetchOk }).getName(), '合約.pdf', 'getAs 路徑');
+  assertEqual_(calls.length, 1, 'getAs 不打 REST');
+  const fetchBig = () => ({ getResponseCode: () => 403, getContentText: () => '{"error":{"message":"This file is too large to be exported."}}' });
+  const err = assertThrows_(() => driveExportBlob_(file(SHEET, 'big'), driveExportPlan_(SHEET, 'big', 'xlsx'), { fetch: fetchBig, token: 't' }), 'export 失敗');
+  assert_(/HTTP 403/.test(err.message) && /10 MB/.test(err.message), '錯誤訊息：' + err.message);
+  // gmail 附件：預設試算表 xlsx、文件 pdf；office / pdf 可切
+  const files = { S: file(SHEET, '帳目', 'S'), D: file(DOC, '合約', 'D'), P: file('application/pdf', 'x.pdf', 'P') };
+  const getFile = (id) => { if (!files[id]) throw new Error('no'); return files[id]; };
+  const names = (ids, fmt) => gmailAttachmentBlobs_(ids, fmt, { getFile, exportDeps: { fetch: fetchOk, token: 't' } }).map((b) => b.getName());
+  assertEqual_(names(['S', 'D', 'P']), ['帳目.xlsx', '合約.pdf', 'raw'], 'auto');
+  assertEqual_(names(['S', 'D'], 'office'), ['帳目.xlsx', '合約.docx'], 'office');
+  assertEqual_(names(['S', 'D'], 'pdf'), ['帳目.pdf', '合約.pdf'], 'pdf');
+  assertThrows_(() => names(['nope']), '找不到檔案');
+  // 工具宣告
+  const reg = buildToolRegistry_(allToolDeclarations_());
+  assertEqual_([reg.byName.drive_export.risk, reg.byName.drive_export.parameters.properties.format.enum], ['W', ['pdf', 'xlsx', 'docx', 'pptx', 'csv']], 'drive_export 宣告');
+  ['gmail_send', 'gmail_create_draft', 'telegram_send_file'].forEach((n) => assert_(reg.byName[n].parameters.properties[n === 'telegram_send_file' ? 'format' : 'attachment_format'].enum.indexOf('office') !== -1, `${n} 有格式參數`));
+}
+
 function testTelegramSendFile_() {
-  assertEqual_(telegramFilePlan_('application/vnd.google-apps.presentation', '週報'), { method: 'sendDocument', exportMime: 'application/pdf', fileName: '週報.pdf' }, '簡報轉 PDF');
-  assertEqual_(telegramFilePlan_('application/vnd.google-apps.document', 'a.pdf'), { method: 'sendDocument', exportMime: 'application/pdf', fileName: 'a.pdf' }, '已有 .pdf 不重複加');
-  assertEqual_(telegramFilePlan_('image/png', 'x.png', true), { method: 'sendPhoto', exportMime: '', fileName: 'x.png' }, '圖片 as_photo');
-  assertEqual_(telegramFilePlan_('image/png', 'x.png', false), { method: 'sendDocument', exportMime: '', fileName: 'x.png' }, '圖片預設當檔案');
-  assertEqual_(telegramFilePlan_('application/zip', 'z.zip', true), { method: 'sendDocument', exportMime: '', fileName: 'z.zip' }, '非圖片不理 as_photo');
+  assertEqual_(telegramFilePlan_('application/vnd.google-apps.presentation', '週報'), { method: 'sendDocument', exportMime: 'application/pdf', fileName: '週報.pdf', kind: 'getAs' }, '簡報預設轉 PDF');
+  assertEqual_(telegramFilePlan_('application/vnd.google-apps.spreadsheet', '帳目'), { method: 'sendDocument', exportMime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: '帳目.xlsx', kind: 'export' }, '試算表預設轉 xlsx');
+  assertEqual_(telegramFilePlan_('application/vnd.google-apps.spreadsheet', '帳目', false, 'pdf').fileName, '帳目.pdf', 'format=pdf');
+  assertEqual_(telegramFilePlan_('application/vnd.google-apps.document', 'a.pdf'), { method: 'sendDocument', exportMime: 'application/pdf', fileName: 'a.pdf', kind: 'getAs' }, '已有 .pdf 不重複加');
+  assertEqual_(telegramFilePlan_('image/png', 'x.png', true), { method: 'sendPhoto', exportMime: '', fileName: 'x.png', kind: 'raw' }, '圖片 as_photo');
+  assertEqual_(telegramFilePlan_('image/png', 'x.png', false), { method: 'sendDocument', exportMime: '', fileName: 'x.png', kind: 'raw' }, '圖片預設當檔案');
+  assertEqual_(telegramFilePlan_('application/zip', 'z.zip', true), { method: 'sendDocument', exportMime: '', fileName: 'z.zip', kind: 'raw' }, '非圖片不理 as_photo');
   const ccfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '999' });
   assertEqual_(telegramTargetChat_({ channel: 'telegram', external_id: '555:guest' }, ccfg), { chatId: '555', target: 'session_chat' }, 'telegram session → 同 chat（去 :guest）');
   assertEqual_(telegramTargetChat_({ channel: 'cron', external_id: 'c1' }, ccfg), { chatId: '999', target: 'owner_chat' }, 'cron → owner chat');

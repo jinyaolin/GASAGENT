@@ -22,7 +22,8 @@ const ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments']);
 function gmailTools_() {
   const threadId = { type: 'string', description: 'Gmail 討論串 id（來自 gmail_search）' };
   const addr = (desc) => ({ type: 'string', description: desc + '；多個以逗號分隔' });
-  const attachmentIds = { type: 'array', items: { type: 'string' }, description: `要附加的 Drive 檔案 id（gmail_save_attachments / drive_search 取得；Google 文件會轉成 PDF），最多 ${GMAIL_ATTACHMENT_MAX_COUNT} 個、總量 25 MB` };
+  const attachmentIds = { type: 'array', items: { type: 'string' }, description: `要附加的 Drive 檔案 id（gmail_save_attachments / drive_search 取得），最多 ${GMAIL_ATTACHMENT_MAX_COUNT} 個、總量 25 MB。Google 格式依 attachment_format 轉檔：預設試算表 → xlsx、文件 / 簡報 → pdf` };
+  const attachmentFormat = { type: 'string', enum: ['auto', 'pdf', 'office'], description: 'Google 格式附件怎麼轉：auto（預設）試算表給 xlsx、文件 / 簡報給 pdf；office 一律 xlsx / docx / pptx（對方要能編輯時用）；pdf 一律 PDF' };
   const htmlBody = {
     type: 'string',
     description: 'HTML 內文（選填）。給了就以 HTML 寄出，body 仍作純文字備援。只用簡單標籤（p / br / b / i / a / ul / ol / li / h1-h3 / table / img），行內 style 可；不要 script / iframe / 外部表單。',
@@ -84,6 +85,7 @@ function gmailTools_() {
           bcc: addr('密件副本'),
           reply_to_thread_id: { type: 'string', description: '要回覆的討論串 id（選填）' },
           attachment_file_ids: attachmentIds,
+          attachment_format: attachmentFormat,
         },
         required: ['body'], additionalProperties: false,
       },
@@ -104,6 +106,7 @@ function gmailTools_() {
           bcc: addr('密件副本'),
           reply_to_thread_id: { type: 'string' },
           attachment_file_ids: attachmentIds,
+          attachment_format: attachmentFormat,
         },
         additionalProperties: false,
       },
@@ -219,7 +222,7 @@ function gmailOptions_(args) {
   if (args.cc) opts.cc = String(args.cc);
   if (args.bcc) opts.bcc = String(args.bcc);
   const ids = toStringList_(args.attachment_file_ids);
-  if (ids.length) opts.attachments = gmailAttachmentBlobs_(ids);
+  if (ids.length) opts.attachments = gmailAttachmentBlobs_(ids, args.attachment_format);
   const html = gmailHtmlBody_(args.html_body);
   if (html) opts.htmlBody = html;
   return opts;
@@ -256,17 +259,19 @@ function checkAttachmentTotal_(items) {
 }
 
 /**
- * Drive file id → Blob（Google 文件會轉成 PDF）。
+ * Drive file id → Blob。Google 格式依 format 轉檔（driveExportPlan_）：auto = 試算表 xlsx、其餘 pdf。
  * @param {!Array<string>} ids
+ * @param {string=} format 'auto' | 'pdf' | 'office'
+ * @param {{getFile: (Function|undefined), exportDeps: (Object|undefined)}=} deps 測試注入
  * @return {!Array<GoogleAppsScript.Base.Blob>}
  */
-function gmailAttachmentBlobs_(ids) {
+function gmailAttachmentBlobs_(ids, format, deps) {
+  deps = deps || {};
   const blobs = ids.map((id) => {
     let file;
-    try { file = DriveApp.getFileById(id); } catch (err) { throw new Error(`找不到 Drive 檔案 ${id}（請用 gmail_save_attachments 或 drive_search 取得 file id）。`); }
-    const mime = file.getMimeType();
-    const blob = mime && mime.indexOf('application/vnd.google-apps.') === 0 ? file.getAs(MimeType.PDF).setName(file.getName() + '.pdf') : file.getBlob();
-    return blob;
+    try { file = (deps.getFile || ((fid) => DriveApp.getFileById(fid)))(parseDriveId_(id)); } catch (err) { throw new Error(`找不到 Drive 檔案 ${id}（請用 gmail_save_attachments 或 drive_search 取得 file id）。`); }
+    const plan = driveExportPlan_(file.getMimeType(), file.getName(), format || 'auto');
+    return driveExportBlob_(file, plan, deps.exportDeps);
   });
   checkAttachmentTotal_(blobs.map((b) => ({ name: b.getName(), size: b.getBytes().length })));
   return blobs;

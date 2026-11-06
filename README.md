@@ -253,11 +253,11 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 
 | toolset | 工具（風險） |
 |---|---|
-| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_copy`(W，整份複製) `drive_export_pdf`(W) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
+| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_copy`(W，整份複製) `drive_export_pdf`(W) `drive_export`(W，匯出 xlsx / docx / pptx / csv / pdf 存回 Drive) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
 | sheets | `sheets_create`(W) `sheets_list_sheets`(R，工作表清單與表頭) `sheets_find`(R，TextFinder 找儲存格) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) `sheets_copy_sheet`(W，跨試算表整張複製，保留公式 / 格式；來源有檢視權即可) |
 | slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |
-| gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 文件轉 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
+| gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 格式依 `attachment_format` 轉檔：預設 **試算表 → xlsx**、文件 / 簡報 → pdf，`office` 一律 xlsx / docx / pptx，`pdf` 一律 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) `calendar_delete_event`(**D**，預設關) |
 | web | `web_fetch`(R，域名白名單；HTML 轉純文字並截長) `web_search`(R，Brave Search API 或 Google Programmable Search；key 在 Script Property `WEB_SEARCH_KEY`，不受域名白名單限制，見下方「網路搜尋」) |
 | telegram | `telegram_send_file`(W，把 Drive 檔案直接傳進 Telegram 對話；Google 格式轉 PDF；目標 chat 由系統決定，見「M7-B」) |
@@ -672,9 +672,13 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 
 agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技能提案時，除了寫進 Approvals，系統會**直接把提案內容推到 owner 的 Telegram**：新建 / 修補哪個技能、說明、觸發詞、正文預覽（patch 顯示找到 → 取代成），附「批准 / 拒絕」按鈕；批准後才寫進 Drive 技能資料夾。任何通道（聊天台、排程、事件、Email、Telegram）都會推，不必開管理頁；`/approve` 清單裡的技能提案也用同樣摘要顯示。回覆文字會註明「內容與按鈕已另送到你的 Telegram」。
 
+### Office 格式匯出（xlsx / docx / pptx）
+
+`DriveApp.getAs()` 只能轉 PDF，所以 Office 格式走 Drive REST v3 的 export 端點（既有 `drive` scope 即可，單檔上限 10 MB）。統一由 `driveExportPlan_` 決定格式：`auto` = 試算表 xlsx、文件 / 簡報 pdf、非 Google 檔原樣；`office` = 一律 xlsx / docx / pptx；`pdf` = 一律 PDF。三個地方共用：`gmail_send` / `gmail_create_draft` 的 `attachment_format`、`telegram_send_file` 的 `format`、新工具 `drive_export`（匯出成檔存回 Drive，格式 xlsx / docx / pptx / csv / pdf，格式與來源不符會報錯）。對方要能編輯時給 Office 格式，不要給 PDF。
+
 ### Telegram 傳檔（`telegram_send_file`）
 
-`telegram_send_file({file_id, caption?, as_photo?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 文件 / 試算表 / 簡報先轉 PDF；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。
+`telegram_send_file({file_id, caption?, as_photo?, format?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 試算表預設轉 xlsx、文件 / 簡報預設轉 PDF，`format` 可改；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。
 
 ### M7-B 驗收步驟（請在瀏覽器與手機操作）
 
