@@ -476,6 +476,7 @@ function adminGetToolSettings() {
     persona: config.persona,
     default_persona: DEFAULT_PERSONA,
     slides_template_id: config.slidesTemplateId,
+    drive_ocr_language: config.driveOcrLanguage,
     default_perms: DEFAULT_TOOLSET_PERMS,
     policies: APPROVAL_POLICIES.slice(),
     web_search: {

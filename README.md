@@ -333,6 +333,7 @@ key 只寫入 Script Property `WEB_SEARCH_KEY`（頁面只顯示末 4 碼，寫�
 | 寄信白名單（`gmail_send_whitelist`） | 一行一個 email，`*@domain.com` 代表整個網域。`gmail_send` / `gmail_forward` 的收件人（含 cc / bcc）**全部**在名單內時 owner 觸發的那次直接寄出、不送審批；任何一個不在、寄草稿 / 回覆討論串（收件人不明）、或由群組成員觸發，仍走審批。RBAC external 仍要開。Telegram `/white list \| add \| delete <email>` 也能改；異動記 AuditLog `security:whitelist:*`，免審寄出的 AuditLog 標「[白名單免審]」 | 空（全部要審） |
 | 人格（persona） | system prompt 開頭；留空用程式預設的一段繁中 | 空 |
 | 簡報範本 | `slides_template_id`：一份設好主題 / 配色 / 字型的 Google Slides（id 或網址），`slides_create_deck` 會複製它再填內容 | 空（Google 預設白底） |
+| OCR 語言提示 | `drive_ocr_language`：`drive_read_text` 讀 PDF / 圖片時給 Drive OCR 的 `ocrLanguage`（ISO 639-1，如 `en` / `ja`）。Drive 對這個參數很挑（`zh-TW` 與 `zh` 都曾回 HTTP 400「Invalid Value, location: ocrLanguage」），**留空不帶參數最穩**，中文辨識由 Drive 自動偵測；填了而被拒時會自動改不帶語言重送一次並在 log 提醒 | 空（自動） |
 
 `installAgent()`（Doctor「重新安裝」）與開「工具」分頁都會幂等補上缺的預設值。Doctor 多三項：registry 無重名、每個 toolset 都有 RBAC 設定、至少一個 toolset 開 read。
 
@@ -755,6 +756,7 @@ node scripts/local-tests.js
 | `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |
+| `drive_read_text` 讀 PDF / 圖片回「OCR 失敗（HTTP 400）… ocrLanguage」 | Drive 拒絕了語言提示。2026-11-06 起預設不帶 `ocrLanguage`、被拒會自動重送，升級後即不再發生；若「工具」分頁 `drive_ocr_language` 有填，清空。要讀表格數字時直接 `drive_read_text` 原始試算表比 OCR PDF 準 |
 | 聊天台跑了很久才回「系統中止：已達單輪時間預算」 | 一輪工具太多或某個工具（PDF OCR、大試算表）太慢。拆成幾則訊息下指令，或調低讀取類工具的 max_* 參數 |
 | 回覆說「同一工具以相同參數連續失敗 3 次，已熔斷」 | 看回覆上方該步的結果摘要（通常是參數錯或找不到 id），修正後重下 |
 | 升到 M2 後 Doctor 說 `Approvals` 缺欄位 / 缺 rbac | 按「重新安裝」補 `result` 欄與 RBAC 預設值 |

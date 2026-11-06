@@ -20,10 +20,12 @@ const DRIVE_EXPORT_MAX_BYTES = 10 * 1024 * 1024;
 /** PDF / 圖片 OCR 上限（bytes）；UrlFetch payload 上限 50 MB，保守取 10 MB。 */
 const DRIVE_PDF_MAX_BYTES = 10 * 1024 * 1024;
 /**
- * OCR 語言提示。Drive REST v3 的 ocrLanguage 只收 ISO 639-1 **兩碼**（zh / en / ja…），給 zh-TW 會回
- * HTTP 400「Invalid Value, location: ocrLanguage」（2026-11-02 Telegram 傳 PDF 踩到）。繁簡由 Drive 自己判，不能指定。
+ * OCR 語言提示的預設：**空 = 不帶 ocrLanguage，讓 Drive 自己偵測**。
+ * Drive REST v3 的 ocrLanguage 實測很挑：zh-TW（2026-11-02）與 zh（2026-11-06）都曾回 HTTP 400「Invalid Value, location: ocrLanguage」，
+ * 而不帶參數時中英文混排 PDF 的辨識結果並無差別，所以預設不帶。想試語言提示可在 Config `drive_ocr_language` 填（如 en / ja），
+ * 被 Drive 拒絕時 ocrUploadWithFallback_ 會自動改成不帶語言重送一次。
  */
-const DRIVE_OCR_LANGUAGE = 'zh';
+const DRIVE_OCR_LANGUAGE = '';
 
 /** @return {!Array<ToolDecl>} */
 function driveTools_() {
@@ -325,15 +327,42 @@ function sheetsToText_(ss, max) {
 }
 
 /**
- * Drive REST v3 multipart 上傳 + 轉 Google 文件（觸發 OCR）的網址。純函式，測試鎖住 ocrLanguage 必須是兩碼。
- * @param {string=} lang 省略用 DRIVE_OCR_LANGUAGE
+ * Drive REST v3 multipart 上傳 + 轉 Google 文件（觸發 OCR）的網址。純函式。
+ * @param {string=} lang 語言提示；省略用 DRIVE_OCR_LANGUAGE；空字串 = 不帶 ocrLanguage（Drive 自動偵測）
  * @return {string}
- * @throws {Error} lang 不是 ISO 639-1 兩碼
+ * @throws {Error} lang 格式不是 ISO 639-1 兩碼（可帶 -XX 地區）
  */
 function driveOcrUploadUrl_(lang) {
-  const l = String(lang === undefined ? DRIVE_OCR_LANGUAGE : lang).trim().toLowerCase();
-  if (!/^[a-z]{2}$/.test(l)) throw new Error(`ocrLanguage 必須是 ISO 639-1 兩碼（如 zh / en），不是「${lang}」。`);
-  return `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=${l}&fields=id`;
+  const l = String(lang === undefined || lang === null ? DRIVE_OCR_LANGUAGE : lang).trim();
+  const base = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+  if (!l) return base;
+  if (!/^[a-zA-Z]{2}(-[a-zA-Z]{2})?$/.test(l)) throw new Error(`drive_ocr_language 必須是 ISO 639-1 兩碼（如 en / ja，可帶地區如 zh-TW）或留空，不是「${lang}」。`);
+  return `${base}&ocrLanguage=${encodeURIComponent(l.length === 2 ? l.toLowerCase() : l.slice(0, 2).toLowerCase() + '-' + l.slice(3).toUpperCase())}`;
+}
+
+/**
+ * 上傳並處理 ocrLanguage 被拒的情況：帶語言提示上傳失敗、且 HTTP 400 的訊息提到 ocrLanguage 時，改成不帶語言再送一次。純邏輯，upload 可注入。
+ * @param {function(string): {code: number, body: string}} upload 給網址、回 {code, body}
+ * @param {string} lang 語言提示（空 = 不帶）
+ * @return {{id: string, lang: string, retried: boolean}} 實際成功用的 lang（'' = 自動）
+ * @throws {Error} 兩次都失敗
+ */
+function ocrUploadWithFallback_(upload, lang) {
+  lang = String(lang || '').trim();
+  let res = upload(driveOcrUploadUrl_(lang));
+  let retried = false;
+  if (res.code >= 300 && lang && res.code === 400 && /ocrLanguage/i.test(res.body || '')) {
+    retried = true;
+    res = upload(driveOcrUploadUrl_(''));
+    if (res.code < 300) console.warn(`OCR：Drive 拒絕 ocrLanguage=${lang}，已改不帶語言重送成功；建議把 Config drive_ocr_language 清空。`);
+  }
+  if (res.code >= 300) {
+    throw new Error(`OCR 失敗（HTTP ${res.code}${retried ? '；ocrLanguage=' + lang + ' 被拒，改不帶語言重送仍失敗' : lang ? '；ocrLanguage=' + lang : ''}）：${String(res.body || '').slice(0, 300)}`);
+  }
+  let id = '';
+  try { id = String(JSON.parse(res.body).id || ''); } catch (err) { id = ''; }
+  if (!id) throw new Error(`OCR 上傳回應沒有檔案 id：${String(res.body || '').slice(0, 200)}`);
+  return { id, lang: retried ? '' : lang, retried };
 }
 
 /**
@@ -347,26 +376,33 @@ function pdfToText_(file) {
 
 /**
  * PDF / 圖片 → 文字：以 Drive REST v3 multipart 上傳並轉成 Google 文件（觸發 OCR），讀完後把暫存文件丟進垃圾桶。
+ * 語言提示讀 Config drive_ocr_language（預設空 = 自動）；被 Drive 拒絕時自動改不帶語言重送。
  * @param {GoogleAppsScript.Drive.File} file
  * @param {string} contentType application/pdf 或 image/*
+ * @param {{lang: (string|undefined)}=} deps 測試注入
  * @return {string}
  */
-function ocrToText_(file, contentType) {
+function ocrToText_(file, contentType, deps) {
+  deps = deps || {};
   if (file.getSize() > DRIVE_PDF_MAX_BYTES) throw new Error(`檔案太大（${file.getSize()} bytes），OCR 上限 ${DRIVE_PDF_MAX_BYTES} bytes。`);
+  let lang = deps.lang;
+  if (lang === undefined) { try { lang = getToolConfig_().driveOcrLanguage; } catch (err) { lang = DRIVE_OCR_LANGUAGE; } }
   const boundary = 'gasagent' + Date.now();
   const meta = JSON.stringify({ name: `[OCR 暫存] ${file.getName()}`, mimeType: MimeType.GOOGLE_DOCS });
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`;
   const tail = `\r\n--${boundary}--`;
   const payload = Utilities.newBlob(head).getBytes().concat(file.getBlob().getBytes(), Utilities.newBlob(tail).getBytes());
-  const res = UrlFetchApp.fetch(driveOcrUploadUrl_(), {
-    method: 'post',
-    contentType: `multipart/related; boundary=${boundary}`,
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    payload,
-    muteHttpExceptions: true,
-  });
-  if (res.getResponseCode() >= 300) throw new Error(`OCR 失敗（HTTP ${res.getResponseCode()}）：${res.getContentText().slice(0, 300)}`);
-  const tempId = JSON.parse(res.getContentText()).id;
+  const upload = (url) => {
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: `multipart/related; boundary=${boundary}`,
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      payload,
+      muteHttpExceptions: true,
+    });
+    return { code: res.getResponseCode(), body: res.getContentText() };
+  };
+  const tempId = ocrUploadWithFallback_(upload, lang).id;
   try {
     return DocumentApp.openById(tempId).getBody().getText();
   } finally {

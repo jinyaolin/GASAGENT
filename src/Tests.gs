@@ -84,7 +84,7 @@ function smokeTestTable_() {
     ['agent: 同一工具 + 同參數失敗 3 次即熔斷', testRunTurnCircuitBreaker_, 'pure'],
     ['agent: 步數上限與時間預算到就停並回報；重複的待審批不再寫第二筆', testRunTurnLimits_, 'pure'],
     ['config: parseToolConfig_ 預設值與 rbac.<toolset> 解析', testToolConfigParse_, 'pure'],
-    ['drive: OCR 上傳網址的 ocrLanguage 必須是 ISO 639-1 兩碼（zh-TW 會被 Drive 回 400）', testDriveOcrUrl_, 'pure'],
+    ['drive: OCR 預設不帶 ocrLanguage（Drive 自動偵測；zh / zh-TW 都曾被回 400）、Config drive_ocr_language 解析（壞值當自動）、語言被拒自動改不帶語言重送一次、錯誤訊息', testDriveOcrUrl_, 'pure'],
     ['web: 域名白名單（exact / *.wildcard / 空 = 全拒）與 HTML 轉文字', testWebHelpers_, 'pure'],
     ['docs/slides: 輕量 markdown 解析、deck spec 驗證（九種版面、table / image 必填、>40 頁）、兩層項目、簡報規則進 prompt、刪頁預設被 RBAC 擋', testDocsSlidesSpecs_, 'pure'],
     // M3
@@ -1522,11 +1522,29 @@ function testToolConfigParse_() {
 }
 
 function testDriveOcrUrl_() {
-  assertEqual_(driveOcrUploadUrl_(), 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=zh&fields=id', '預設 zh');
-  assertEqual_(driveOcrUploadUrl_('EN'), 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&ocrLanguage=en&fields=id', '小寫化');
-  assertThrows_(() => driveOcrUploadUrl_('zh-TW'), 'zh-TW 會被 Drive 回 400，程式先擋');
-  assertThrows_(() => driveOcrUploadUrl_(''), '空');
-  assertEqual_(DRIVE_OCR_LANGUAGE, 'zh', '常數是兩碼');
+  const base = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+  assertEqual_(DRIVE_OCR_LANGUAGE, '', '預設不帶語言（Drive 自動偵測）');
+  assertEqual_(driveOcrUploadUrl_(), base, '預設網址沒有 ocrLanguage');
+  assertEqual_(driveOcrUploadUrl_(''), base, '空 = 不帶');
+  assertEqual_(driveOcrUploadUrl_('EN'), base + '&ocrLanguage=en', '兩碼小寫化');
+  assertEqual_(driveOcrUploadUrl_('zh-tw'), base + '&ocrLanguage=zh-TW', '地區碼正規化');
+  assertThrows_(() => driveOcrUploadUrl_('chinese'), '不是兩碼');
+  assertThrows_(() => driveOcrUploadUrl_('zh_TW'), '底線不收');
+  assertEqual_([parseOcrLanguage_(''), parseOcrLanguage_(' ja '), parseOcrLanguage_('bogus')], ['', 'ja', ''], 'Config 解析：壞值當自動');
+  assertEqual_(parseToolConfig_({}).driveOcrLanguage, '', 'ToolConfig 預設自動');
+  assertEqual_(parseToolConfig_({ drive_ocr_language: 'en' }).driveOcrLanguage, 'en', 'ToolConfig 讀設定');
+  // 上傳 + 被拒重送
+  const calls = [];
+  const rejectLang = (url) => { calls.push(url); return /ocrLanguage=/.test(url) ? { code: 400, body: '{"error":{"errors":[{"domain":"global","reason":"invalid","message":"Invalid Value","locationType":"parameter","location":"ocrLanguage"}]}}' } : { code: 200, body: '{"id":"doc1"}' }; };
+  assertEqual_(ocrUploadWithFallback_(rejectLang, 'zh'), { id: 'doc1', lang: '', retried: true }, '語言被拒 → 不帶語言重送成功');
+  assertEqual_(calls, [base + '&ocrLanguage=zh', base], '兩次呼叫：先帶語言、再不帶');
+  calls.length = 0;
+  assertEqual_(ocrUploadWithFallback_(rejectLang, ''), { id: 'doc1', lang: '', retried: false }, '本來就不帶語言：一次成功');
+  assertEqual_(calls.length, 1, '不重送');
+  assertEqual_(ocrUploadWithFallback_(() => ({ code: 200, body: '{"id":"d2"}' }), 'en'), { id: 'd2', lang: 'en', retried: false }, '語言被接受就保留');
+  assertThrows_(() => ocrUploadWithFallback_(() => ({ code: 400, body: 'ocrLanguage bad' }), 'en'), /被拒，改不帶語言重送仍失敗/, '兩次都失敗的錯誤訊息');
+  assertThrows_(() => ocrUploadWithFallback_(() => ({ code: 403, body: 'quota' }), 'en'), /HTTP 403；ocrLanguage=en/, '非 ocrLanguage 的錯不重送、訊息帶語言');
+  assertThrows_(() => ocrUploadWithFallback_(() => ({ code: 200, body: '{}' }), ''), /沒有檔案 id/, '沒 id');
 }
 
 function testWebHelpers_() {

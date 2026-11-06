@@ -31,6 +31,7 @@ const TOOL_CONFIG_KEYS = Object.freeze({
   GMAIL_SEND_WHITELIST: 'gmail_send_whitelist',
   WEB_SEARCH_ENGINE: 'web_search_engine',
   WEB_SEARCH_CX: 'web_search_cx',
+  DRIVE_OCR_LANGUAGE: 'drive_ocr_language',
   ODOO_URL: 'odoo_url',
   ODOO_DB: 'odoo_db',
   ODOO_LOGIN: 'odoo_login',
@@ -81,7 +82,7 @@ const SPILL_FOLDER_PATH = Object.freeze(['GAS Agent', 'spill']);
  *   rbac: !Object<string, {read: boolean, write: boolean, delete: boolean, external: boolean}>,
  *   approvalPolicy: string, spillThreshold: number, maxToolSteps: number,
  *   webAllowedDomains: !Array<string>, persona: string, slidesTemplateId: string, skillsFolderId: string,
- *   gmailSendWhitelist: !Array<string>, webSearchEngine: string, webSearchCx: string,
+ *   gmailSendWhitelist: !Array<string>, webSearchEngine: string, webSearchCx: string, driveOcrLanguage: string,
  *   odooUrl: string, odooDb: string, odooLogin: string, odooAllowedModels: !Array<string>
  * }} ToolConfig
  */
@@ -127,6 +128,7 @@ function parseToolConfig_(map) {
     webSearchEngine: WEB_SEARCH_ENGINES.indexOf(String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] || '').trim().toLowerCase()) === -1
       ? WEB_SEARCH_DEFAULT_ENGINE : String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE]).trim().toLowerCase(),
     webSearchCx: String(map[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] || '').trim(),
+    driveOcrLanguage: parseOcrLanguage_(map[TOOL_CONFIG_KEYS.DRIVE_OCR_LANGUAGE]),
     odooUrl: String(map[TOOL_CONFIG_KEYS.ODOO_URL] || '').trim().replace(/\/+$/, ''),
     odooDb: String(map[TOOL_CONFIG_KEYS.ODOO_DB] || '').trim(),
     odooLogin: String(map[TOOL_CONFIG_KEYS.ODOO_LOGIN] || '').trim(),
@@ -138,6 +140,17 @@ function parseToolConfig_(map) {
 
 /** email 格式（寬鬆）。 */
 const EMAIL_RE = /^[^\s@<>,;"']+@[^\s@<>,;"']+\.[^\s@<>,;"']+$/;
+
+/**
+ * Config drive_ocr_language → 語言提示；格式不合（不是兩碼或兩碼-地區）就當空（自動偵測），不讓壞設定卡住 OCR。純函式。
+ * @param {*} raw
+ * @return {string}
+ */
+function parseOcrLanguage_(raw) {
+  const l = String(raw === null || raw === undefined ? '' : raw).trim();
+  if (!l) return '';
+  try { driveOcrUploadUrl_(l); return l; } catch (err) { return ''; }
+}
 
 /**
  * 白名單文字 → 正規化陣列：小寫、去重、丟掉不合法；`@domain.com` / `*@domain.com` 都存成 `*@domain.com`（整個網域）。純函式。
@@ -218,6 +231,7 @@ function ensureToolConfigDefaults_() {
   if (!(TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST in map)) missing[TOOL_CONFIG_KEYS.GMAIL_SEND_WHITELIST] = '';
   if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] = WEB_SEARCH_DEFAULT_ENGINE;
   if (!(TOOL_CONFIG_KEYS.WEB_SEARCH_CX in map)) missing[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] = '';
+  if (!(TOOL_CONFIG_KEYS.DRIVE_OCR_LANGUAGE in map)) missing[TOOL_CONFIG_KEYS.DRIVE_OCR_LANGUAGE] = DRIVE_OCR_LANGUAGE;
   if (!(TOOL_CONFIG_KEYS.ODOO_URL in map)) missing[TOOL_CONFIG_KEYS.ODOO_URL] = '';
   if (!(TOOL_CONFIG_KEYS.ODOO_DB in map)) missing[TOOL_CONFIG_KEYS.ODOO_DB] = '';
   if (!(TOOL_CONFIG_KEYS.ODOO_LOGIN in map)) missing[TOOL_CONFIG_KEYS.ODOO_LOGIN] = '';
@@ -277,6 +291,11 @@ function saveToolConfig_(input) {
     values[TOOL_CONFIG_KEYS.WEB_SEARCH_ENGINE] = engine;
   }
   if (input.web_search_cx !== undefined) values[TOOL_CONFIG_KEYS.WEB_SEARCH_CX] = String(input.web_search_cx || '').trim();
+  if (input.drive_ocr_language !== undefined) {
+    const l = String(input.drive_ocr_language || '').trim();
+    if (l) driveOcrUploadUrl_(l); // 格式不對就 throw
+    values[TOOL_CONFIG_KEYS.DRIVE_OCR_LANGUAGE] = l;
+  }
   if (typeof input.web_search_key === 'string' && input.web_search_key.trim()) {
     setProp_(PROP.WEB_SEARCH_KEY, input.web_search_key.trim());
     securityAudit_('web_search_key:set', 'web_search API key 已由管理頁寫入（不記值）');

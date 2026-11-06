@@ -1020,6 +1020,8 @@
     $persona.value = data.persona;
     const $slidesTpl = el('input', { type: 'text', placeholder: '範本簡報的 Drive id 或網址（選填）' });
     $slidesTpl.value = data.slides_template_id || '';
+    const $ocrLang = el('input', { type: 'text', placeholder: '留空 = Drive 自動偵測（建議）' });
+    $ocrLang.value = data.drive_ocr_language || '';
     const ws = data.web_search || { engine: 'brave', engines: ['brave', 'google'], cx: '', hasKey: false, keyHint: '' };
     const $searchEngine = el('select', {}, ws.engines.map((e) => el('option', { value: e }, e)));
     $searchEngine.value = ws.engine;
@@ -1085,6 +1087,7 @@
         field('spill_threshold（字元）', $spill, '工具結果超過此長度就溢寫到 Drive「GAS Agent/spill」，context 只留前 1000 字'),
         field('max_tool_steps', $steps, '單輪工具步數上限；另有 4.5 分鐘時間預算與同參數失敗 3 次熔斷'),
         field('簡報範本（slides_template_id）', $slidesTpl, '在 Drive 準備一份設好主題 / 配色 / 字型的 Google Slides，slides_create_deck 會複製它再填內容；空 = Google 預設白底主題'),
+        field('OCR 語言提示（drive_ocr_language）', $ocrLang, 'drive_read_text 讀 PDF / 圖片時給 Drive OCR 的 ocrLanguage（ISO 639-1，如 en / ja）。Drive 對這個參數很挑（zh / zh-TW 都曾回 HTTP 400），留空不帶參數最穩；被拒時會自動改不帶語言重送一次'),
       ])]),
       el('div', { class: 'panel' }, [el('h3', {}, 'web_fetch 域名白名單'), field('一行一個；example.com 只允許該主機，*.example.com 含所有子網域。空白 = 全部拒絕。', $domains)]),
       el('div', { class: 'panel' }, [el('h3', {}, '網路搜尋（web_search）'), el('div', { class: 'form-grid' }, [
@@ -1114,7 +1117,7 @@
       try {
         await call('adminSaveToolSettings', {
           rbac, approval_policy: $policy.value, spill_threshold: $spill.value, max_tool_steps: $steps.value,
-          web_allowed_domains: $domains.value, gmail_send_whitelist: $whitelist.value, persona: $persona.value, slides_template_id: $slidesTpl.value,
+          web_allowed_domains: $domains.value, gmail_send_whitelist: $whitelist.value, persona: $persona.value, slides_template_id: $slidesTpl.value, drive_ocr_language: $ocrLang.value,
           web_search_engine: $searchEngine.value, web_search_cx: $searchCx.value, web_search_key: $searchKey.value, web_search_clear_key: searchClearKey,
           odoo_url: $odooUrl.value, odoo_db: $odooDbText.value, odoo_login: $odooLogin.value, odoo_allowed_models: $odooModels.value, odoo_key: $odooKey.value, odoo_clear_key: odooClearKey,
         });
