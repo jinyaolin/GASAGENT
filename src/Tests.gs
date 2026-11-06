@@ -1536,7 +1536,10 @@ function testDriveOcrUrl_() {
   // 上傳 + 被拒重送
   const calls = [];
   const rejectLang = (url) => { calls.push(url); return /ocrLanguage=/.test(url) ? { code: 400, body: '{"error":{"errors":[{"domain":"global","reason":"invalid","message":"Invalid Value","locationType":"parameter","location":"ocrLanguage"}]}}' } : { code: 200, body: '{"id":"doc1"}' }; };
-  assertEqual_(ocrUploadWithFallback_(rejectLang, 'zh'), { id: 'doc1', lang: '', retried: true }, '語言被拒 → 不帶語言重送成功');
+  const warnBackup = console.warn; console.warn = () => {}; // 重送時的提醒不要印進測試輸出
+  try {
+    assertEqual_(ocrUploadWithFallback_(rejectLang, 'zh'), { id: 'doc1', lang: '', retried: true }, '語言被拒 → 不帶語言重送成功');
+  } finally { console.warn = warnBackup; }
   assertEqual_(calls, [base + '&ocrLanguage=zh', base], '兩次呼叫：先帶語言、再不帶');
   calls.length = 0;
   assertEqual_(ocrUploadWithFallback_(rejectLang, ''), { id: 'doc1', lang: '', retried: false }, '本來就不帶語言：一次成功');
