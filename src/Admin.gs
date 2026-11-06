@@ -601,6 +601,16 @@ function adminDecideApproval(id, approve) {
  * @param {number=} limit 預設 50，上限 200
  * @return {!Array<!Object>}
  */
+/**
+ * 紀錄分頁：使用分析報告（近 N 天）。
+ * @param {number=} days
+ * @return {!Object} usageReport_ 結果（含 text / suggestions）
+ */
+function adminUsageReport(days) {
+  assertOwner();
+  return collectUsageReport_(clampInt_(days, REPORT_DEFAULT_DAYS, 1, 90));
+}
+
 function adminListAuditLog(limit) {
   assertOwner();
   const n = clampInt_(limit, 50, 1, 200);

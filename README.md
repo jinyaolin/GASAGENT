@@ -554,7 +554,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 群組 | **先關 bot 的隱私模式**：Telegram 預設的隱私模式下，群組裡 `@bot …` 的一般訊息**根本不會送到 bot**（只有 /指令、回覆 bot 的訊息會到），所以 @bot 沒反應。到 **@BotFather → `/setprivacy` → 選 bot → Disable**，然後把 bot 退出群組再加回來（或把 bot 設成群組管理員，管理員永遠收得到全部訊息）。`/group` 指令與 Doctor（`tg_privacy`）會用 `getMe` 的 `can_read_all_group_messages` 檢查並提醒。<br>把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 幫忙；但**非白名單成員觸發的那一輪**是 principal `group_member`（M7-A，見「安全」）：只能用 Config `telegram_member_toolsets`（預設 `web` / `skill` / `session`）的讀取工具，owner 的 Gmail / Drive / Docs / Sheets / Slides / Calendar **一律不可讀**（連工具清單都看不到；被擋時回覆末尾附一句中性說明），`memory` / `cronjob` 永遠不開放；R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive。owner 可在管理頁「通道」逐 toolset 放寬（Doctor 會提醒放寬了 Workspace）<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
-| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）—— 三者只有白名單成員能用、異動記 AuditLog、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）—— 三者只有白名單成員能用、異動記 AuditLog；`/stats [天數]`（使用分析，見下）、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼；「更換 token」先 getMe 驗證才寫入）、白名單 user id、部署 B 網址、secret（儲存時自動產生；「重新產生 secret」會自動重登 webhook）、群聊模式成員可用的 toolset、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
 ### Email 指令信
@@ -665,6 +665,15 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 ### 向 owner 提問（`session_ask_owner`）
 
 無人模式的任務（排程 / 事件）遇到必須由 owner 決定的事，呼叫 `session_ask_owner({question, options?})`：系統在 Approvals 寫一列 `q_…`、把問題推到 owner 的 Telegram，本輪立刻結束（job 狀態 `needs_input`，排程 / 事件暫不投遞）。你在 Telegram **直接「回覆」那則問題訊息**、或輸入 `/answer [q_id] <回答>`、或在管理頁「紀錄 → 審批」填答案，系統就以系統訊息把答案接回原 session 續跑；排程 / 事件的續跑結果會投遞，也會回到你回答的 Telegram chat。互動模式（聊天台 / Telegram 對話）用這個工具會回錯，模型應直接在回覆裡問；群組成員看不到此工具（`ownerOnly`）。無人模式的 system 指示已改成「能自行判斷就判斷，只有做錯有實際後果的事才問」。
+
+### 使用分析（`/stats`、管理頁「紀錄 → 使用分析」）
+
+想知道 `max_tool_steps`、時間預算夠不夠、模型是不是不夠聰明，不用翻 AuditLog：Telegram `/stats [天數]`（預設 7）或管理頁「紀錄」最上方「使用分析」會從 Queue（每輪結果）、Usage（每次模型呼叫）、AuditLog（每次工具執行）、Sessions 統計近 N 天：
+
+- 輪次：步數平均 / p90 / 最多、撞到 `max_tool_steps` 幾輪、≥ 80% 幾輪、自動續跑幾次；時間平均 / p90 / 最長、撞到預算幾輪；熔斷、提問等待；每輪模型呼叫次數、每次平均 prompt tokens。
+- 模型：每個 provider / model 的呼叫數、失敗率、平均 tokens、平均與 p90 延遲、估算費用。
+- 工具：呼叫數、失敗數（分類：參數 / 找不到 / 權限 / 配額 / 其他）、待審數、平均與最慢時間、失敗樣本；同 session 同工具同參數 ≥ 3 次的「重複呼叫」。
+- 建議（規則）：撞步數上限且有重複呼叫 → 模型打轉（換更強 main / 工具錯誤訊息要更明確）而不是調上限；撞上限但沒打轉 → 建議 `max_tool_steps` 調到 p90 × 1.5；撞時間預算 → 列慢工具與慢模型（GAS 6 分鐘硬上限，預算不能再調高）；熔斷 → 列工具；provider 失敗率 ≥ 5%；每次呼叫 prompt ≥ 50k → context 偏大；某工具參數錯誤 ≥ 15% → 模型沒看懂工具說明；session ≥ 80k tokens → `/new`。
 
 ### Email 委託寄件者（`/owner`）
 

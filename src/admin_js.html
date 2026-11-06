@@ -1140,7 +1140,25 @@
     const $audit = el('div', { class: 'table-wrap' }, el('div', { class: 'loading' }, '載入中…'));
     const btnReload = el('button', { onclick: () => { loadApprovals(); loadQueue(); loadAudit(); } }, '重新整理');
     const btnTick = el('button', { onclick: () => tickNow() }, '處理一個 job');
+    // 使用分析（max_tool_steps / 時間預算 / 模型與工具失敗率 → 建議）
+    const $report = el('div', {}, el('div', { class: 'placeholder' }, '按「產生」統計近 N 天的輪次、步數、時間、模型與工具失敗率，並給調整建議（Telegram 也可用 /stats）。'));
+    const $reportDays = el('select', {}, [7, 14, 30].map((d) => el('option', { value: String(d) }, `近 ${d} 天`)));
+    const btnReport = el('button', { onclick: () => loadReport() }, '產生');
+    async function loadReport() {
+      $report.innerHTML = ''; $report.append(el('div', { class: 'loading' }, '統計中…'));
+      try {
+        const r = await call('adminUsageReport', Number($reportDays.value));
+        $report.innerHTML = '';
+        $report.append(
+          el('div', { class: 'check-detail', style: 'color: inherit' }, r.suggestions.map((x, i) => `${i + 1}. ${x}`).join('\n')),
+          el('details', {}, [el('summary', {}, '完整報告（可複製）'), el('div', { class: 'meta', style: 'font-size: 13px' }, r.text)]),
+        );
+      } catch (err) {
+        $report.innerHTML = ''; $report.append(errorBox(err));
+      }
+    }
     root.append(
+      el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, '使用分析'), $reportDays, btnReport]), $report]),
       el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, '審批'), btnReload]), $approvals]),
       el('div', { class: 'panel' }, [el('div', { class: 'toolbar' }, [el('h3', { style: 'margin:0' }, 'Queue（最近 30 個 job）'), btnTick, $queueInfo]), $queue]),
       el('div', { class: 'panel' }, [el('h3', {}, 'AuditLog（最近 50 筆）'), $audit]),

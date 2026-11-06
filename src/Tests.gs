@@ -69,6 +69,7 @@ function smokeTestTable_() {
     ['telegram_send_file: 檔案計畫（Google 格式轉 PDF、圖片可 sendPhoto）、目標 chat（telegram session 回同 chat 去 :guest；其他送 owner；未啟用報錯）、multipart 上傳 payload、50 MB 上限、handler', testTelegramSendFile_, 'pure'],
     ['ask_owner: 互動模式拒絕、非 owner 看不到（ownerOnly）、autonomous 寫 Approvals q_ 列 + 推 Telegram → pending_input；runTurn_ 立刻停（needs_input）；job 進 needs_input 且 cron 不投遞；answerQuestion_ 標 answered 並 enqueue 回答續跑（cron 帶投遞、reply_channel telegram）；decideApproval_ 拒收提問列', testAskOwner_, 'pure'],
     ['telegram: /approve 列待審清單（每筆批准 / 拒絕按鈕、提問另列）、/approve <id> 與 /deny <id> 直接決定、壞 id 提示、空清單文字；成員不吃指令', testTelegramApproveCommand_, 'pure'],
+    ['report: usageReport_ 統計近 N 天輪次（步數 / 時間 / 停止原因 / 續跑）、模型失敗率與延遲、工具失敗分類與重複呼叫、session；建議規則（撞步數上限 vs 打轉、時間預算、熔斷、provider 失敗率、context 偏大、參數錯誤、無異常）；文字輸出；Telegram /stats', testUsageReport_, 'pure'],
     ['email: 委託寄件者 — Telegram /owner list / <email> [passkey] / delete（passkey 只進 Script Property、自動產生只顯示一次、AuditLog 不含 passkey、owner / 壞 email / 含空白拒絕）；掃描每位委託者另搜 from:<email>、主旨或內文含 passkey 才排隊且去掉 passkey、payload 帶 email_delegate、沒 passkey 不理不加星；管理頁端點', testEmailDelegates_, 'pure'],
     ['telegram: 回覆 bot 的提問訊息即回答；/answer <q_id> 文字、/answer 單一待答直接答、多筆列清單、沒有待答提示；非白名單不處理', testTelegramAnswer_, 'pure'],
     ['watchers: 輸入 / config 驗證（四種 type、odoo 白名單、after: 拒絕）；gmail / drive baseline → 新事件 → cursor 推進與 seen 去重、一次最多 5 件；sheets 新列成一事件；odoo id > last_id', testWatcherCheck_, 'pure'],
@@ -3497,6 +3498,89 @@ function testGmailWhitelist_() {
   assert_(!/寄信白名單/.test(buildSystemPrompt_(cfg(''), registry, '')), '空名單不出現');
   // 宣告檢查：recipients 必須是函式
   assertThrows_(() => buildToolRegistry_([Object.assign({}, decls[0], { recipients: 'x' })]), 'recipients 非函式');
+}
+
+function testUsageReport_() {
+  const now = new Date(2026, 10, 6, 12).getTime();
+  const d = (hoursAgo) => new Date(now - hoursAgo * 3600000);
+  const result = (over) => Object.assign({ text: 'ok', steps: [], stopped: '', llmCalls: 3, usage: { prompt: 30000, completion: 900 }, ms: 60000 }, over || {});
+  const stepsN = (n, tool) => { const a = []; for (let i = 0; i < n; i++) a.push({ tool: tool || 'drive_search', ok: true, ms: 1000 }); return a; };
+  const queueRows = [
+    { id: 'j1', type: 'turn', state: 'done', started: d(2), finished: d(2), payload: JSON.stringify({ channel: 'telegram', result: result({ steps: stepsN(5) }) }) },
+    { id: 'j2', type: 'turn', state: 'done', started: d(3), finished: d(3), payload: { channel: 'email', result: result({ steps: stepsN(25), stopped: 'max_steps', llmCalls: 26, usage: { prompt: 26 * 70000, completion: 5000 }, ms: 230000 }) } },
+    { id: 'j3', type: 'continuation', state: 'done', started: d(3), finished: d(3), payload: { result: result({ steps: stepsN(4), ms: 250000, stopped: 'time_budget' }) } },
+    { id: 'j4', type: 'cron', state: 'done', started: d(5), finished: d(5), payload: { deliver_to: 'telegram', result: result({ steps: stepsN(3, 'odoo_search_read'), stopped: 'circuit_breaker' }) } },
+    { id: 'j5', type: 'turn', state: 'failed', started: d(6), finished: d(6), error: '[glm HTTP 500] boom', payload: '{"channel":"telegram"}' },
+    { id: 'j6', type: 'turn', state: 'done', started: d(24 * 20), finished: d(24 * 20), payload: { result: result({ steps: stepsN(30), stopped: 'max_steps' }) } }, // 20 天前：不在 7 天窗內
+    { id: 'j7', type: 'turn', state: 'queued', started: '', finished: '', payload: '{}' },
+  ];
+  const usageRows = [];
+  for (let i = 0; i < 10; i++) usageRows.push({ ts: d(1 + i), provider: 'zai', model: 'glm-5.3', prompt_tokens: 20000, completion_tokens: 500, cost_est: 0.01, ms: 8000, ok: i === 0 ? false : true });
+  usageRows.push({ ts: d(2), provider: 'gem', model: 'gemini-2.5-pro', prompt_tokens: 90000, completion_tokens: 2000, cost_est: 0, ms: 45000, ok: true });
+  usageRows.push({ ts: d(24 * 15), provider: 'old', model: 'x', prompt_tokens: 1, completion_tokens: 1, cost_est: 0, ms: 1, ok: true });
+  const auditRows = [
+    { ts: d(1), session_id: 's1', tool: 'drive_search', args_preview: '{"query":"a"}', result_preview: '{"files":[]}', ok: true, ms: 1200 },
+    { ts: d(1), session_id: 's1', tool: 'drive_search', args_preview: '{"query":"a"}', result_preview: '{"files":[]}', ok: true, ms: 1300 },
+    { ts: d(1), session_id: 's1', tool: 'drive_search', args_preview: '{"query":"a"}', result_preview: '{"files":[]}', ok: true, ms: 1100 },
+    { ts: d(2), session_id: 's2', tool: 'odoo_search_read', args_preview: '{"model":"x"}', result_preview: '{"error":"invalid","message":"缺少參數 domain"}', ok: false, ms: 500 },
+    { ts: d(2), session_id: 's2', tool: 'odoo_search_read', args_preview: '{"model":"y"}', result_preview: '{"error":"invalid","message":"domain 必須是陣列"}', ok: false, ms: 400 },
+    { ts: d(2), session_id: 's2', tool: 'odoo_search_read', args_preview: '{"model":"z"}', result_preview: '{"records":[]}', ok: true, ms: 900 },
+    { ts: d(2), session_id: 's2', tool: 'drive_read_text', args_preview: '{"file_id":"F"}', result_preview: '{"text":"..."}', ok: true, ms: 42000 },
+    { ts: d(2), session_id: 's2', tool: 'gmail_send', args_preview: '{}', result_preview: '{"status":"pending_approval","approval_id":"apr_1"}', ok: false, ms: 10 },
+    { ts: d(1), session_id: '', tool: 'security:whitelist:add', args_preview: 'x', result_preview: '', ok: true, ms: 0 },
+    { ts: d(24 * 30), session_id: 's9', tool: 'web_fetch', args_preview: '{}', result_preview: 'old', ok: false, ms: 1 },
+  ];
+  const sessionRows = [
+    { id: 's1', channel: 'telegram', turns: 12, token_est: 95000, created: d(30), last_active: d(1) },
+    { id: 's2', channel: 'email', turns: 2, token_est: 4000, created: d(3), last_active: d(2) },
+    { id: 's9', channel: 'admin', turns: 1, token_est: 100, created: d(24 * 40), last_active: d(24 * 40) },
+  ];
+  const r = usageReport_({ days: 7, now, queueRows, usageRows, auditRows, sessionRows, maxSteps: 25, budgetMs: 270000 });
+  assertEqual_([r.jobs.total, r.jobs.byType, r.jobs.byState], [5, { turn: 3, continuation: 1, cron: 1 }, { done: 4, failed: 1 }], '7 天窗內 5 個 job（20 天前與未開始的不算）');
+  assertEqual_(r.jobs.failedErrors, [{ error: '[glm HTTP 500] boom', count: 1 }], '失敗 job 錯誤歸類');
+  assertEqual_([r.turns.total, r.turns.stops, r.turns.continuations], [4, { max_steps: 1, time_budget: 1, circuit_breaker: 1, needs_input: 0 }, 1], '4 輪有結果；停止原因各一');
+  assertEqual_([r.turns.steps.max, r.turns.steps.nearLimit, r.turns.ms.nearLimit], [25, 1, 2], '步數最多 25、1 輪 ≥ 80%；2 輪時間 ≥ 80%');
+  assertEqual_(r.turns.avgPromptPerCall, Math.round((10000 + 70000 + 10000 + 10000) / 4), '每次呼叫平均 prompt');
+  assertEqual_(r.models.map((m) => [m.key, m.calls, m.fails, m.avgPrompt, m.avgMs]), [['zai / glm-5.3', 10, 1, 20000, 8000], ['gem / gemini-2.5-pro', 1, 0, 90000, 45000]], '模型統計（15 天前的不算）');
+  const odoo = r.tools.find((t) => t.tool === 'odoo_search_read');
+  assertEqual_([odoo.calls, odoo.fails, odoo.failKinds, odoo.samples.length], [3, 2, { params: 2 }, 2], 'odoo 工具 3 次 2 敗、分類參數錯、樣本 2 筆');
+  const gm = r.tools.find((t) => t.tool === 'gmail_send');
+  assertEqual_([gm.fails, gm.pending], [0, 1], '待審批不算失敗');
+  assert_(!r.tools.some((t) => /^security:/.test(t.tool)) && !r.tools.some((t) => t.tool === 'web_fetch'), '安全事件與窗外紀錄不列');
+  assertEqual_(r.repeatedCalls, [{ tool: 'drive_search', times: 3 }], '同 session 同工具同參數 3 次 = 重複呼叫');
+  assertEqual_([r.slowTools, r.paramErrorTools], [['drive_read_text（平均 42s）'], ['odoo_search_read（2/3）']], '慢工具與參數錯誤工具');
+  assertEqual_([r.sessions.total, r.sessions.byChannel, r.sessions.bigSessions, r.sessions.maxTurns], [2, { telegram: 1, email: 1 }, 1, 12], 'session：40 天前的不算');
+  const sug = r.suggestions.join('\n');
+  assert_(/撞到步數上限 25/.test(sug) && /模型打轉/.test(sug) && /drive_search×3/.test(sug), '撞上限 + 重複呼叫 → 判成打轉：' + sug);
+  assert_(/撞到時間預算 270 秒/.test(sug) && /drive_read_text（平均 42s）/.test(sug) && /gemini-2\.5-pro（平均 45s \/ 次）/.test(sug), '時間預算建議列慢工具與慢模型：' + sug);
+  assert_(/熔斷（同一工具同參數連錯 3 次）：odoo_search_read×1/.test(sug), '熔斷建議：' + sug);
+  assert_(/zai \/ glm-5\.3 失敗率 10%/.test(sug), 'provider 失敗率：' + sug);
+  assert_(/工具參數錯誤比例高：odoo_search_read（2\/3）/.test(sug) && /1 個 session 累積 ≥ 80k/.test(sug), '參數錯誤與大 session：' + sug);
+  assert_(/📊 使用分析（近 7 天）/.test(r.text) && /步數：平均/.test(r.text) && /• zai \/ glm-5\.3：10 次，失敗 1（10%）/.test(r.text) && /↳ .*缺少參數 domain/.test(r.text) && /建議：\n1\./.test(r.text), '文字報告：' + r.text.slice(0, 400));
+  // 沒撞上限、步數 p90 高 → 建議調高
+  const calm = usageReport_({ days: 7, now, queueRows: [
+    { id: 'a', type: 'turn', state: 'done', finished: d(1), payload: { result: result({ steps: stepsN(25), stopped: 'max_steps', ms: 100000 }) } },
+    { id: 'b', type: 'turn', state: 'done', finished: d(1), payload: { result: result({ steps: stepsN(20), ms: 100000 }) } },
+  ], usageRows: [], auditRows: [], sessionRows: [], maxSteps: 25, budgetMs: 270000 });
+  assert_(/建議 max_tool_steps 調到 38/.test(calm.suggestions[0]), '沒有重複呼叫 → 建議調高到 p90×1.5：' + calm.suggestions[0]);
+  // 全部正常
+  const fine = usageReport_({ days: 7, now, queueRows: [{ id: 'a', type: 'turn', state: 'done', finished: d(1), payload: { result: result({ steps: stepsN(3) }) } }], usageRows: [], auditRows: [], sessionRows: [], maxSteps: 25 });
+  assertEqual_(fine.suggestions, ['近 7 天沒有撞到步數 / 時間上限、模型與工具失敗率都在正常範圍，目前參數夠用。'], '正常');
+  assert_(/沒有完成的輪次紀錄/.test(usageReport_({ days: 3, now, queueRows: [], usageRows: [], auditRows: [], sessionRows: [] }).suggestions[0]), '沒資料');
+  assertEqual_([classifyToolFailure_('缺少參數 x'), classifyToolFailure_('找不到檔案'), classifyToolFailure_('HTTP 403 forbidden'), classifyToolFailure_('HTTP 429 too many'), classifyToolFailure_('boom')], ['params', 'not_found', 'permission', 'quota', 'other'], '失敗分類');
+  // Telegram /stats
+  const f = fakeTelegramDeps_();
+  f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '111' });
+  const asked = [];
+  f.deps.usageReport = (days) => { asked.push(days); return { text: `報告 ${days} 天` }; };
+  let tr = handleTelegramUpdate_(tgMessage_('/stats', 111), f.deps);
+  assertEqual_([tr.action, tr.text, asked], ['stats', '報告 7 天', [7]], '/stats 預設 7 天');
+  tr = handleTelegramUpdate_(tgMessage_('/stats 30', 111), f.deps);
+  assertEqual_([tr.text, f.sent[f.sent.length - 1].text], ['報告 30 天', '報告 30 天'], '/stats 30');
+  f.deps.usageReport = () => { throw new Error('壞了'); };
+  tr = handleTelegramUpdate_(tgMessage_('/stats', 111), f.deps);
+  assert_(/統計失敗：壞了/.test(tr.text), '錯誤回文字');
+  assert_(/\/stats \[天數\]/.test(handleTelegramUpdate_(tgMessage_('/help', 111), f.deps).text), '/help 有 /stats');
 }
 
 function testEmailDelegates_() {
