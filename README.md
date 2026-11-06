@@ -255,7 +255,7 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 |---|---|
 | drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_copy`(W，整份複製) `drive_export_pdf`(W) `drive_export`(W，匯出 xlsx / docx / pptx / csv / pdf 存回 Drive) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
-| sheets | `sheets_create`(W) `sheets_list_sheets`(R，工作表清單與表頭) `sheets_find`(R，TextFinder 找儲存格) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) `sheets_copy_sheet`(W，跨試算表整張複製，保留公式 / 格式；來源有檢視權即可) |
+| sheets | `sheets_create`(W) `sheets_add_sheet`(W，在既有試算表新增分頁，可帶表頭；寫到不存在的分頁會報錯並提示用它) `sheets_list_sheets`(R，工作表清單與表頭) `sheets_find`(R，TextFinder 找儲存格) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) `sheets_copy_sheet`(W，跨試算表整張複製，保留公式 / 格式；來源有檢視權即可) |
 | slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |
 | gmail | `gmail_search`(R) `gmail_read_thread`(R) `gmail_save_attachments`(W，附件存到 Drive `GAS Agent/attachments/`) `gmail_create_draft`(W) `gmail_send`(**X**) `gmail_forward`(**X**，轉寄含原附件) `gmail_label`(W) `gmail_archive`(W) —— `send` / `create_draft` 可用 `attachment_file_ids` 附 Drive 檔案（≤ 10 個、25 MB；Google 格式依 `attachment_format` 轉檔：預設 **試算表 → xlsx**、文件 / 簡報 → pdf，`office` 一律 xlsx / docx / pptx，`pdf` 一律 PDF）；`send` / `create_draft` / `forward` 可給 `html_body` 寄 HTML 信（`body` 仍為純文字備援；script / iframe / form / on* 事件屬性會被濾掉）；**沒有任何刪除工具** |
 | calendar | `calendar_list_events`(R) `calendar_create_event`(W，不寄邀請) `calendar_update_event`(W) `calendar_delete_event`(**D**，預設關) |
@@ -264,7 +264,7 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 | watcher | `watcher_manage`(W，事件觸發器 list / create / update / delete / check_now；autonomous 只能 list；群組成員永遠鎖定) |
 | odoo | `odoo_models`(R，白名單與連線資訊) `odoo_fields`(R) `odoo_search_read`(R) `odoo_read`(R) `odoo_create`(W) `odoo_write`(W) `odoo_call`(W，工作流方法如 action_confirm；擋私有方法與 unlink / write / create) `odoo_unlink`(**D**，預設關) —— 見下方「Odoo」 |
 | session | `session_spill_read`(R，分頁讀溢寫檔) `session_search`(R，M3：搜過去的對話) `session_ask_owner`(R，ownerOnly，M7-B：無人模式向 owner 提問，本輪停在 needs_input) |
-| memory | `memory_manage`(W，M3：add / replace / remove，無 read) |
+| memory | `memory_manage`(W，M3：add / replace / remove，無 read；replace / remove 的 `old_content` 比對寬鬆：忽略空白與尾端標點、前 12 字前綴唯一命中也算；找不到時錯誤訊息列出目前條目，因為 system prompt 的快照是本輪開始時凍結的) |
 | cronjob | `cronjob_manage`(W，M4：list / create / update / delete(停用) / run_now；排程任務執行中只能 list) |
 | skill | `skill_load`(R，M5：載技能全文) `skill_manage`(W，M5：create / patch **只提案**，owner 批准後才寫入) |
 
@@ -672,8 +672,8 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 
 - 輪次：步數平均 / p90 / 最多、撞到 `max_tool_steps` 幾輪、≥ 80% 幾輪、自動續跑幾次；時間平均 / p90 / 最長、撞到預算幾輪；熔斷、提問等待；每輪模型呼叫次數、每次平均 prompt tokens。
 - 模型：每個 provider / model 的呼叫數、失敗率、平均 tokens、平均與 p90 延遲、估算費用。
-- 工具：呼叫數、失敗數（分類：參數 / 找不到 / 權限 / 配額 / 其他）、待審數、平均與最慢時間、失敗樣本；同 session 同工具同參數 ≥ 3 次的「重複呼叫」。
-- 建議（規則）：撞步數上限且有重複呼叫 → 模型打轉（換更強 main / 工具錯誤訊息要更明確）而不是調上限；撞上限但沒打轉 → 建議 `max_tool_steps` 調到 p90 × 1.5；撞時間預算 → 列慢工具與慢模型（GAS 6 分鐘硬上限，預算不能再調高）；熔斷 → 列工具；provider 失敗率 ≥ 5%；每次呼叫 prompt ≥ 50k → context 偏大；某工具參數錯誤 ≥ 15% → 模型沒看懂工具說明；session ≥ 80k tokens → `/new`。
+- 工具：呼叫數、失敗數（分類：參數 / 找不到 / 權限 / 配額 / API 錯誤 / 其他；HTTP 與外部服務錯誤不算模型參數錯）、待審數、平均與最慢時間、失敗樣本；同 session 同工具同參數 ≥ 3 次的「重複呼叫」。AuditLog 的 `llm:<provider>` 列（備援鏈裡失敗的模型呼叫）另列一段：失敗次數、原因分類、白等的總秒數。
+- 建議（規則）：撞步數上限且有重複呼叫 → 模型打轉（換更強 main / 工具錯誤訊息要更明確）而不是調上限；撞上限但沒打轉 → 建議 `max_tool_steps` 調到 p90 × 1.5；撞時間預算 → 列慢工具與慢模型（GAS 6 分鐘硬上限，預算不能再調高）；熔斷 → 列工具；provider 失敗率 ≥ 5%（≥ 50% 且多為 429 → 它排在備援鏈前面會拖慢每一步，建議調低 priority / 停用 / 開 billing，並算出白等秒數）；每次呼叫 prompt ≥ 50k → context 偏大；某工具參數錯誤 ≥ 15% → 模型沒看懂工具說明；session ≥ 80k tokens → `/new`。
 
 ### Email 委託寄件者（`/owner`）
 

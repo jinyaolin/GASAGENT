@@ -154,13 +154,23 @@ function buildMemorySnapshot_(store, cfg) {
  * @throws {Error} 0 或多筆命中
  */
 function findMemoryEntry_(entries, needle) {
-  const n = String(needle || '').trim();
+  const norm = (t) => String(t || '').replace(/\s+/g, ' ').replace(/[…\.。、，,;；:：!！?？\-—–\s]+$/, '').trim();
+  const n = norm(needle);
   if (!n) throw new Error('replace / remove 需要 old_content。');
-  const exact = entries.filter((e) => e.content === n);
+  const exact = entries.filter((e) => e.content === n || norm(e.content) === n);
   if (exact.length === 1) return exact[0];
-  const partial = entries.filter((e) => e.content.indexOf(n) !== -1);
+  let partial = entries.filter((e) => e.content.indexOf(n) !== -1 || norm(e.content).indexOf(n) !== -1);
   if (partial.length === 1) return partial[0];
-  if (!partial.length) throw new Error(`找不到含「${truncateText_(n, 60).text}」的條目。請照快照裡的原文片段比對。`);
+  if (!partial.length && n.length >= 12) {
+    // 模型常把條目改寫或只記得開頭：用前 12 字當前綴找唯一命中
+    const head = n.slice(0, 12);
+    partial = entries.filter((e) => norm(e.content).indexOf(head) === 0);
+    if (partial.length === 1) return partial[0];
+  }
+  if (!partial.length) {
+    const current = entries.slice(0, 20).map((e) => `- ${truncateText_(e.content, 80).text}`).join('\n');
+    throw new Error(`找不到含「${truncateText_(n, 60).text}」的條目。快照是本輪開始時的狀態，若你這輪已改過它請用下面目前的內容比對：\n${current || '（目前沒有條目）'}`);
+  }
   throw new Error(`「${truncateText_(n, 60).text}」命中 ${partial.length} 條，請給更長的片段以唯一識別。`);
 }
 
@@ -201,7 +211,7 @@ function memoryManage_(args, ctx) {
     e.content = content;
     if (args.category) e.category = String(args.category).trim();
     store.update(target, e);
-    return { ok: true, action: 'replace', target, id: e.id, usage: usage(after) };
+    return { ok: true, action: 'replace', target, id: e.id, content, note: '之後要再改這條請用新內容比對（system prompt 的快照不會更新）。', usage: usage(after) };
   }
   if (args.action === 'remove') {
     const e = findMemoryEntry_(entries, args.old_content);

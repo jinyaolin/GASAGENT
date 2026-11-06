@@ -43,6 +43,20 @@ function sheetsTools_() {
       handler: sheetsListSheets_,
     },
     {
+      name: 'sheets_add_sheet', toolset: 'sheets', risk: 'W',
+      description: '在既有試算表新增一張工作表（分頁），可同時寫入第一列表頭。寫入 / 追加到不存在的工作表會報錯，請先用這個建立。名稱重複會自動加 (2)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          spreadsheet_id: ssId,
+          name: { type: 'string', description: '工作表名稱' },
+          headers: { type: 'array', description: '選填：第一列表頭', items: { type: 'string' } },
+        },
+        required: ['spreadsheet_id', 'name'], additionalProperties: false,
+      },
+      handler: sheetsAddSheet_,
+    },
+    {
       name: 'sheets_find', toolset: 'sheets', risk: 'R',
       description: '在試算表裡找含有 query 文字的儲存格（預設全部工作表、不分大小寫、部分比對），回傳每個命中的工作表 / 位置 / 顯示值。適合在大表裡定位某筆資料再用 sheets_read_range 讀該列。',
       parameters: {
@@ -147,7 +161,7 @@ function sheetsTools_() {
 function resolveSheet_(ss, name) {
   if (!name) return ss.getSheets()[0];
   const sheet = ss.getSheetByName(String(name));
-  if (!sheet) throw new Error(`找不到工作表「${name}」。現有：${ss.getSheets().map((s) => s.getName()).join(', ')}`);
+  if (!sheet) throw new Error(`找不到工作表「${name}」。現有：${ss.getSheets().map((s) => s.getName()).join(', ')}。要新增工作表請用 sheets_add_sheet。`);
   return sheet;
 }
 
@@ -159,8 +173,15 @@ function resolveSheet_(ss, name) {
  */
 function resolveRange_(ss, a1) {
   a1 = requireString_(a1, 'range');
+  const bang = a1.indexOf('!');
+  if (bang !== -1) {
+    const sheetName = a1.slice(0, bang).replace(/^'|'$/g, '');
+    if (!ss.getSheetByName(sheetName)) {
+      throw new Error(`找不到工作表「${sheetName}」。現有：${ss.getSheets().map((s) => s.getName()).join(', ')}。要新增工作表請用 sheets_add_sheet。`);
+    }
+  }
   try {
-    return a1.indexOf('!') !== -1 ? ss.getRange(a1) : ss.getSheets()[0].getRange(a1);
+    return bang !== -1 ? ss.getRange(a1) : ss.getSheets()[0].getRange(a1);
   } catch (err) {
     throw new Error(`range「${a1}」無法解析：${err && err.message || err}`);
   }
@@ -233,6 +254,18 @@ function sheetsFind_(args) {
     sheet: r.getSheet().getName(), cell: r.getA1Notation(), row: r.getRow(), col: r.getColumn(), value: r.getDisplayValue(),
   }));
   return Object.assign(ssInfo_(ss), { query, scope: args.sheet_name || '(全部工作表)', count: all.length, truncated: all.length > max, matches });
+}
+
+function sheetsAddSheet_(args) {
+  const ss = SpreadsheetApp.openById(requireString_(args.spreadsheet_id, 'spreadsheet_id'));
+  const name = uniqueSheetName_(requireString_(args.name, 'name'), ss.getSheets().map((s) => s.getName()));
+  const sheet = ss.insertSheet(name);
+  const headers = Array.isArray(args.headers) ? args.headers.map((h) => String(h)) : [];
+  if (headers.length) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return Object.assign(ssInfo_(ss), { sheet: sheet.getName(), renamed: sheet.getName() !== String(args.name).trim(), headers: headers.length });
 }
 
 function sheetsCopySheet_(args) {

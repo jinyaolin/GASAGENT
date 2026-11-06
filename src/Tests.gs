@@ -3528,6 +3528,9 @@ function testUsageReport_() {
     { ts: d(2), session_id: 's2', tool: 'drive_read_text', args_preview: '{"file_id":"F"}', result_preview: '{"text":"..."}', ok: true, ms: 42000 },
     { ts: d(2), session_id: 's2', tool: 'gmail_send', args_preview: '{}', result_preview: '{"status":"pending_approval","approval_id":"apr_1"}', ok: false, ms: 10 },
     { ts: d(1), session_id: '', tool: 'security:whitelist:add', args_preview: 'x', result_preview: '', ok: true, ms: 0 },
+    { ts: d(1), session_id: 's1', tool: 'llm:gem', args_preview: '', result_preview: '[gem HTTP 429] You exceeded your current quota', ok: false, ms: 1500 },
+    { ts: d(1), session_id: 's1', tool: 'llm:gem', args_preview: '', result_preview: '[gem HTTP 429] You exceeded your current quota', ok: false, ms: 1500 },
+    { ts: d(1), session_id: 's1', tool: 'llm:gem', args_preview: '', result_preview: '[gem HTTP 503] high demand', ok: false, ms: 20000 },
     { ts: d(24 * 30), session_id: 's9', tool: 'web_fetch', args_preview: '{}', result_preview: 'old', ok: false, ms: 1 },
   ];
   const sessionRows = [
@@ -3546,7 +3549,8 @@ function testUsageReport_() {
   assertEqual_([odoo.calls, odoo.fails, odoo.failKinds, odoo.samples.length], [3, 2, { params: 2 }, 2], 'odoo 工具 3 次 2 敗、分類參數錯、樣本 2 筆');
   const gm = r.tools.find((t) => t.tool === 'gmail_send');
   assertEqual_([gm.fails, gm.pending], [0, 1], '待審批不算失敗');
-  assert_(!r.tools.some((t) => /^security:/.test(t.tool)) && !r.tools.some((t) => t.tool === 'web_fetch'), '安全事件與窗外紀錄不列');
+  assert_(!r.tools.some((t) => /^security:|^llm:/.test(t.tool)) && !r.tools.some((t) => t.tool === 'web_fetch'), '安全事件、llm: 與窗外紀錄不列入工具');
+  assertEqual_(r.llm, [{ provider: 'gem', fails: 3, wastedMs: 23000, kinds: { quota: 2, api: 1 }, sample: '[gem HTTP 429] You exceeded your current quota' }], 'llm: 失敗另計（含白等時間）');
   assertEqual_(r.repeatedCalls, [{ tool: 'drive_search', times: 3 }], '同 session 同工具同參數 3 次 = 重複呼叫');
   assertEqual_([r.slowTools, r.paramErrorTools], [['drive_read_text（平均 42s）'], ['odoo_search_read（2/3）']], '慢工具與參數錯誤工具');
   assertEqual_([r.sessions.total, r.sessions.byChannel, r.sessions.bigSessions, r.sessions.maxTurns], [2, { telegram: 1, email: 1 }, 1, 12], 'session：40 天前的不算');
@@ -3554,9 +3558,18 @@ function testUsageReport_() {
   assert_(/撞到步數上限 25/.test(sug) && /模型打轉/.test(sug) && /drive_search×3/.test(sug), '撞上限 + 重複呼叫 → 判成打轉：' + sug);
   assert_(/撞到時間預算 270 秒/.test(sug) && /drive_read_text（平均 42s）/.test(sug) && /gemini-2\.5-pro（平均 45s \/ 次）/.test(sug), '時間預算建議列慢工具與慢模型：' + sug);
   assert_(/熔斷（同一工具同參數連錯 3 次）：odoo_search_read×1/.test(sug), '熔斷建議：' + sug);
-  assert_(/zai \/ glm-5\.3 失敗率 10%/.test(sug), 'provider 失敗率：' + sug);
+  assert_(/zai \/ glm-5\.3 失敗率 10%/.test(sug) && /確認備援鏈有第二個同角色/.test(sug), 'provider 失敗率：' + sug);
+  assert_(/備援鏈裡失敗的模型呼叫/.test(r.text) && /• gem：失敗 3 次（配額 2、API 錯誤 1），白等約 23s/.test(r.text), 'llm 段落：' + r.text);
   assert_(/工具參數錯誤比例高：odoo_search_read（2\/3）/.test(sug) && /1 個 session 累積 ≥ 80k/.test(sug), '參數錯誤與大 session：' + sug);
   assert_(/📊 使用分析（近 7 天）/.test(r.text) && /步數：平均/.test(r.text) && /• zai \/ glm-5\.3：10 次，失敗 1（10%）/.test(r.text) && /↳ .*缺少參數 domain/.test(r.text) && /建議：\n1\./.test(r.text), '文字報告：' + r.text.slice(0, 400));
+  // 備援鏈前面的 provider 幾乎全失敗 → 建議調低 priority，並算出白等時間
+  const bad = usageReport_({ days: 7, now, queueRows: [], usageRows: [
+    { ts: d(1), provider: 'gem', model: 'g', prompt_tokens: 1, completion_tokens: 1, ms: 1000, ok: false }, { ts: d(1), provider: 'gem', model: 'g', prompt_tokens: 1, completion_tokens: 1, ms: 1000, ok: false },
+    { ts: d(1), provider: 'gem', model: 'g', prompt_tokens: 1, completion_tokens: 1, ms: 1000, ok: false }, { ts: d(1), provider: 'gem', model: 'g', prompt_tokens: 1, completion_tokens: 1, ms: 1000, ok: false },
+    { ts: d(1), provider: 'gem', model: 'g', prompt_tokens: 1, completion_tokens: 1, ms: 1000, ok: true },
+  ], auditRows: [1, 2, 3, 4].map(() => ({ ts: d(1), session_id: 's', tool: 'llm:gem', args_preview: '', result_preview: '[gem HTTP 429] quota', ok: false, ms: 2000 })), sessionRows: [] });
+  assert_(/gem \/ g 失敗率 80%（4\/5），幾乎都是額度 \/ 速率限制（HTTP 429），這 7 天白等了約 8 秒。它排在備援鏈前面時/.test(bad.suggestions.join('\n')), '備援鏈建議：' + bad.suggestions.join('\n'));
+  assertEqual_(bad.repeatedCalls, [], 'llm: 重複不算打轉');
   // 沒撞上限、步數 p90 高 → 建議調高
   const calm = usageReport_({ days: 7, now, queueRows: [
     { id: 'a', type: 'turn', state: 'done', finished: d(1), payload: { result: result({ steps: stepsN(25), stopped: 'max_steps', ms: 100000 }) } },
@@ -3567,7 +3580,7 @@ function testUsageReport_() {
   const fine = usageReport_({ days: 7, now, queueRows: [{ id: 'a', type: 'turn', state: 'done', finished: d(1), payload: { result: result({ steps: stepsN(3) }) } }], usageRows: [], auditRows: [], sessionRows: [], maxSteps: 25 });
   assertEqual_(fine.suggestions, ['近 7 天沒有撞到步數 / 時間上限、模型與工具失敗率都在正常範圍，目前參數夠用。'], '正常');
   assert_(/沒有完成的輪次紀錄/.test(usageReport_({ days: 3, now, queueRows: [], usageRows: [], auditRows: [], sessionRows: [] }).suggestions[0]), '沒資料');
-  assertEqual_([classifyToolFailure_('缺少參數 x'), classifyToolFailure_('找不到檔案'), classifyToolFailure_('HTTP 403 forbidden'), classifyToolFailure_('HTTP 429 too many'), classifyToolFailure_('boom')], ['params', 'not_found', 'permission', 'quota', 'other'], '失敗分類');
+  assertEqual_([classifyToolFailure_('缺少參數 x'), classifyToolFailure_('找不到檔案'), classifyToolFailure_('HTTP 403 forbidden'), classifyToolFailure_('HTTP 429 too many'), classifyToolFailure_('boom'), classifyToolFailure_('OCR 失敗（HTTP 400）：Invalid Value'), classifyToolFailure_('[gemini HTTP 503] high demand')], ['params', 'not_found', 'permission', 'quota', 'other', 'api', 'api'], '失敗分類：HTTP / 外部錯誤不算模型參數錯');
   // Telegram /stats
   const f = fakeTelegramDeps_();
   f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', telegram_owner_chat_id: '111' });

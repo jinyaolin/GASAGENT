@@ -10,6 +10,8 @@ const REPORT_DEFAULT_DAYS = 7;
 const REPORT_NEAR_LIMIT_RATIO = 0.8;
 /** 慢工具門檻（ms）。 */
 const REPORT_SLOW_TOOL_MS = 20000;
+/** 失敗分類的顯示名。 */
+const REPORT_KIND_LABEL = Object.freeze({ params: '參數', not_found: '找不到', permission: '權限', quota: '配額', api: 'API 錯誤', other: '其他' });
 /** 單次模型呼叫平均 prompt tokens 超過此值視為 context 偏大。 */
 const REPORT_HEAVY_PROMPT_TOKENS = 50000;
 
@@ -46,14 +48,15 @@ function cellTimeMs_(v) {
 /**
  * 工具失敗訊息分類：模型端（參數不對 / 找錯 id）或執行端（API / 權限 / 配額）。純函式。
  * @param {string} preview result_preview
- * @return {string} 'params' | 'not_found' | 'permission' | 'quota' | 'other'
+ * @return {string} 'quota' | 'permission' | 'not_found' | 'api'（HTTP / 外部服務錯）| 'params'（模型給錯參數）| 'other'
  */
 function classifyToolFailure_(preview) {
   const p = String(preview || '');
-  if (/缺少|必須|不是合法|不合法|請給|invalid|required|parameter|參數|格式/i.test(p)) return 'params';
-  if (/找不到|not found|不存在|404/i.test(p)) return 'not_found';
-  if (/權限|permission|forbidden|403|未開放|拒絕/i.test(p)) return 'permission';
-  if (/quota|配額|429|too many|rate/i.test(p)) return 'quota';
+  if (/\b429\b|quota|配額|too many|rate limit/i.test(p)) return 'quota';
+  if (/\b40[13]\b|權限|permission|forbidden|未開放|拒絕/i.test(p)) return 'permission';
+  if (/\b404\b|找不到|not found|不存在/i.test(p)) return 'not_found';
+  if (/HTTP \d{3}|\b5\d\d\b|Invalid Value|timeout|逾時|失敗（/i.test(p)) return 'api';
+  if (/缺少|不可為空|不是合法|不合法|請給|必須是|必須以|參數|格式|invalid_args|invalid_proposal|required|parameter/i.test(p)) return 'params';
   return 'other';
 }
 
@@ -115,10 +118,21 @@ function usageReport_(input) {
   // ---- AuditLog：每次工具執行 ----------------------------------------------------
   const tools = {};
   const repeats = {};
+  const llm = {}; // llm:<provider id>：備援鏈裡失敗的模型呼叫（AuditLog 只記失敗）
   (input.auditRows || []).forEach((r) => {
     if (!inWindow(cellTimeMs_(r.ts))) return;
     const name = String(r.tool || '');
     if (!name || /^(security|telegram):/.test(name)) return;
+    if (/^llm:/.test(name)) {
+      const pid = name.slice(4);
+      const l = llm[pid] || (llm[pid] = { provider: pid, fails: 0, wastedMs: 0, kinds: {}, sample: '' });
+      l.fails++;
+      l.wastedMs += Number(r.ms) || 0;
+      const kind = classifyToolFailure_(r.result_preview);
+      l.kinds[kind] = (l.kinds[kind] || 0) + 1;
+      if (!l.sample) l.sample = String(r.result_preview || '').replace(/\s+/g, ' ').slice(0, 120);
+      return;
+    }
     const t = tools[name] || (tools[name] = { tool: name, calls: 0, fails: 0, pending: 0, ms: [], failKinds: {}, samples: [] });
     t.calls++;
     const preview = String(r.result_preview || '');
@@ -134,6 +148,7 @@ function usageReport_(input) {
     repeats[rk] = (repeats[rk] || 0) + 1;
   });
   const toolStats = Object.keys(tools).map((k) => { const t = tools[k]; return { tool: t.tool, calls: t.calls, fails: t.fails, pending: t.pending, failRate: t.calls ? t.fails / t.calls : 0, avgMs: average_(t.ms), maxMs: t.ms.length ? Math.max.apply(null, t.ms) : 0, failKinds: t.failKinds, samples: t.samples }; }).sort((a, b) => b.calls - a.calls);
+  const llmStats = Object.keys(llm).map((k) => llm[k]).sort((a, b) => b.fails - a.fails);
   const repeatedCalls = Object.keys(repeats).filter((k) => repeats[k] >= 3).map((k) => ({ tool: k.split('|')[1], times: repeats[k] })).sort((a, b) => b.times - a.times).slice(0, 5);
   const slowTools = toolStats.filter((t) => t.avgMs >= REPORT_SLOW_TOOL_MS).map((t) => `${t.tool}（平均 ${Math.round(t.avgMs / 1000)}s）`);
   const paramErrorTools = toolStats.filter((t) => t.calls >= 3 && (t.failKinds.params || 0) / t.calls >= 0.15).map((t) => `${t.tool}（${t.failKinds.params}/${t.calls}）`);
@@ -169,7 +184,12 @@ function usageReport_(input) {
     suggestions.push(`有 ${stops.circuit_breaker} 輪熔斷（同一工具同參數連錯 3 次）：${Object.keys(circuitTools).map((t) => t + '×' + circuitTools[t]).join('、') || '—'}。通常是工具回的錯誤訊息沒讓模型知道該怎麼改；看下方該工具的失敗樣本，若是程式問題請修工具，若是模型一直給錯參數就換更強的模型。`);
   }
   modelStats.filter((m) => m.calls >= 5 && m.failRate >= 0.05).forEach((m) => {
-    suggestions.push(`${m.key} 失敗率 ${Math.round(m.failRate * 100)}%（${m.fails}/${m.calls}）：provider 不穩或額度 / 速率限制；確認備援鏈有第二個 main，或換 provider。`);
+    const l = llm[m.provider];
+    const kinds = l ? Object.keys(l.kinds).sort((a, b) => l.kinds[b] - l.kinds[a]) : [];
+    const mainly = kinds[0] === 'quota' ? '幾乎都是額度 / 速率限制（HTTP 429）' : kinds[0] === 'api' ? '多為服務端錯誤（5xx / 高負載）' : '';
+    const waste = l && l.wastedMs ? `，這 ${days} 天白等了約 ${Math.round(l.wastedMs / 1000)} 秒` : '';
+    suggestions.push(`${m.key} 失敗率 ${Math.round(m.failRate * 100)}%（${m.fails}/${m.calls}）${mainly ? '，' + mainly : ''}${waste}。` +
+      (m.failRate >= 0.5 ? '它排在備援鏈前面時每輪每步都先失敗一次再換下一個，拖慢所有任務：把它的 priority 調低或停用（要繼續用就開 billing / 換 key）；若它是 embed / fast 角色且鏈裡沒有別的，相關功能（記憶向量、評估）會整個失敗。' : '確認備援鏈有第二個同角色的 provider。'));
   });
   if (promptPerCall.length && average_(promptPerCall) >= REPORT_HEAVY_PROMPT_TOKENS) {
     suggestions.push(`每次模型呼叫平均 ${average_(promptPerCall)} prompt tokens，context 偏大（慢、貴、容易忘）：調低 spill_threshold 讓工具結果早點溢寫、常用 /new 開新 session、或調低讀取類工具的 max_chars。`);
@@ -187,7 +207,7 @@ function usageReport_(input) {
     days, since: new Date(since).toISOString(), maxSteps, budgetMs,
     jobs: { total: jobs.length, byType, byState, failedErrors: Object.keys(failedErrors).map((k) => ({ error: k, count: failedErrors[k] })).sort((a, b) => b.count - a.count).slice(0, 5) },
     turns: { total: totalTurns, stops, steps: { avg: average_(stepCounts), p90: percentile_(stepCounts, 90), max: stepCounts.length ? Math.max.apply(null, stepCounts) : 0, nearLimit: nearSteps }, ms: { avg: average_(turnMs), p90: percentile_(turnMs, 90), max: turnMs.length ? Math.max.apply(null, turnMs) : 0, nearLimit: nearBudget }, llmCalls: { avg: average_(llmCalls), max: llmCalls.length ? Math.max.apply(null, llmCalls) : 0 }, avgPromptPerCall: average_(promptPerCall), continuations: byType.continuation || 0 },
-    models: modelStats, tools: toolStats, repeatedCalls, slowTools, paramErrorTools,
+    models: modelStats, llm: llmStats, tools: toolStats, repeatedCalls, slowTools, paramErrorTools,
     sessions: { total: sessions.length, byChannel: sessionsByChannel, avgTurns: average_(sessionTurns), maxTurns: sessionTurns.length ? Math.max.apply(null, sessionTurns) : 0, bigSessions },
     suggestions,
   };
@@ -212,10 +232,14 @@ function usageReportText_(r) {
   lines.push('', '模型：');
   if (!r.models.length) lines.push('（無呼叫紀錄）');
   r.models.forEach((m) => lines.push(`• ${m.key}：${m.calls} 次，失敗 ${m.fails}（${Math.round(m.failRate * 100)}%），平均 ${m.avgPrompt}→${m.avgCompletion} tokens，${sec(m.avgMs)}/次（p90 ${sec(m.p90Ms)}）${m.cost ? '，約 $' + m.cost : ''}`));
+  if (r.llm.length) {
+    lines.push('', '備援鏈裡失敗的模型呼叫（AuditLog llm:*，只記失敗）：');
+    r.llm.forEach((l) => lines.push(`• ${l.provider}：失敗 ${l.fails} 次（${Object.keys(l.kinds).map((k) => REPORT_KIND_LABEL[k] + ' ' + l.kinds[k]).join('、')}），白等約 ${sec(l.wastedMs)}${l.sample ? '\n    ↳ ' + l.sample : ''}`));
+  }
   lines.push('', '工具（依呼叫次數）：');
   if (!r.tools.length) lines.push('（無工具紀錄）');
   r.tools.slice(0, 15).forEach((x) => {
-    const kinds = Object.keys(x.failKinds).map((k) => ({ params: '參數', not_found: '找不到', permission: '權限', quota: '配額', other: '其他' })[k] + ' ' + x.failKinds[k]).join('、');
+    const kinds = Object.keys(x.failKinds).map((k) => REPORT_KIND_LABEL[k] + ' ' + x.failKinds[k]).join('、');
     lines.push(`• ${x.tool}：${x.calls} 次，失敗 ${x.fails}${kinds ? '（' + kinds + '）' : ''}${x.pending ? '，待審 ' + x.pending : ''}，平均 ${sec(x.avgMs)}${x.maxMs >= REPORT_SLOW_TOOL_MS ? '，最慢 ' + sec(x.maxMs) : ''}`);
     x.samples.forEach((s) => lines.push(`    ↳ ${s}`));
   });
