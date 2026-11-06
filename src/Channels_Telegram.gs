@@ -7,7 +7,7 @@
  * Telegram 會一直重送）。doPost 只做：驗證 → 指令或排 Queue job → 立刻回「收到」。agent 由 queueTick 跑，
  * 結果經 deliverTurnToTelegram_ 送回；待審批的動作附「批准 / 拒絕」按鈕，按下走 callback_query → decideApproval_。
  *
- * 指令：/new（新 session）/status /model [provider id] /skills /white [list|add|delete <email>]（M7 寄信白名單）/web [list|add|delete <域名>]（web_fetch 白名單）/help；
+ * 指令：/new（新 session）/status /model [provider id] /skills /white [list|add|delete <email>]（M7 寄信白名單）/web [list|add|delete <域名>]（web_fetch 白名單）/owner [list|<email> [passkey]|delete <email>]（Email 委託寄件者）/help；
  * 其他文字（含 /<技能名>）原樣交給 runSessionTurn_。
  * 群組：只在「@bot 提到它」「回覆它的訊息」或「/指令」時反應（私聊不變）。白名單成員在群組裡用 /group 切模式：
  *   /group on    群聊模式（Config telegram_open_groups）：全群共用一個 session，非白名單成員 @bot 也能用工具，但那一輪
@@ -44,7 +44,7 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'answer', 'approve', 'deny', 'pending']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'answer', 'approve', 'deny', 'pending']);
 /** /approve 清單一次最多列幾筆（每筆兩個按鈕；Telegram inline keyboard 不宜太長）。 */
 const TELEGRAM_PENDING_MAX = 10;
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -667,6 +667,11 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     report.text = list.text;
     send(list.text, { replyMarkup: list.replyMarkup });
     report.action = 'pending_list'; report.pending = approvals.length; return report;
+  }
+  if (cmd.command === 'owner') {
+    const r = telegramOwnerCommand_(cmd.rest, u, deps);
+    report.text = r.logText; // 給 AuditLog 的版本不含 passkey
+    send(r.text); report.action = 'owner'; return report;
   }
   if (TELEGRAM_LIST_COMMANDS[cmd.command]) {
     report.text = telegramListCommand_(cmd.command, cmd.rest, u, deps);
@@ -785,6 +790,48 @@ function telegramListCommand_(command, rest, u, deps) {
 }
 
 /**
+ * /owner 委託寄件者指令：list / <email> [passkey] / delete <email>。只有白名單成員（owner）會走到這裡。
+ * passkey 只進 Script Property（deps.emailDelegates.get / set 可注入）；回覆文字含新 passkey 時另附 logText（遮掉）給 AuditLog。
+ * @param {string} rest
+ * @param {TelegramUpdate} u
+ * @param {!Object} deps emailDelegates: {get, set}、ownerEmail、cfg、audit
+ * @return {{text: string, logText: string}}
+ */
+function telegramOwnerCommand_(rest, u, deps) {
+  const store = deps.emailDelegates || { get: () => getEmailDelegates_(), set: (m) => setEmailDelegates_(m) };
+  const parts = String(rest || '').trim().split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || 'list').toLowerCase();
+  const by = `Telegram user ${u.userId}${u.username ? ' @' + u.username : ''}`;
+  const usage = '/owner list — 看目前的委託寄件者\n/owner <email> [passkey] — 新增或更換 passkey（不給 passkey 會自動產生 12 碼）\n/owner delete <email> — 移除\n來自委託 email、且主旨或內文含 passkey 的信，會去掉 passkey 後等同你的指令排進 Queue，回覆回同一 thread；沒帶 passkey 的信一律不理。';
+  const warn = deps.cfg && !deps.cfg.emailEnabled ? '\n⚠ Email 指令信目前未啟用（管理頁「通道」勾啟用），啟用後才會掃描委託者的信。' : '';
+  const same = (text) => ({ text, logText: text });
+  if (sub === 'list' || sub === 'ls') {
+    const emails = Object.keys(store.get()).sort();
+    return same(emails.length ? `委託寄件者（${emails.length} 位，passkey 不顯示）：\n${emails.map((e) => '• ' + e).join('\n')}${warn}\n\n${usage}` : `目前沒有委託寄件者。${warn}\n\n${usage}`);
+  }
+  if (sub === 'delete' || sub === 'del' || sub === 'remove' || sub === 'rm') {
+    if (!parts[1]) return same(`請給要移除的 email。\n${usage}`);
+    const r = deleteEmailDelegate_(parts[1], { get: store.get, set: store.set, audit: deps.audit, by });
+    return same(r.removed ? `已移除委託寄件者 ${r.email}（剩 ${r.total} 位）。` : `名單裡沒有 ${r.email}（共 ${r.total} 位）。`);
+  }
+  if (sub === 'add' || sub === 'set') parts.shift();
+  if (!parts[0]) return same(`請給 email。\n${usage}`);
+  if (parts.length > 2) return same(`passkey 不能含空白（只能一個詞）。\n${usage}`);
+  let r;
+  try {
+    r = upsertEmailDelegate_(parts[0], parts[1] || '', { ownerEmail: deps.ownerEmail, get: store.get, set: store.set, audit: deps.audit, by });
+  } catch (err) {
+    return same(`${err && err.message || err}\n${usage}`);
+  }
+  const head = `${r.existed ? '已更換' : '已新增'}委託寄件者 ${r.email}（共 ${r.total} 位）。`;
+  const tail = `\n對方寄信給 ${deps.ownerEmail || '你'} 時，把 passkey 放在主旨或內文任一處即可（agent 會去掉它）。${warn}`;
+  if (r.generated) {
+    return { text: `${head}\npasskey：${r.passkey}\n（只顯示這一次；請用安全管道交給對方，忘了就重設一次。）${tail}`, logText: `${head}\npasskey：（自動產生，已遮）${tail}` };
+  }
+  return { text: `${head}\n使用你給的 passkey。${tail}`, logText: `${head}\n使用你給的 passkey。${tail}` };
+}
+
+/**
  * Telegram 來的 turn job payload。
  * @param {string} message
  * @param {TelegramUpdate} u
@@ -829,6 +876,8 @@ function telegramWebhook_(e) {
       skills: () => enabledSkills_(getSkillIndex_()),
       setConfig: (values) => setConfigValues_(values),
       toolCfg: getToolConfig_(),
+      ownerEmail: getOwnerEmail_(),
+      emailDelegates: { get: () => getEmailDelegates_(), set: (m) => setEmailDelegates_(m) },
     });
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };

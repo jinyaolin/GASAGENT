@@ -553,7 +553,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 群組 | **先關 bot 的隱私模式**：Telegram 預設的隱私模式下，群組裡 `@bot …` 的一般訊息**根本不會送到 bot**（只有 /指令、回覆 bot 的訊息會到），所以 @bot 沒反應。到 **@BotFather → `/setprivacy` → 選 bot → Disable**，然後把 bot 退出群組再加回來（或把 bot 設成群組管理員，管理員永遠收得到全部訊息）。`/group` 指令與 Doctor（`tg_privacy`）會用 `getMe` 的 `can_read_all_group_messages` 檢查並提醒。<br>把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 幫忙；但**非白名單成員觸發的那一輪**是 principal `group_member`（M7-A，見「安全」）：只能用 Config `telegram_member_toolsets`（預設 `web` / `skill` / `session`）的讀取工具，owner 的 Gmail / Drive / Docs / Sheets / Slides / Calendar **一律不可讀**（連工具清單都看不到；被擋時回覆末尾附一句中性說明），`memory` / `cronjob` 永遠不開放；R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive。owner 可在管理頁「通道」逐 toolset 放寬（Doctor 會提醒放寬了 Workspace）<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
-| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）—— 兩者只有白名單成員能用、異動記 AuditLog、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）—— 三者只有白名單成員能用、異動記 AuditLog、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼；「更換 token」先 getMe 驗證才寫入）、白名單 user id、部署 B 網址、secret（儲存時自動產生；「重新產生 secret」會自動重登 webhook）、群聊模式成員可用的 toolset、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
 ### Email 指令信
@@ -561,7 +561,8 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 項目 | 說明 |
 |---|---|
 | 觸發 | 寄件者 = `OWNER_EMAIL`（自己寄給自己）且 thread 貼有 Gmail 標籤 `agent/inbox`（Config `email_inbox_label`；可在 Gmail 設篩選器自動貼標，例如 `from:me to:me subject:[agent]`） |
-| 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`，每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
+| 委託寄件者 | Telegram `/owner <email> [passkey]`（或管理頁「通道 → 委託寄件者」）登記別人的信箱：這個 email 寄來、**主旨或內文含 passkey** 的信，去掉 passkey 後等同 owner 的指令排進 Queue（payload `email_delegate`），回覆回同一 thread（對方收到）。passkey 只存 Script Property `EMAIL_DELEGATE_KEYS`（JSON `{email: passkey}`），列表與 AuditLog 都不顯示；不給 passkey 會自動產生 12 碼、只顯示一次。沒帶 passkey 的信一律不理、不加星（From 可偽造，passkey 才是驗證）。不要求標籤（對方貼不到你的標籤）；`/owner delete <email>` 移除 |
+| 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`（每位委託寄件者另搜 `from:<email> newer_than:7d -is:starred`），每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
 | 內文 | 去掉 `>` 引用、`On … wrote:` 之後、`-- ` 簽名檔，截 8000 字；內文全是引用就用主旨 |
 | 回覆 | `thread.reply(text, {name:'GAS Agent'})` 進同一 thread，寄件者是 owner 本人；送出後把自己的回覆加星避免被當成指令。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕）；Telegram 通道開著時會同時推帶按鈕的 Telegram 通知，回信會標「也已推到 Telegram」 |
 | 設定 | 管理頁「通道」：啟用、標籤、掃描間隔、「建立標籤」「立刻掃一次」 |
@@ -663,6 +664,17 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 ### 向 owner 提問（`session_ask_owner`）
 
 無人模式的任務（排程 / 事件）遇到必須由 owner 決定的事，呼叫 `session_ask_owner({question, options?})`：系統在 Approvals 寫一列 `q_…`、把問題推到 owner 的 Telegram，本輪立刻結束（job 狀態 `needs_input`，排程 / 事件暫不投遞）。你在 Telegram **直接「回覆」那則問題訊息**、或輸入 `/answer [q_id] <回答>`、或在管理頁「紀錄 → 審批」填答案，系統就以系統訊息把答案接回原 session 續跑；排程 / 事件的續跑結果會投遞，也會回到你回答的 Telegram chat。互動模式（聊天台 / Telegram 對話）用這個工具會回錯，模型應直接在回覆裡問；群組成員看不到此工具（`ownerOnly`）。無人模式的 system 指示已改成「能自行判斷就判斷，只有做錯有實際後果的事才問」。
+
+### Email 委託寄件者（`/owner`）
+
+owner 以外的人也能用 Email 下指令，但要先由 owner 登記、且每封信帶 passkey：
+
+1. Telegram 對 bot 說 `/owner alice@corp.tw`（不給 passkey 會自動產生 12 碼並回給你，只顯示一次；也可自己指定 `/owner alice@corp.tw MyKey-2026`，6–64 字元、不含空白）。管理頁「通道 → 委託寄件者」有同樣的新增 / 移除。
+2. 把 passkey 用安全管道交給對方。對方寄信到 owner 的信箱，主旨或內文任一處放 passkey，例如主旨 `請整理 Q3 報表 MyKey-2026`。
+3. 下次掃描（`email_scan_every_minutes`）會把這封信加星、去掉 passkey 後以 owner 身分排一個 `turn` job（principal 仍是 owner：工具 / 審批策略與 owner 相同，外寄等 X 類動作照常送 owner 審批、Telegram 推按鈕）；agent 的回覆回到同一 thread，對方會收到。
+4. `/owner list` 看名單（不顯示 passkey）、`/owner delete alice@corp.tw` 移除、再 `/owner alice@corp.tw` 一次 = 換新 passkey。異動記 AuditLog `security:email_delegate:*`（不含 passkey）。
+
+注意：委託者的信**不要求貼標籤**，所以掃描會看這些寄件者近 7 天所有未加星的信；沒帶 passkey 的信只是略過（不加星、不回信），每次掃描會再看一次，單一寄件者最多 20 串。
 
 ### Telegram 審批指令（`/approve`）
 
@@ -767,6 +779,7 @@ node scripts/local-tests.js
 | Telegram 回「收到」但一直沒結果 | trigger 沒跑或 job 失敗：Doctor 看 trigger、「紀錄 → Queue」看該 job 的狀態與錯誤；Telegram 回覆失敗會記在 job 的 error（例如 token 失效） |
 | Telegram webhook 狀態顯示 `Wrong response from the webhook: 302` | 部署 B 不是「任何人」或網址填成部署 A 的；用 `scripts/deploy.sh` 重推 B，確認「通道」填的是部署 B 的 `/exec` |
 | 寄給自己的指令信沒被處理 | 沒貼標籤、寄件者不是 OWNER_EMAIL、已加星、或超過 7 天；「通道」按「立刻掃一次」看報告；Doctor 看旗標 |
+| 委託寄件者的信沒被處理 | 主旨與內文都沒有 passkey（引用區塊 `>` 裡的不算）、passkey 大小寫不符、Email 指令信未啟用、已加星、或超過 7 天；Telegram `/owner list` 看名單、「通道」按「立刻掃一次」看報告（會列出寄件者） |
 | agent 把自己的回信當成指令迴圈 | 不該發生：回信顯示名稱 `GAS Agent` 會被排除且已加星；若手動把星星拿掉就會重跑 |
 
 ## 里程碑

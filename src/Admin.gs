@@ -899,7 +899,7 @@ function adminGetChannelSettings() {
     workspaceToolsets: WORKSPACE_TOOLSETS.slice(),
     defaultMemberToolsets: PRINCIPAL_DEFAULT_TOOLSETS.group_member.slice(),
     telegram: { hasToken: !!token, tokenHint: keyHint_(token), hasSecret: !!secret, secretHint: secret ? secret.slice(0, 4) + '…' + secret.slice(-4) : '', webhookUrl, webhookUrlError },
-    email: { owner: getOwnerEmail_(), nextScan: getProp_(PROP.EMAIL_NEXT_SCAN) },
+    email: { owner: getOwnerEmail_(), nextScan: getProp_(PROP.EMAIL_NEXT_SCAN), delegates: Object.keys(getEmailDelegates_()).sort() },
     adminUrl: (() => { try { return ScriptApp.getService().getUrl() || ''; } catch (err) { return ''; } })(),
   };
 }
@@ -1004,6 +1004,31 @@ function adminEmailScanNow() {
   ensureGmailLabel_(cfg.emailInboxLabel);
   const r = scanEmailInbox_({ cfg, ownerEmail: getOwnerEmail_(), gmail: defaultEmailGmail_(cfg), sessionStore: sheetSessionStore_(), enqueue: (type, payload, sid) => enqueue_(type, payload, sid) });
   refreshEmailNextScanProp_(cfg, new Date(Date.now() + cfg.emailScanEveryMinutes * 60000));
+  return r;
+}
+
+/**
+ * 通道分頁：新增 / 更換委託寄件者（同 Telegram /owner）。passkey 空 → 自動產生，只在回傳值顯示一次。
+ * @param {string} email
+ * @param {string=} passkey
+ * @return {{email: string, passkey: string, generated: boolean, existed: boolean, total: number, delegates: !Array<string>}}
+ */
+function adminSetEmailDelegate(email, passkey) {
+  assertOwner();
+  const r = upsertEmailDelegate_(email, passkey || '', { ownerEmail: getOwnerEmail_(), by: '管理頁' });
+  r.delegates = Object.keys(getEmailDelegates_()).sort();
+  return r;
+}
+
+/**
+ * 通道分頁：移除委託寄件者。
+ * @param {string} email
+ * @return {{email: string, removed: boolean, total: number, delegates: !Array<string>}}
+ */
+function adminDeleteEmailDelegate(email) {
+  assertOwner();
+  const r = deleteEmailDelegate_(email, { by: '管理頁' });
+  r.delegates = Object.keys(getEmailDelegates_()).sort();
   return r;
 }
 

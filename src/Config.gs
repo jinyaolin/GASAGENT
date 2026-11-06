@@ -38,6 +38,8 @@ const PROP = Object.freeze({
   EMAIL_NEXT_SCAN: 'EMAIL_NEXT_SCAN',
   /** M7-B：最早到期的 watcher 檢查時間（ISO）；空 = 沒有啟用的 watcher。 */
   WATCH_NEXT_CHECK: 'WATCH_NEXT_CHECK',
+  /** 委託寄件者（Telegram /owner）：JSON {email: passkey}。只在 Script Properties，管理頁與 Telegram 只列 email。 */
+  EMAIL_DELEGATE_KEYS: 'EMAIL_DELEGATE_KEYS',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 

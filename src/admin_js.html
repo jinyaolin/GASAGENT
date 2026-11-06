@@ -1831,6 +1831,42 @@
     const $label = el('input', { type: 'text' }); $label.value = cfg.emailInboxLabel;
     const $every = el('input', { type: 'number', min: 1, max: 1440 }); $every.value = cfg.emailScanEveryMinutes;
     const $emMsg = el('div');
+    const $dgEmail = el('input', { type: 'email', placeholder: 'someone@example.com' });
+    const $dgKey = el('input', { type: 'text', placeholder: '（留空自動產生）' });
+    const $delegates = el('div');
+    function renderDelegates(list) {
+      $delegates.innerHTML = '';
+      if (!list.length) { $delegates.append(el('div', { class: 'meta' }, '目前沒有委託寄件者。')); return; }
+      $delegates.append(el('ul', { class: 'plain' }, list.map((e) => el('li', {}, [
+        el('code', {}, e), ' ',
+        el('button', { class: 'small', onclick: () => deleteDelegate(e) }, '移除'),
+      ]))));
+    }
+    renderDelegates(data.email.delegates || []);
+    async function setDelegate() {
+      $emMsg.innerHTML = '';
+      const email = $dgEmail.value.trim();
+      if (!email) { $emMsg.append(errorBox(new Error('請填 email。'))); return; }
+      try {
+        const r = await call('adminSetEmailDelegate', email, $dgKey.value.trim());
+        renderDelegates(r.delegates);
+        $dgEmail.value = ''; $dgKey.value = '';
+        $emMsg.append(el('span', { class: 'summary ok' }, `${r.existed ? '已更換' : '已新增'} ${r.email}。` + (r.generated ? `passkey：${r.passkey}（只顯示這一次，請用安全管道交給對方）` : '使用你填的 passkey。')));
+      } catch (err) {
+        $emMsg.append(errorBox(err));
+      }
+    }
+    async function deleteDelegate(email) {
+      if (!confirm(`移除委託寄件者 ${email}？`)) return;
+      $emMsg.innerHTML = '';
+      try {
+        const r = await call('adminDeleteEmailDelegate', email);
+        renderDelegates(r.delegates);
+        $emMsg.append(el('span', { class: 'summary ok' }, r.removed ? `已移除 ${r.email}。` : `名單裡沒有 ${r.email}。`));
+      } catch (err) {
+        $emMsg.append(errorBox(err));
+      }
+    }
     const emPanel = el('div', { class: 'panel' }, [
       el('h3', {}, 'Email 指令信'),
       el('div', { class: 'form-grid' }, [
@@ -1839,6 +1875,16 @@
         field('每幾分鐘掃一次', $every, '由每分鐘 trigger 帶動；沒到時間不開 Gmail'),
       ]),
       el('div', { class: 'meta' }, `處理過的指令信會加星（★）；agent 的回覆用 thread 回信（寄件者顯示 GAS Agent）並加星。${data.email.nextScan ? '下次掃描 ' + data.email.nextScan.slice(0, 16).replace('T', ' ') + 'Z' : '尚未排程掃描'}`),
+      el('h4', {}, '委託寄件者'),
+      el('div', { class: 'meta' }, '這些 email 寄來、主旨或內文含 passkey 的信，會去掉 passkey 後等同你的指令排進 Queue（回覆回同一 thread，對方會收到）；沒帶 passkey 的信不理。passkey 只存在 Script Properties，這裡不顯示；Telegram 也可用 /owner <email> [passkey] 設定。'),
+      $delegates,
+      el('div', { class: 'form-grid' }, [
+        field('Email', $dgEmail),
+        field('passkey', $dgKey, '留空會自動產生 12 碼，只顯示一次；6–64 字元、不含空白'),
+      ]),
+      el('div', { class: 'toolbar' }, [
+        el('button', { onclick: () => setDelegate() }, '新增 / 更換 passkey'),
+      ]),
       el('div', { class: 'toolbar' }, [
         el('button', { class: 'primary', onclick: () => save() }, '儲存'),
         el('button', { onclick: () => em('adminEmailEnsureLabel', '標籤已就位') }, '建立標籤'),
@@ -1921,7 +1967,7 @@
       $emMsg.innerHTML = '';
       try {
         const r = await call(fn);
-        $emMsg.append(el('span', { class: 'summary ok' }, okText || `掃了 ${r.scanned} 串，排入 ${r.enqueued.length} 個 job${r.enqueued.length ? '：' + r.enqueued.map((x) => x.subject || x.threadId).join('、') : ''}；略過 ${r.skipped}`));
+        $emMsg.append(el('span', { class: 'summary ok' }, okText || `掃了 ${r.scanned} 串${r.delegates ? '（含 ' + r.delegates + ' 位委託寄件者）' : ''}，排入 ${r.enqueued.length} 個 job${r.enqueued.length ? '：' + r.enqueued.map((x) => (x.subject || x.threadId) + (x.from && x.from !== data.email.owner ? '（' + x.from + '）' : '')).join('、') : ''}；略過 ${r.skipped}`));
       } catch (err) {
         $emMsg.append(errorBox(err));
       }
