@@ -69,22 +69,25 @@ function getDbUrl_() {
 }
 
 /**
- * 開既有 DB；若 Properties 沒有 id、檔案打不開或已在垃圾桶，就建一個新的並寫回 Properties。
+ * 開既有 DB；只有 Properties **沒有 id** 才建新的並寫回。id 有設但打不開（API 暫時沒開、授權過期、檔案在垃圾桶）一律 throw，
+ * **絕不**覆寫 DB_SPREADSHEET_ID——2026-11-07 default 掛標準 GCP 專案時 Drive API 還沒開，舊版在這裡自動建了新 DB 把舊 id 蓋掉。
+ * 真的要重建：到編輯器「專案設定 → 指令碼屬性」清掉 DB_SPREADSHEET_ID 再跑 installAgent()。
  * @return {{spreadsheet: GoogleAppsScript.Spreadsheet.Spreadsheet, created: boolean}}
  */
 function openOrCreateDb_() {
   const id = getDbSpreadsheetId_();
   if (id) {
+    let existing;
     try {
-      const existing = SpreadsheetApp.openById(id);
-      if (!DriveApp.getFileById(id).isTrashed()) {
-        dbSpreadsheetCache_ = existing;
-        return { spreadsheet: existing, created: false };
-      }
+      existing = SpreadsheetApp.openById(id);
     } catch (err) {
-      // 打不開就往下建新的；舊 id 會被覆寫。
-      console.warn(`既有 DB (${id}) 無法開啟，將重建：${err && err.message}`);
+      throw new Error(`既有 DB（${id}）無法開啟，不會自動重建：${err && err.message || err}。若是剛掛標準 GCP 專案，先到 Cloud Console 啟用 Drive / Sheets 等 API；真的要重建請先清掉指令碼屬性 DB_SPREADSHEET_ID。`);
     }
+    let trashed = false;
+    try { trashed = DriveApp.getFileById(id).isTrashed(); } catch (err) { throw new Error(`既有 DB（${id}）無法經 Drive 讀取，不會自動重建：${err && err.message || err}。`); }
+    if (trashed) throw new Error(`既有 DB（${id}）在垃圾桶內，不會自動重建：請到 Drive 還原它；真的要重建請先清掉指令碼屬性 DB_SPREADSHEET_ID。`);
+    dbSpreadsheetCache_ = existing;
+    return { spreadsheet: existing, created: false };
   }
   const created = SpreadsheetApp.create(DB_NAME);
   setProp_(PROP.DB_SPREADSHEET_ID, created.getId());

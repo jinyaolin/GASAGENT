@@ -832,7 +832,8 @@ node scripts/local-tests.js
 | `/upgrade` 說 Apps Script API 尚未啟用 / 401 | 帳號主人到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」；401 是 manifest 還沒有 `script.projects` / `script.deployments` 或沒重新授權：編輯器執行 `installAgent()`。Doctor「程式升級」同一項 |
 | `/upgrade` 說「新版需要新的 OAuth scope」 | 刻意擋下：這版要維護者 `scripts/deploy.sh` 推，各帳號在編輯器執行 `installAgent()` 重新授權 |
 | `/upgrade` / Doctor 說「有 N 個 webapp.access=… 的部署」 | 專案裡有多餘的版本部署；會自動取版本最新的那個（deploy.sh 每次都把在用的推到最新版）並提醒，版本相同才拒絕。到編輯器「部署 → 管理部署」封存不用的，或把要更新的部署 id 寫到 Script Property `UPGRADE_DEPLOY_A` / `UPGRADE_DEPLOY_B` |
-| 掛標準 GCP 專案後 Doctor 說「啟用以下 API 時權限遭拒：GCP 專案 … 的 drive」 | 標準專案不會自動開 API：到 Cloud Console「API 和服務 → 程式庫」把 Google Drive / Sheets / Docs / Slides / Gmail / Calendar API 都啟用 |
+| 掛標準 GCP 專案後 Doctor 說「啟用以下 API 時權限遭拒：GCP 專案 … 的 drive」 | 標準專案不會自動開 API：到 Cloud Console「API 和服務 → 程式庫」把 Google Drive / Sheets / Docs / Slides / Gmail / Calendar API 都啟用。**先開 API 再跑 `installAgent()`** |
+| `installAgent()` 建了一個新的「GAS Agent DB」，舊資料不見 | v0.8.3 以前的 bug：DB 暫時打不開（例如 API 還沒開）就重建並覆寫 id。舊試算表還在 Drive：編輯器「專案設定 → 指令碼屬性」把 `DB_SPREADSHEET_ID` 改回舊 id（Doctor / AuditLog 之前印過），新建的那份丟垃圾桶。v0.8.4 起 id 有設就絕不重建 |
 | 升級後 Telegram 沒反應 / 管理頁開不了 | 編輯器執行 `upgradeRollbackNow()` 以 Drive 備份還原（部署 A / B 一起切回）；或維護者 `deploy.sh` 重推。升級前後各一列 AuditLog `security:upgrade`，Queue 的 upgrade job 有錯誤訊息 |
 | `/upgrade` 一直說已是最新但 GitHub 明明有新 commit | 只 push 沒跑 `scripts/release.sh`（release.json 沒更新），或 raw CDN 快取（最多 5 分鐘） |
 
