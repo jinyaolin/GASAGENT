@@ -3,7 +3,9 @@
  * @fileoverview GAS Agent 安裝 / 升級授權服務（node:http，零依賴）。掛在 Caddy 的 /agent 底下（handle_path 會剝掉前綴，所以這裡的路由沒有 /agent；
  * 對外連結與 OAuth redirect_uri 一律用 BASE_URL 組）。
  *
- *   GET  /                      首頁
+ *   GET  /                      首頁（產品介紹）
+ *   GET  /install               安裝前準備（開 Apps Script API、看授權畫面說明）
+ *   GET  /privacy               隱私權政策與服務條款
  *   GET  /install/start         → Google 授權（mode install）
  *   GET  /upgrade/start         → Google 授權（mode login，既有 agent 取升級授權）
  *   GET  /oauth/callback        Google 回來：換 token → install：建專案 / 灌 release / 建 A B 部署；兩種 mode 都產生取件碼
@@ -20,7 +22,6 @@ const release = require('./release');
 const pages = require('./pages');
 const { PickupStore, StateStore, RateLimit } = require('./pickup');
 
-const PRIVACY_URL = 'https://github.com/jinyaolin/GASAGENT/blob/main/PRIVACY.md';
 
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
@@ -62,6 +63,11 @@ function createApp(opts) {
   const pickupLimit = new RateLimit(20, 60 * 1000, now);
   const startLimit = new RateLimit(30, 60 * 1000, now);
   const redirectUri = config.baseUrl + '/oauth/callback';
+  const privacyUrl = config.baseUrl + '/privacy';
+  pages.setBaseUrl(config.baseUrl);
+  const currentVersion = async () => {
+    try { return (await release.fetchRelease(config.releaseRepo, config.releaseRef, fetchFn)).version; } catch (e) { return '?'; }
+  };
 
   const startAuth = (res, mode, req) => {
     if (!startLimit.hit(clientIp(req))) return sendHtml(res, 429, pages.error({ message: '請求太頻繁，請一分鐘後再試。', retryUrl: config.baseUrl + '/' }));
@@ -122,10 +128,10 @@ function createApp(opts) {
     const p = url.pathname.replace(/\/+$/, '') || '/';
     try {
       if (req.method === 'GET' && p === '/') {
-        let version = '?';
-        try { version = (await release.fetchRelease(config.releaseRepo, config.releaseRef, fetchFn)).version; } catch (e) { version = '?'; }
-        return sendHtml(res, 200, pages.landing({ baseUrl: config.baseUrl, repo: config.releaseRepo, version, privacyUrl: PRIVACY_URL }));
+        return sendHtml(res, 200, pages.landing({ baseUrl: config.baseUrl, repo: config.releaseRepo, version: await currentVersion(), privacyUrl }));
       }
+      if (req.method === 'GET' && p === '/install') return sendHtml(res, 200, pages.prep({ baseUrl: config.baseUrl, version: await currentVersion(), privacyUrl }));
+      if (req.method === 'GET' && p === '/privacy') return sendHtml(res, 200, pages.privacy({ baseUrl: config.baseUrl, ttlHours: config.pickupTtlHours }));
       if (req.method === 'GET' && p === '/install/start') return startAuth(res, 'install', req);
       if (req.method === 'GET' && p === '/upgrade/start') return startAuth(res, 'login', req);
       if (req.method === 'GET' && p === '/oauth/callback') return await callback(url, res);

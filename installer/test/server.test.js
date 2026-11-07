@@ -71,7 +71,15 @@ test('首頁、start 轉到 Google、state 驗證', async () => {
     const html = await home.text();
     assert.match(html, /GAS Agent 安裝/);
     assert.match(html, /v0\.9\.0/);
-    assert.match(html, /https:\/\/example\.test\/agent\/install\/start/);
+    assert.match(html, /https:\/\/example\.test\/agent\/install"/, '主 CTA 先到安裝前準備頁');
+    const prep = await fetch(base + '/install');
+    assert.equal(prep.status, 200);
+    const prepHtml = await prep.text();
+    assert.match(prepHtml, /https:\/\/script\.google\.com\/home\/usersettings/, '準備頁帶去開 Apps Script API');
+    assert.match(prepHtml, /https:\/\/example\.test\/agent\/install\/start/, '準備頁的按鈕才去 Google');
+    const priv = await fetch(base + '/privacy');
+    assert.equal(priv.status, 200);
+    assert.match(await priv.text(), /隱私權政策/);
     const start = await fetch(base + '/install/start', { redirect: 'manual' });
     assert.equal(start.status, 302);
     const loc = new URL(start.headers.get('location'));
