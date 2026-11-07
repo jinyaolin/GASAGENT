@@ -44,7 +44,7 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'answer', 'approve', 'deny', 'pending', 'stats']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'email', 'answer', 'approve', 'deny', 'pending', 'stats']);
 /** /approve 清單一次最多列幾筆（每筆兩個按鈕；Telegram inline keyboard 不宜太長）。 */
 const TELEGRAM_PENDING_MAX = 10;
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -672,6 +672,10 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     const r = telegramOwnerCommand_(cmd.rest, u, deps);
     report.text = r.logText; // 給 AuditLog 的版本不含 passkey
     send(r.text); report.action = 'owner'; return report;
+  }
+  if (cmd.command === 'email') {
+    report.text = telegramEmailCommand_(cmd.rest, u, deps);
+    send(report.text); report.action = 'email'; return report;
   }
   if (TELEGRAM_LIST_COMMANDS[cmd.command]) {
     report.text = telegramListCommand_(cmd.command, cmd.rest, u, deps);
@@ -848,6 +852,64 @@ function telegramOwnerCommand_(rest, u, deps) {
     return { text: `${head}\npasskey：${r.passkey}\n（只顯示這一次；請用安全管道交給對方，忘了就重設一次。）${tail}`, logText: `${head}\npasskey：（自動產生，已遮）${tail}` };
   }
   return { text: `${head}\n使用你給的 passkey。${tail}`, logText: `${head}\n使用你給的 passkey。${tail}` };
+}
+
+/**
+ * /email 指令：看狀態 / on / off / name <名稱> / every <分鐘>。只動低風險的 Email 設定（token、secret、白名單 user id 仍只在管理頁）。
+ * 寫入走 saveChannelConfig_（會順手把 EMAIL_NEXT_SCAN 旗標對齊：啟用立刻掃、停用清掉）；異動記 AuditLog security:email_channel:<sub>。
+ * @param {string} rest
+ * @param {TelegramUpdate} u
+ * @param {!Object} deps cfg（會被更新成存檔後的值）、saveChannel(values) → ChannelConfig（預設 saveChannelConfig_）、emailDelegates、audit
+ * @return {string}
+ */
+function telegramEmailCommand_(rest, u, deps) {
+  const save = deps.saveChannel || ((values) => saveChannelConfig_(values));
+  const parts = String(rest || '').trim().split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || 'status').toLowerCase();
+  const by = `Telegram user ${u.userId}${u.username ? ' @' + u.username : ''}`;
+  const usage = '/email — 看目前狀態\n/email on | off — 啟用 / 停用 Email 指令信掃描（/owner 委託者的信也靠它）\n/email name <名稱> — 回覆與投遞郵件的寄件者顯示名稱（寄件地址仍是你；別設成跟你自己一樣）\n/email every <分鐘> — 掃描間隔（1–1440）\n標籤、委託寄件者在管理頁「通道」與 /owner。';
+  const status = (cfg) => {
+    let delegates = 0;
+    try { delegates = Object.keys(deps.emailDelegates ? deps.emailDelegates.get() : getEmailDelegates_()).length; } catch (err) { /* 忽略 */ }
+    const next = getProp_(PROP.EMAIL_NEXT_SCAN);
+    return [`Email 指令信：${cfg.emailEnabled ? '✅ 啟用' : '⛔ 未啟用（含委託者的信都不會處理）'}`,
+      `• 標籤：${cfg.emailInboxLabel}（owner 自己寄給自己的信要貼這個標籤；委託者不用）`,
+      `• 掃描間隔：每 ${cfg.emailScanEveryMinutes} 分鐘${cfg.emailEnabled ? `，下次 ${next ? fmtDate_(new Date(next)) : '（旗標空，存一次設定會補）'}` : ''}`,
+      `• 回覆的寄件者名稱：${cfg.emailSenderName}`,
+      `• 委託寄件者：${delegates} 位（/owner）`].join('\n');
+  };
+  const cfg = deps.cfg || getChannelConfig_();
+  if (sub === 'status' || sub === 'list' || sub === 'show') return `${status(cfg)}\n\n${usage}`;
+  let values;
+  let what;
+  if (sub === 'on' || sub === 'off') {
+    const enable = sub === 'on';
+    if (enable === cfg.emailEnabled) return `Email 指令信已經是${enable ? '啟用' : '停用'}。\n\n${status(cfg)}`;
+    values = { email_enabled: enable };
+    what = enable ? '啟用 Email 指令信掃描' : '停用 Email 指令信掃描';
+  } else if (sub === 'name') {
+    const name = parts.slice(1).join(' ').trim();
+    if (!name) return `請給名稱，例如 /email name ELOM 助理\n${usage}`;
+    if (name.length > 80) return '名稱最多 80 字。';
+    values = { email_sender_name: name };
+    what = `寄件者名稱改為「${name}」`;
+  } else if (sub === 'every') {
+    const n = Number(parts[1]);
+    if (!/^\d+$/.test(parts[1] || '') || n < 1 || n > 1440) return `請給 1–1440 的分鐘數，例如 /email every 3\n${usage}`;
+    values = { email_scan_every_minutes: n };
+    what = `掃描間隔改為每 ${n} 分鐘`;
+  } else {
+    return `不認得「${sub}」。\n${usage}`;
+  }
+  let next;
+  try {
+    next = save(values);
+  } catch (err) {
+    return `存檔失敗：${err && err.message || err}`;
+  }
+  if (deps.cfg) Object.assign(deps.cfg, next);
+  securityAudit_(`email_channel:${sub}`, `${what}（${by}）`, deps.audit);
+  return `已${what}。\n\n${status(next)}`;
 }
 
 /**

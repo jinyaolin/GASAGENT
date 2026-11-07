@@ -3672,6 +3672,27 @@ function testEmailDelegates_() {
   f.deps.ownerEmail = 'owner@x.com';
   f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, 222', telegram_owner_chat_id: '111', email_enabled: 'TRUE' });
   const t = (text, uid) => handleTelegramUpdate_(tgMessage_(text, uid || 111), f.deps);
+  // Telegram /email：狀態 / on / off / name / every；寫入走 saveChannel（注入）、AuditLog security:email_channel:*
+  const savedValues = [];
+  const audits = f.audits;
+  f.deps.saveChannel = (values) => { savedValues.push(values); const merged = Object.assign({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111', email_enabled: f.deps.cfg.emailEnabled, email_sender_name: f.deps.cfg.emailSenderName, email_scan_every_minutes: f.deps.cfg.emailScanEveryMinutes }, values); return parseChannelConfig_(merged); };
+  let e = t('/email');
+  assert_(e.action === 'email' && /✅ 啟用/.test(e.text) && /每 5 分鐘/.test(e.text) && /寄件者名稱：GAS Agent/.test(e.text) && /委託寄件者：0 位/.test(e.text), '/email 狀態：' + e.text);
+  e = t('/email on');
+  assert_(/已經是啟用/.test(e.text) && savedValues.length === 0, '/email on 已啟用不重存');
+  e = t('/email off');
+  assertEqual_([savedValues[0], f.deps.cfg.emailEnabled, audits[audits.length - 1].tool], [{ email_enabled: false }, false, 'security:email_channel:off'], '/email off 存檔 + 更新 cfg + AuditLog');
+  assert_(/已停用 Email 指令信掃描/.test(e.text) && /⛔ 未啟用/.test(e.text), '/email off 文字：' + e.text);
+  e = t('/email name ELOM 助理');
+  assertEqual_([savedValues[1], f.deps.cfg.emailSenderName], [{ email_sender_name: 'ELOM 助理' }, 'ELOM 助理'], '/email name 多字名稱');
+  e = t('/email every 3');
+  assertEqual_([savedValues[2], f.deps.cfg.emailScanEveryMinutes], [{ email_scan_every_minutes: 3 }, 3], '/email every');
+  assert_(/1–1440/.test(t('/email every 0').text) && /1–1440/.test(t('/email every abc').text) && /請給名稱/.test(t('/email name').text) && /不認得/.test(t('/email foo').text), '/email 參數錯誤提示');
+  assertEqual_(savedValues.length, 3, '錯誤參數不存檔');
+  f.deps.saveChannel = () => { throw new Error('boom'); };
+  assert_(/存檔失敗：boom/.test(t('/email on').text), '存檔失敗回錯誤');
+  delete f.deps.saveChannel;
+  f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, 222', telegram_owner_chat_id: '111', email_enabled: 'TRUE' });
   let r = t('/owner');
   assert_(r.action === 'owner' && /目前沒有委託寄件者/.test(r.text) && /\/owner <email> \[passkey\]/.test(r.text), '/owner = list：' + r.text);
   r = t('/owner Alice@Corp.tw');
