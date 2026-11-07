@@ -954,7 +954,7 @@ function testAskOwner_() {
   const sessionDeps = fakeQueueSessionDeps_(ask.chat, { executeDeps: execDeps });
   const docs = [];
   const job = enqueue_('cron', cronJobPayload_(c), '', { store: q.store });
-  queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now: nowAsk, sessionDeps, deliverDeps: { createDoc: (t, b) => { docs.push(t); return { id: 'd', url: 'u' }; } } });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now: nowAsk, sessionDeps, deliverDeps: { createDoc: (t, b) => { docs.push(t); return { id: 'd', url: 'u' }; } } });
   const j = q.store.get(job.id);
   assertEqual_([j.state, docs.length, j.payload.result.stopped], ['needs_input', 0, 'needs_input'], 'job needs_input、不投遞');
   assert_(/needs_input/.test(cron.store.get(c.id).last_status), 'cron last_status');
@@ -976,7 +976,7 @@ function testAskOwner_() {
   const deps2 = fakeQueueSessionDeps_(cont2.chat, { executeDeps: execDeps });
   deps2.store = sessionDeps._ss.store; deps2._ss = sessionDeps._ss;
   const tgSent = [];
-  queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now: nowAsk, sessionDeps: deps2, deliverDeps: { createDoc: (t, b) => { docs.push(t); return { id: 'd', url: 'u' }; } }, channelDeps: { sendTelegram: (cid, text) => { tgSent.push({ cid, text }); return { messages: 1 }; } } });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now: nowAsk, sessionDeps: deps2, deliverDeps: { createDoc: (t, b) => { docs.push(t); return { id: 'd', url: 'u' }; } }, channelDeps: { sendTelegram: (cid, text) => { tgSent.push({ cid, text }); return { messages: 1 }; } } });
   const done = q.store.get(ans.continuation);
   assertEqual_([done.state, docs.length, tgSent.length, tgSent[0].cid], ['done', 1, 1, '999'], '續跑完成：投遞 doc、也回到 Telegram');
   assert_(/owner 的回答/.test(cont2.calls[0].messages[cont2.calls[0].messages.length - 1].content), '回答以 user 訊息進模型');
@@ -2172,46 +2172,46 @@ function testQueueStateMachine_() {
   const okRun = (j) => { ran.push(j.id); return { state: 'done', result: { text: 'ok ' + j.payload.message } }; };
   let t = Date.parse('2026-11-02T01:00:00Z');
   const now = () => t;
-  let r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  let r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   assertEqual_([r.skipped, r.ran.id, r.ran.state, r.remaining, ran], ['', job.id, 'done', 0, [job.id]], 'tick 跑完一個 job');
   const done = q.store.get(job.id);
   assertEqual_([done.state, done.attempts, done.payload.result.text, done.error, !!done.started, !!done.finished], ['done', 1, 'ok hi', '', true, true], 'job 寫回 done 與結果');
   assertEqual_(getProp_(PROP.QUEUE_DIRTY), '', '沒有 queued 就清旗標');
   assertEqual_([lock.acquired, lock.released, lock.held], [1, 1, false], '鎖取得並釋放');
   // 無 job 的 tick
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   assertEqual_([r.ran, ran.length], [null, 1], '沒 job 不跑');
   // 例外 → 重試到 3 次 → failed
   const bad = enqueue_('turn', { message: 'boom' }, '', { store: q.store });
   const boom = () => { throw new Error('kaboom'); };
   for (let i = 1; i <= 3; i++) {
-    r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
+    r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
     const j = q.store.get(bad.id);
     assertEqual_([j.attempts, j.state], [i, i < 3 ? 'queued' : 'failed'], `第 ${i} 次失敗`);
     assert_(/kaboom/.test(j.error), '記錯誤');
     assertEqual_(getProp_(PROP.QUEUE_DIRTY), i < 3 ? '1' : '', '旗標跟著 queued 數');
   }
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: boom });
   assertEqual_(r.ran, null, 'failed 不再跑');
   // 重試按鈕
   assertThrows_(() => retryJob_(job.id, { store: q.store }), 'done 不能重試');
   const retried = retryJob_(bad.id, { store: q.store });
   assertEqual_([retried.state, retried.attempts, retried.error, getProp_(PROP.QUEUE_DIRTY)], ['queued', 0, '', '1'], '重試回 queued');
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   assertEqual_(q.store.get(bad.id).state, 'done', '重試後成功');
   // 鎖住 → 略過
   const j3 = enqueue_('turn', { message: 'c' }, '', { store: q.store });
   const busy = fakeLock_(true);
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: busy.lock, now, runJob: okRun });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: busy.lock, now, runJob: okRun });
   assertEqual_([r.skipped, q.store.get(j3.id).state], ['locked', 'queued'], '鎖住不動任何東西');
   // 一次只跑一個（最舊的先）
   const j4 = enqueue_('turn', { message: 'd' }, '', { store: q.store });
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   assertEqual_([r.ran.id, q.store.get(j4.id).state, r.remaining, getProp_(PROP.QUEUE_DIRTY)], [j3.id, 'queued', 1, '1'], '只跑最舊的，旗標保留');
   // 預算不足不接新 job
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun, budgetMs: 1000 });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun, budgetMs: 1000 });
   assertEqual_([r.ran, q.store.get(j4.id).state], [null, 'queued'], '剩餘預算 < 1 分鐘不接');
-  queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   // 卡住的 running：11 分鐘前開始 → 重排；attempts 已滿 → failed
   const stuck = enqueue_('turn', { message: 'stuck' }, '', { store: q.store });
   const s1 = q.store.get(stuck.id); s1.state = 'running'; s1.attempts = 1; s1.started = new Date(t - 11 * 60000); q.store.update(s1);
@@ -2219,7 +2219,7 @@ function testQueueStateMachine_() {
   const s2 = q.store.get(stuck2.id); s2.state = 'running'; s2.attempts = 3; s2.started = new Date(t - 11 * 60000); q.store.update(s2);
   const fresh = enqueue_('turn', { message: 'fresh' }, '', { store: q.store });
   const s3 = q.store.get(fresh.id); s3.state = 'running'; s3.attempts = 1; s3.started = new Date(t - 2 * 60000); q.store.update(s3);
-  r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
+  r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, now, runJob: okRun });
   assertEqual_(r.recovered.sort(), [stuck.id, stuck2.id].sort(), '兩個卡住的被處理，2 分鐘的不動');
   assertEqual_([q.store.get(stuck.id).state, q.store.get(stuck2.id).state, q.store.get(fresh.id).state], ['done', 'failed', 'running'], '重排的這次就跑掉、滿次數的失敗');
   assert_(/超過 10 分鐘/.test(q.store.get(stuck2.id).error), '錯誤說明');
@@ -2245,7 +2245,7 @@ function testCheckpointContinuation_() {
   const loop = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_echo', args: { text: 'x' } }], stop: 'tool_calls' }]);
   const sessionDeps = fakeQueueSessionDeps_(loop.chat, { maxSteps: 1 });
   const first = enqueue_('turn', { message: '做一件很長的事', channel: 'admin', mode: 'interactive' }, '', { store: q.store });
-  const tick = () => queueTickCore_({ store: q.store, cronStore: cron.store, lock: lock.lock, sessionDeps });
+  const tick = () => queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: lock.lock, sessionDeps });
   let r = tick();
   const j1 = q.store.get(first.id);
   assertEqual_([r.ran.state, j1.state, j1.payload.result.stopped, j1.payload.result.steps.length], ['done', 'done', 'max_steps', 1], '第一輪 max_steps');
@@ -2272,24 +2272,24 @@ function testCheckpointContinuation_() {
   const slowDeps = fakeQueueSessionDeps_((req2) => { t += 300000; return slow.chat(req2); });
   const q2 = memoryQueueStore_();
   const tb = enqueue_('turn', { message: 'slow' }, '', { store: q2.store });
-  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: lock.lock, now: () => t, sessionDeps: slowDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: cron.store, lock: lock.lock, now: () => t, sessionDeps: slowDeps });
   assertEqual_([q2.store.get(tb.id).payload.result.stopped, q2.jobs.length, q2.jobs[1].payload.origin], ['time_budget', 2, 'checkpoint'], '時間預算中止也續跑');
   // 正常結束：不續跑、state done
   const q3 = memoryQueueStore_();
   const fine = fakeChat_([{ text: '做完了', stop: 'end' }]);
   const ok = enqueue_('turn', { message: '簡單' }, '', { store: q3.store });
-  queueTickCore_({ store: q3.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q3.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
   assertEqual_([q3.jobs.length, q3.store.get(ok.id).state, q3.store.get(ok.id).payload.result.text], [1, 'done', '做完了'], '正常結束');
   // 待審批 → needs_approval
   const q4 = memoryQueueStore_();
   const send = fakeChat_([{ toolCalls: [{ id: 'c', name: 'fake_send', args: { text: 'mail' } }], stop: 'tool_calls' }, { text: '已送審', stop: 'end' }]);
   const pj = enqueue_('turn', { message: '寄信' }, '', { store: q4.store });
-  queueTickCore_({ store: q4.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(send.chat) });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q4.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(send.chat) });
   assertEqual_(q4.store.get(pj.id).state, 'needs_approval', '有 pending_approval 步驟 → needs_approval');
   // payload.message 空 → 例外（會重試到 failed）
   const q5 = memoryQueueStore_();
   const empty = enqueue_('turn', {}, '', { store: q5.store });
-  queueTickCore_({ store: q5.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q5.store, cronStore: cron.store, lock: lock.lock, sessionDeps: fakeQueueSessionDeps_(fine.chat) });
   assert_(/message/.test(q5.store.get(empty.id).error), '缺 message 記錯誤');
   setProp_(PROP.QUEUE_DIRTY, '');
 }
@@ -2345,7 +2345,7 @@ function testApprovalContinuation_() {
   const chat = fakeChat_([{ text: '好，信已寄出。', stop: 'end' }]);
   const sessionDeps = fakeQueueSessionDeps_(chat.chat);
   sessionDeps.store = ss.store;
-  const r = queueTickCore_({ store: q.store, cronStore: memoryCronStore_().store, lock: fakeLock_().lock, sessionDeps });
+  const r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: memoryCronStore_().store, lock: fakeLock_().lock, sessionDeps });
   assertEqual_([r.ran.id, r.ran.state], [c1.id, 'done'], '續跑 job 完成');
   const msgs = chat.calls[0].messages;
   assertEqual_(msgs.map((m) => m.role), ['system', 'user', 'assistant', 'user'], '帶原 session 歷史');
@@ -2391,7 +2391,7 @@ function testCronJobAutonomous_() {
   const docs = [];
   const mails = [];
   const deliverDeps = { createDoc: (title, body) => { docs.push({ title, body }); return { id: 'doc1', url: 'https://docs.google.com/document/d/doc1' }; }, sendEmail: (to, subject, body) => mails.push({ to, subject, body }), ownerEmail: 'owner@example.com' };
-  const r = queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps, deliverDeps });
+  const r = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps, deliverDeps });
   const job = q.store.get(jobs[0].id);
   assertEqual_([r.ran.state, job.state, job.payload.mode, job.payload.channel], ['needs_approval', 'needs_approval', 'autonomous', 'cron'], 'cron job 轉成 autonomous turn，X 工具待審 → needs_approval');
   const sess = sessionDeps._ss.sessions[0];
@@ -2414,26 +2414,26 @@ function testCronJobAutonomous_() {
   const q2 = memoryQueueStore_();
   const rn = runCronNow_(c.id, { cronStore: cron.store, queueStore: q2.store, now });
   assert_(/手動/.test(cron.store.get(c.id).last_status), 'run_now 記 last_status');
-  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
   assertEqual_([q2.jobs.length, docs.length, q2.jobs[1].payload.cron.cron_id], [2, 1, c.id], '續跑：不投遞，continuation 帶 cron 資訊');
   assert_(/續跑 job/.test(cron.store.get(c.id).last_status), 'last_status 標續跑');
-  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
-  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
-  queueTickCore_({ store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: loopDeps, deliverDeps });
   assertEqual_([q2.jobs.length, docs.length, q2.jobs[3].payload.result.continuation_exhausted], [4, 2, true], '續跑上限後投遞一次');
   assert_(/已達續跑上限/.test(docs[1].body), '投遞內文標示未完成');
   // 投遞失敗 → failed 但保留結果
   const q3 = memoryQueueStore_();
   runCronNow_(c.id, { cronStore: cron.store, queueStore: q3.store, now });
   const fine = fakeChat_([{ text: '完成', stop: 'end' }]);
-  queueTickCore_({ store: q3.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fine.chat), deliverDeps: { createDoc: () => { throw new Error('Drive 掛了'); } } });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q3.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fine.chat), deliverDeps: { createDoc: () => { throw new Error('Drive 掛了'); } } });
   assertEqual_([q3.jobs[0].state, q3.jobs[0].payload.result.text, q3.jobs[0].payload.result.delivery.ok], ['failed', '完成', false], '投遞失敗 → failed、結果保留');
   assert_(/Drive 掛了/.test(q3.jobs[0].error), 'error 欄');
   // email 投遞
   const em = createCron_({ name: '週報', schedule: 'weekly mon 09:00', prompt: 'x', deliver_to: 'email' }, { cronStore: cron.store, now });
   const q4 = memoryQueueStore_();
   runCronNow_(em.id, { cronStore: cron.store, queueStore: q4.store, now });
-  queueTickCore_({ store: q4.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fakeChat_([{ text: '週報內容', stop: 'end' }]).chat), deliverDeps });
+  queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q4.store, cronStore: cron.store, lock: fakeLock_().lock, now, sessionDeps: fakeQueueSessionDeps_(fakeChat_([{ text: '週報內容', stop: 'end' }]).chat), deliverDeps });
   assertEqual_([mails.length, mails[0].to, mails[0].subject], [1, 'owner@example.com', '[GAS Agent] 週報 2026-11-03'], 'email 寄給 owner');
   assert_(/週報內容/.test(mails[0].body), '郵件內文');
   // cronjob_manage 工具：autonomous 只能 list；interactive 可建 / 改 / 停 / run_now
@@ -3101,7 +3101,7 @@ function testChannelDelivery_() {
   sessionDeps.store = ss.store;
   const tg = [];
   const job = enqueue_('turn', { message: '寄信給我', channel: 'telegram', mode: 'interactive', external_id: '111', telegram_chat_id: '111' }, '', { store: q.store });
-  const tick = () => queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps, channelDeps: { sendTelegram: (c, t, o) => { tg.push({ c, t, o }); return { messages: 1 }; } } });
+  const tick = () => queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps, channelDeps: { sendTelegram: (c, t, o) => { tg.push({ c, t, o }); return { messages: 1 }; } } });
   const r1 = tick();
   assertEqual_([r1.ran.id, r1.ran.state], [job.id, 'needs_approval'], 'X 工具停在審批 → needs_approval');
   const sess = ss.sessions[0];
@@ -3115,7 +3115,7 @@ function testChannelDelivery_() {
   const emailDeps = fakeQueueSessionDeps_(fakeE.chat);
   const emailsOut = [];
   const je = enqueue_('turn', { message: '寄信', channel: 'email', mode: 'interactive', external_id: 'thA', email_thread_id: 'thA' }, '', { store: q.store });
-  const re = queueTickCore_({ store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps: emailDeps, channelDeps: { replyEmail: (tid, body) => emailsOut.push([tid, body]) } });
+  const re = queueTickCore_({ watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q.store, cronStore: cron.store, lock: fakeLock_().lock, sessionDeps: emailDeps, channelDeps: { replyEmail: (tid, body) => emailsOut.push([tid, body]) } });
   assertEqual_([re.ran.id, re.ran.state, emailDeps._notices.length], [je.id, 'needs_approval', 1], 'Email 來源 → 推一則審批通知');
   assertEqual_([emailDeps._notices[0].channel, emailDeps._notices[0].steps[0].tool, !!emailDeps._notices[0].steps[0].approvalId, emailDeps._notices[0].message], ['email', 'fake_send', true, '寄信'], '通知內容');
   assert_(/也已推到 Telegram/.test(emailsOut[0][1]), '回信標註已推 Telegram：' + emailsOut[0][1]);
