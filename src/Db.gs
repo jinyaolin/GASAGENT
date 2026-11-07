@@ -210,6 +210,130 @@ function readTable_(tab) {
 }
 
 /**
+ * 只讀最後 n 列（表頭為鍵、含 _row；列序同 sheet）。給「最近 N 筆」用，不必整張讀。
+ * @param {string} tab
+ * @param {number} n
+ * @return {{headers: !Array<string>, rows: !Array<!Object>, total: number}} total = 資料列總數（不含表頭）
+ */
+function readTableTail_(tab, n) {
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  const lastRow = sheet.getLastRow();
+  if (!headers.length || lastRow < 2) return { headers, rows: [], total: 0 };
+  const count = Math.max(1, Math.min(Math.floor(n) || 1, lastRow - 1));
+  const start = lastRow - count + 1;
+  const values = sheet.getRange(start, 1, count, headers.length).getValues();
+  const rows = [];
+  values.forEach((vals, i) => {
+    if (!vals.some((v) => v !== '' && v !== null)) return;
+    const row = { _row: start + i };
+    headers.forEach((h, c) => { row[h] = vals[c]; });
+    rows.push(row);
+  });
+  return { headers, rows, total: lastRow - 1 };
+}
+
+/**
+ * 在某一欄找整格相符的值，回列號（1-based；0 = 找不到）。用 TextFinder 不必整張讀；環境沒有 TextFinder 就掃該欄。
+ * @param {string} tab
+ * @param {string} id
+ * @param {string=} idColumn 預設 'id'
+ * @return {number}
+ */
+function findTableRowById_(tab, id, idColumn) {
+  idColumn = idColumn || 'id';
+  const want = String(id === null || id === undefined ? '' : id);
+  if (!want) return 0;
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  const col = headers.indexOf(idColumn);
+  if (col === -1) throw new Error(`tab「${tab}」沒有欄位 ${idColumn}`);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  const range = sheet.getRange(2, col + 1, lastRow - 1, 1);
+  try {
+    const cell = range.createTextFinder(want).matchEntireCell(true).matchCase(true).findNext();
+    return cell ? cell.getRow() : 0;
+  } catch (err) {
+    const vals = range.getValues();
+    for (let i = 0; i < vals.length; i++) if (String(vals[i][0]) === want) return i + 2;
+    return 0;
+  }
+}
+
+/**
+ * 讀一列（表頭為鍵、含 _row）；空列回 null。
+ * @param {string} tab
+ * @param {number} rowIndex
+ * @return {?Object}
+ */
+function readTableRow_(tab, rowIndex) {
+  if (rowIndex < 2) return null;
+  const sheet = getDbSheet_(tab);
+  const headers = readHeaders_(sheet);
+  if (!headers.length || rowIndex > sheet.getLastRow()) return null;
+  const vals = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  if (!vals.some((v) => v !== '' && v !== null)) return null;
+  const row = { _row: rowIndex };
+  headers.forEach((h, c) => { row[h] = vals[c]; });
+  return row;
+}
+
+/**
+ * 依 id 讀一列（找不到回 null）。各 store 的 get / update 用它：不整張讀、也不信任舊列號。
+ * @param {string} tab
+ * @param {string} id
+ * @param {string=} idColumn
+ * @return {?Object}
+ */
+function readTableRowById_(tab, id, idColumn) {
+  const r = findTableRowById_(tab, id, idColumn);
+  return r ? readTableRow_(tab, r) : null;
+}
+
+/**
+ * 列號 → 連續區段，由大到小排（刪列從下往上才不會位移）。純函式。
+ * @param {!Array<number>} rowIndexes
+ * @return {!Array<{start: number, count: number}>}
+ */
+function contiguousRowGroups_(rowIndexes) {
+  const sorted = Array.from(new Set((rowIndexes || []).map((n) => Math.floor(Number(n))).filter((n) => n >= 2))).sort((a, b) => a - b);
+  const groups = [];
+  sorted.forEach((r) => {
+    const last = groups[groups.length - 1];
+    if (last && last.start + last.count === r) last.count++;
+    else groups.push({ start: r, count: 1 });
+  });
+  return groups.reverse();
+}
+
+/**
+ * 批次刪列：連續區段合併成 deleteRows，從下往上刪。回刪掉幾列。
+ * @param {string} tab
+ * @param {!Array<number>} rowIndexes
+ * @return {number}
+ */
+function deleteTableRows_(tab, rowIndexes) {
+  const groups = contiguousRowGroups_(rowIndexes);
+  if (!groups.length) return 0;
+  const sheet = getDbSheet_(tab);
+  let n = 0;
+  groups.forEach((g) => { sheet.deleteRows(g.start, g.count); n += g.count; });
+  return n;
+}
+
+/**
+ * 各 tab 的資料列數（不含表頭）；Doctor / 清理用。開不了的 tab 給 -1。
+ * @param {!Array<string>} tabs
+ * @return {!Object<string, number>}
+ */
+function tableRowCounts_(tabs) {
+  const out = {};
+  tabs.forEach((tab) => { try { out[tab] = Math.max(0, getDbSheet_(tab).getLastRow() - 1); } catch (err) { out[tab] = -1; } });
+  return out;
+}
+
+/**
  * 在 tab 末端追加一列。
  * @param {string} tab
  * @param {!Object} obj 以表頭為 key

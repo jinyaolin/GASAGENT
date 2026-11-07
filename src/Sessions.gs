@@ -31,13 +31,15 @@ const AGENT_CONFIG_DEFAULTS = Object.freeze({
   session_idle_hours: 6,
   session_embeddings: false,
   turn_budget_seconds: 270,
+  /** 紀錄保留天數：Queue 已完成 job / AuditLog / Usage / 已決定審批 / 已壓縮 Messages 超過就每天清一次（Housekeeping.gs）；0 = 不清。 */
+  retention_days: 30,
 });
 
 /**
  * @typedef {{
  *   memoryMaxChars: number, profileMaxChars: number, contextMaxTokens: number, keepRecentTurns: number,
  *   curationEveryTurns: number, curationAutoApply: boolean, sessionIdleHours: number, sessionEmbeddings: boolean,
- *   turnBudgetSeconds: number
+ *   turnBudgetSeconds: number, retentionDays: number
  * }} AgentConfig
  */
 
@@ -59,6 +61,7 @@ function parseAgentConfig_(map) {
     sessionEmbeddings: map.session_embeddings === undefined ? d.session_embeddings : toBoolean_(map.session_embeddings),
     // 單輪時間預算（秒）。預設 270 = Agent.gs 的 TURN_TIME_BUDGET_MS；驗收 Queue 續跑時可調小。
     turnBudgetSeconds: clampInt_(map.turn_budget_seconds, d.turn_budget_seconds, 20, 300),
+    retentionDays: clampInt_(map.retention_days, d.retention_days, 0, 3650),
   };
 }
 
@@ -201,7 +204,7 @@ function sheetSessionStore_() {
   return {
     /** @param {string} id @return {?SessionRow} */
     get: (id) => {
-      const row = readTable_('Sessions').rows.find((r) => String(r.id) === id);
+      const row = readTableRowById_('Sessions', id);
       return row ? parseSessionRow_(row) : null;
     },
     /** @param {!Object} fields @return {SessionRow} */
@@ -214,15 +217,11 @@ function sheetSessionStore_() {
       s._row = appendTableRow_('Sessions', serializeSession_(s));
       return s;
     },
-    /** @param {SessionRow} s 整列覆寫（需有 _row；沒有就查） */
+    /** @param {SessionRow} s 整列覆寫；每次按 id 重新定位（清理會刪列，舊列號不可信） */
     update: (s) => {
-      let rowIndex = s._row;
-      if (!rowIndex) {
-        const row = readTable_('Sessions').rows.find((r) => String(r.id) === s.id);
-        if (!row) throw new Error(`找不到 session ${s.id}`);
-        rowIndex = row._row;
-        s._row = rowIndex;
-      }
+      const rowIndex = findTableRowById_('Sessions', s.id);
+      if (!rowIndex) throw new Error(`找不到 session ${s.id}`);
+      s._row = rowIndex;
       writeTableRow_('Sessions', rowIndex, serializeSession_(s));
     },
     /** @param {number} n @param {string=} channel @return {!Array<SessionRow>} last_active 新的在前 */

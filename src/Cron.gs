@@ -241,20 +241,16 @@ function sheetCronStore_() {
     list: () => readTable_('Cron').rows.map(parseCronRow_).filter((c) => c.id),
     /** @param {string} id @return {?CronRow} */
     get: (id) => {
-      const row = readTable_('Cron').rows.find((r) => String(r.id) === id);
+      const row = readTableRowById_('Cron', id);
       return row ? parseCronRow_(row) : null;
     },
     /** @param {CronRow} c @return {CronRow} */
     add: (c) => { c._row = appendTableRow_('Cron', serializeCron_(c)); return c; },
     /** @param {CronRow} c */
     update: (c) => {
-      let rowIndex = c._row;
-      if (!rowIndex) {
-        const row = readTable_('Cron').rows.find((r) => String(r.id) === c.id);
-        if (!row) throw new Error(`找不到排程 ${c.id}`);
-        rowIndex = row._row;
-        c._row = rowIndex;
-      }
+      const rowIndex = findTableRowById_('Cron', c.id);
+      if (!rowIndex) throw new Error(`找不到排程 ${c.id}`);
+      c._row = rowIndex;
       writeTableRow_('Cron', rowIndex, serializeCron_(c));
     },
   };

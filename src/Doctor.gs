@@ -204,6 +204,19 @@ function runDoctor() {
     } catch (err) {
       push('queue', 'Queue / 排程健檢', 'fail', String(err && err.message || err));
     }
+    // DB 大小與清理：只進不出的表要有保留期限，否則整張讀會越來越慢
+    try {
+      const counts = tableRowCounts_(['Queue', 'AuditLog', 'Usage', 'Messages', 'Sessions', 'Approvals']);
+      const acfg = getAgentConfig_();
+      const big = Object.keys(counts).filter((t) => counts[t] > 20000);
+      const nextHk = getProp_(PROP.HOUSEKEEP_NEXT_RUN);
+      const lastHk = getProp_(PROP.HOUSEKEEP_LAST_RUN);
+      push('db_size', 'DB 紀錄表大小與保留期限清理', !acfg.retentionDays ? 'warn' : big.length ? 'warn' : 'ok',
+        `${Object.keys(counts).map((t) => `${t} ${counts[t] < 0 ? '?' : counts[t]}`).join('、')} 列；保留 ${acfg.retentionDays ? acfg.retentionDays + ' 天' : '關閉（設定頁 retention_days）'}，上次清理 ${lastHk ? fmtDate_(new Date(lastHk)) : '（還沒有）'}，下次 ${nextHk ? fmtDate_(new Date(nextHk)) : '（下一分鐘排定）'}` +
+        (big.length ? `。${big.join(' / ')} 超過 2 萬列，管理頁與 queueTick 會變慢：調低 retention_days 或等每日清理追上` : ''));
+    } catch (err) {
+      push('db_size', 'DB 紀錄表大小與保留期限清理', 'warn', String(err && err.message || err));
+    }
     // M7-B：watchers 有沒有在跑（旗標失效會當場重設；逾期 = enabled 但 next_check 落後太久）
     try {
       const ws = watcherStatus_();

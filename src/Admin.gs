@@ -614,8 +614,8 @@ function adminUsageReport(days) {
 function adminListAuditLog(limit) {
   assertOwner();
   const n = clampInt_(limit, 50, 1, 200);
-  const rows = readTable_('AuditLog').rows;
-  return rows.slice(Math.max(0, rows.length - n)).reverse().map((r) => ({
+  const rows = readTableTail_('AuditLog', n).rows;
+  return rows.slice().reverse().map((r) => ({
     ts: r.ts instanceof Date ? fmtDate_(r.ts) : String(r.ts || ''),
     session_id: String(r.session_id || ''),
     tool: String(r.tool || ''),
@@ -665,9 +665,9 @@ function adminGetJob(id) {
 function adminListQueue(limit) {
   assertOwner();
   const n = clampInt_(limit, 30, 1, 200);
-  const jobs = sheetQueueStore_().list();
+  const jobs = readTableTail_('Queue', n).rows.map(parseJobRow_).filter((j) => j.id);
   return {
-    jobs: jobs.slice(Math.max(0, jobs.length - n)).reverse().map(publicJob_),
+    jobs: jobs.slice().reverse().map(publicJob_),
     dirty: getProp_(PROP.QUEUE_DIRTY) === '1',
     cronNextRun: getProp_(PROP.CRON_NEXT_RUN),
     triggerCount: listQueueTriggers_().length,

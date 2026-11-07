@@ -61,6 +61,31 @@ function newJobId_() {
   return 'job_' + Date.now().toString(36) + '_' + rand;
 }
 
+/** job 狀態熱快取（CacheService）：管理頁聊天台每幾秒輪詢 adminGetJob，不必每次開 Queue tab。真相仍在 Sheet。 */
+const JOB_CACHE_TTL_SEC = 21600;
+const JOB_CACHE_MAX_CHARS = 90000;
+
+/** @param {string} id @return {string} */
+function jobCacheKey_(id) { return 'job:' + id; }
+
+/** @param {QueueJob} j */
+function jobCachePut_(j) {
+  try {
+    const c = CacheService.getScriptCache();
+    const json = JSON.stringify(serializeJob_(j));
+    if (json.length <= JOB_CACHE_MAX_CHARS) c.put(jobCacheKey_(j.id), json, JOB_CACHE_TTL_SEC);
+    else c.remove(jobCacheKey_(j.id));
+  } catch (err) { /* 沒有 CacheService（測試）或快取失敗：下次從 Sheet 讀 */ }
+}
+
+/** @param {string} id @return {?QueueJob} */
+function jobCacheGet_(id) {
+  try {
+    const json = CacheService.getScriptCache().get(jobCacheKey_(id));
+    return json ? parseJobRow_(JSON.parse(json)) : null;
+  } catch (err) { return null; }
+}
+
 /**
  * @param {!Object} r readTable_ 的列
  * @return {QueueJob}
@@ -109,21 +134,20 @@ function sheetQueueStore_() {
     list: () => readTable_('Queue').rows.map(parseJobRow_).filter((j) => j.id),
     /** @param {string} id @return {?QueueJob} */
     get: (id) => {
-      const row = readTable_('Queue').rows.find((r) => String(r.id) === id);
+      const cached = jobCacheGet_(id);
+      if (cached) return cached;
+      const row = readTableRowById_('Queue', id);
       return row ? parseJobRow_(row) : null;
     },
     /** @param {QueueJob} j @return {QueueJob} */
-    add: (j) => { j._row = appendTableRow_('Queue', serializeJob_(j)); return j; },
-    /** @param {QueueJob} j */
+    add: (j) => { j._row = appendTableRow_('Queue', serializeJob_(j)); jobCachePut_(j); return j; },
+    /** @param {QueueJob} j 每次都按 id 重新定位（清理會刪列，舊列號不可信） */
     update: (j) => {
-      let rowIndex = j._row;
-      if (!rowIndex) {
-        const row = readTable_('Queue').rows.find((r) => String(r.id) === j.id);
-        if (!row) throw new Error(`找不到 job ${j.id}`);
-        rowIndex = row._row;
-        j._row = rowIndex;
-      }
+      const rowIndex = findTableRowById_('Queue', j.id);
+      if (!rowIndex) throw new Error(`找不到 job ${j.id}`);
+      j._row = rowIndex;
       writeTableRow_('Queue', rowIndex, serializeJob_(j));
+      jobCachePut_(j);
     },
   };
 }
@@ -238,7 +262,9 @@ function queueTick() {
   const nextWatch = getProp_(PROP.WATCH_NEXT_CHECK);
   // 旗標空 = 從沒算過（或舊版清掉的）→ 視為到期，掃一次就會寫回；之後永遠有值
   const watchDue = !nextWatch || new Date(nextWatch).getTime() <= Date.now();
-  if (!dirty && !cronDue && !emailDue && !watchDue) return;
+  const nextHk = getProp_(PROP.HOUSEKEEP_NEXT_RUN);
+  const hkDue = !!nextHk && new Date(nextHk).getTime() <= Date.now();
+  if (!dirty && !cronDue && !emailDue && !watchDue && !hkDue) return;
   queueTickCore_({});
 }
 
@@ -253,7 +279,7 @@ function queueTickCore_(deps) {
   const now = deps.now || (() => Date.now());
   const started = now();
   const lock = deps.lock || scriptLock_();
-  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '', emailScan: null, watchScan: null };
+  const report = { skipped: '', cronEnqueued: [], recovered: [], ran: null, remaining: 0, cronError: '', emailScan: null, watchScan: null, housekeep: null };
   if (!lock.tryLock(5000)) { report.skipped = 'locked'; return report; }
   try {
     const store = deps.store || sheetQueueStore_();
@@ -327,6 +353,14 @@ function queueTickCore_(deps) {
     report.remaining = store.list().filter((j) => j.state === 'queued').length;
     setProp_(PROP.QUEUE_DIRTY, report.remaining ? '1' : '');
     try { refreshCronNextRunProp_(cronStore.list()); } catch (err) { /* 忽略 */ }
+
+    // 5. 清理（保留期限）：還在 lock 裡、沒有 job 在跑；旗標沒到立刻回 null，預算不夠就跳過
+    try {
+      report.housekeep = (deps.housekeep || housekeepIfDue_)(Object.assign({ now, budgetMs: budgetTotal - (now() - started) }, deps.housekeepDeps || {}));
+    } catch (err) {
+      report.housekeep = { error: String(err && err.message || err) };
+      console.warn('清理失敗：' + report.housekeep.error);
+    }
     return report;
   } finally {
     lock.releaseLock();

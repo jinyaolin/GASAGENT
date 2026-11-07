@@ -19,7 +19,8 @@
 src/
   appsscript.json   # OAuth scopes、webapp 預設（USER_DEPLOYING / MYSELF）、Asia/Taipei、V8
   Config.gs         # Script Properties 封裝、APP_VERSION、REQUIRED_SCOPES、assertOwner()、Config sheet 讀寫
-  Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫
+  Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫；readTableTail_（只讀表尾）、findTableRowById_（TextFinder 按 id 定位）、deleteTableRows_（批次刪列）
+  Housekeeping.gs   # 保留期限清理：Queue / AuditLog / Usage / Approvals / Messages 超過 retention_days 的列每天刪一次（queueTick lock 內、每 tab 500 列）
   Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()；M7：chainForRequest_（chatgpt 只服務 owner）
   Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh（oauthAccessToken_，兩種 OAuth 協定共用）、Responses API + SSE adapter、模型清單、登出
   Providers_GeminiCli.gs  # M7：protocol gemini_cli —— Google 帳號登入（Antigravity / Gemini CLI 兩種 client）憑證、Google token refresh、Code Assist 開通（loadCodeAssist / onboardUser）、generateContent 包層 adapter、fetchAvailableModels、登出
@@ -407,6 +408,7 @@ X 類工具被攔下時，`Approvals` tab 寫一列（`state=pending`，含 tool
 | session 閒置幾小時自動切新（0 關） | `session_idle_hours` | 6 |
 | session 向量搜尋 | `session_embeddings` | 關 |
 | 單輪時間預算（秒） | `turn_budget_seconds`（M4；到了就停並由 Queue 續跑） | 270 |
+| 紀錄保留天數 | `retention_days`：Queue 已完成 / 失敗的 job、AuditLog、Usage、已決定的審批、已壓縮進摘要的 Messages 超過天數就每天清一次（[Housekeeping.gs](src/Housekeeping.gs)；0 = 不清）。進行中 / 待輸入的 job、被待審批引用的 job、未壓縮的訊息、Sessions / Memory / Config 不碰；只在 queueTick 的 lock 裡跑、每 tab 一次最多 500 列、沒刪完 2 分鐘後續刪、剛部署 24 小時後才第一次清；刪了東西會寫一列 AuditLog `system:housekeeping`。Doctor「DB 紀錄表大小與保留期限清理」列各表列數 | 30 |
 
 token 估算很粗（CJK 每字 1、其餘每 4 字元 1），只用來決定何時壓縮。Doctor 加：兩表容量、Sessions 可讀、有 fast provider（沒有只是提醒）、開了向量搜尋就要有 embed provider。
 
@@ -763,6 +765,7 @@ node scripts/local-tests.js
 | 「排程 / 事件」分頁報 `DB 缺少 tab「Watchers」` | 新版本加了 tab：Doctor 分頁按「重新安裝」（或編輯器執行 `installAgent()`） |
 | Telegram 回覆了提問但 agent 沒續跑 | 要「回覆」bot 的那則 ❓ 訊息（Telegram 的 Reply），或用 `/answer <q_id> <回答>`；一般訊息會當成新任務。管理頁「紀錄 → 審批」也能回答 |
 | watcher 建好後既有的信 / 檔沒觸發 | 刻意的：建立時只記 cursor（baseline），只對之後的新事件反應；要測就寄一封新的 |
+| 管理頁「紀錄」/ 聊天台越來越慢、Doctor「DB 紀錄表大小」黃燈 | 紀錄表只進不出。2026-11-07 起：`retention_days`（預設 30）每天清一次、「最近 N 筆」只讀表尾（`readTableTail_`）、按 id 找列用 TextFinder（`findTableRowById_`）、聊天台輪詢先查 CacheService 的 job 狀態（`job:<id>`）且 3→15 秒退避。累積很久的帳號第一次要幾天才追完（每 tab 每次 500 列、2 分鐘一輪），期間 AuditLog 會有 `system:housekeeping` 列記每輪刪了多少 |
 | watcher `enabled=TRUE` 但 `last_check` / `cursor` 不動、Queue 沒有 `watch` job（Cron 照常） | 舊版（2026-11-07 前）全部 watcher 停用時會清空 `WATCH_NEXT_CHECK`，之後**直接在 sheet** 把 `enabled` 改回 TRUE 不會重算旗標，`queueTick` 就不再開 Watchers tab。新版旗標永遠有值（最多 10 分鐘重掃一次），而且旗標空會被 `queueTick` 當成到期、下一分鐘就自動補掃寫回；要立刻確認就用 Telegram `/status`、Doctor 或開「排程 / 事件」分頁，三者都會顯示健康狀態並重設旗標。直接改表啟用不會重做 baseline，cursor 之後累積的事件會被撿起來（一次最多 5 件，每 `every_minutes` 再撿） |
 | Email 回信「（這輪沒有文字結果）」或 Telegram 回「系統中止：模型輸出撞到 max_tokens」 | 模型 reasoning 把 `max_tokens` 吃完、沒吐文字（GLM `reasoning_effort` 設 high / max 時常見；Usage tab 那幾輪 `completion_tokens` ≈ provider `max_tokens`）。到「模型」調高 `max_tokens`（例 10000+）或把 `extra_body` 的 `reasoning_effort` 改 `"low"` / `"medium"`。新版沒文字就不回信，撞上限會給說明而不是空白 |
 | gemini_cli provider 報「憑證沒有 client_id / client_secret」 | 2026-11-07 起 OAuth client 不放在程式裡，舊憑證若是 `--from-cli` 沿用 CLI token 檔產生的就沒有這兩欄。在本機確認 `~/.config/gas-agent/oauth-clients.json` 有值，重跑 `node scripts/gemini-login.js --account <代號>`，把新憑證 JSON 貼回管理頁 |

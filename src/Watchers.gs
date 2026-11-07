@@ -95,18 +95,14 @@ function sheetWatcherStore_() {
   return {
     list: () => readTable_('Watchers').rows.map(parseWatcherRow_).filter((w) => w.id),
     get: (id) => {
-      const row = readTable_('Watchers').rows.find((r) => String(r.id) === id);
+      const row = readTableRowById_('Watchers', id);
       return row ? parseWatcherRow_(row) : null;
     },
     add: (w) => { w._row = appendTableRow_('Watchers', serializeWatcher_(w)); return w; },
     update: (w) => {
-      let rowIndex = w._row;
-      if (!rowIndex) {
-        const row = readTable_('Watchers').rows.find((r) => String(r.id) === w.id);
-        if (!row) throw new Error(`找不到 watcher ${w.id}`);
-        rowIndex = row._row;
-        w._row = rowIndex;
-      }
+      const rowIndex = findTableRowById_('Watchers', w.id);
+      if (!rowIndex) throw new Error(`找不到 watcher ${w.id}`);
+      w._row = rowIndex;
       writeTableRow_('Watchers', rowIndex, serializeWatcher_(w));
     },
   };

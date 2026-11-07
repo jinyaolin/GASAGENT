@@ -40,6 +40,9 @@ const PROP = Object.freeze({
   WATCH_NEXT_CHECK: 'WATCH_NEXT_CHECK',
   /** M7-B：上次真的開 Watchers tab 掃描的時間（ISO）；Doctor / /status 用來判斷監看有沒有在跑。 */
   WATCH_LAST_SCAN: 'WATCH_LAST_SCAN',
+  /** 清理（保留期限）：下次 / 上次跑的時間（ISO）。空 = 還沒排過（第一次 tick 會排 24 小時後）。 */
+  HOUSEKEEP_NEXT_RUN: 'HOUSEKEEP_NEXT_RUN',
+  HOUSEKEEP_LAST_RUN: 'HOUSEKEEP_LAST_RUN',
   /** 委託寄件者（Telegram /owner）：JSON {email: passkey}。只在 Script Properties，管理頁與 Telegram 只列 email。 */
   EMAIL_DELEGATE_KEYS: 'EMAIL_DELEGATE_KEYS',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */

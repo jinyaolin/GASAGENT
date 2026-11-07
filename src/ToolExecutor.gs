@@ -939,7 +939,10 @@ function sheetApprovalStore_() {
   return {
     list: () => listApprovals_(),
     update: (row, fields) => {
-      writeTableRow_('Approvals', row._row, Object.assign({ id: row.id, job_id: row.job_id, tool: row.tool, args: row.args, reason: row.reason }, fields));
+      // 按 id 重新定位（清理會刪列，list 時拿到的列號不可信）
+      const rowIndex = findTableRowById_('Approvals', row.id) || row._row;
+      if (!rowIndex) throw new Error(`找不到審批 ${row.id}`);
+      writeTableRow_('Approvals', rowIndex, Object.assign({ id: row.id, job_id: row.job_id, tool: row.tool, args: row.args, reason: row.reason }, fields));
     },
   };
 }

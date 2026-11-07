@@ -17,6 +17,10 @@
     { id: 'doctor', label: 'Doctor' },
   ];
 
+  /** 輪詢 job 狀態：3 秒起跳、每次 ×1.5、最多 15 秒（後端 adminGetJob 先查 CacheService，不開 Queue tab）。 */
+  const POLL_MIN_MS = 3000;
+  const POLL_MAX_MS = 15000;
+  const POLL_BACKOFF = 1.5;
   const bootstrap = window.BOOTSTRAP || {};
   const $main = document.getElementById('main');
   const $nav = document.getElementById('nav');
@@ -717,10 +721,12 @@
       const steps = [];
       let current = job;
       const t0 = Date.now();
+      let wait = POLL_MIN_MS;
       for (;;) {
         $pending.firstChild && ($pending.querySelector('.bubble-text').textContent =
           `已排入 Queue：${current.id}（${current.state}${current.attempts ? `，第 ${current.attempts} 次` : ''}）。每分鐘 trigger 會處理，輪詢中… ${Math.round((Date.now() - t0) / 1000)}s`);
-        await new Promise((res) => setTimeout(res, 5000));
+        await new Promise((res) => setTimeout(res, wait));
+        wait = Math.min(POLL_MAX_MS, Math.round(wait * POLL_BACKOFF));
         if (Date.now() - t0 > 30 * 60000) throw new Error(`輪詢超過 30 分鐘仍未完成：${current.id}（到「紀錄」分頁看 Queue）`);
         const j = await call('adminGetJob', current.id);
         if (!j) throw new Error(`job ${current.id} 消失了`);
@@ -907,6 +913,7 @@
     { key: 'session_idle_hours', label: 'session 閒置幾小時自動切新', hint: '0 = 不自動切' },
     { key: 'session_embeddings', label: 'session 向量搜尋', type: 'checkbox', hint: '需要一個 role=embed 的 provider（openai / gemini）；在 curation 時為 session 摘要算向量' },
     { key: 'turn_budget_seconds', label: '單輪時間預算（秒）', hint: '到了就停並由 Queue 續跑（上限 3 次）。GAS 單次執行 6 分鐘，別超過 300；要驗證續跑可暫時調到 20–40' },
+    { key: 'retention_days', label: '紀錄保留天數', hint: 'Queue 已完成 / 失敗的 job、AuditLog、Usage、已決定的審批、已壓縮進摘要的 Messages 超過天數就每天清一次（每分鐘 trigger 帶動、一次最多 500 列）；0 = 不清。/stats 最多看 90 天，設 30–90 合理。進行中的 job、待審批、目前對話不受影響' },
   ];
 
   async function renderSettings(root) {
@@ -1435,9 +1442,11 @@
         let job = await call('adminRunCronNow', c.id);
         const chain = [job.id];
         const t0 = Date.now();
+        let wait = POLL_MIN_MS;
         for (;;) {
           $box.textContent = `job ${job.id}：${JOB_STATE_LABEL[job.state] || job.state}（${Math.round((Date.now() - t0) / 1000)}s）。trigger 每分鐘跑一次；也可到「紀錄」按「處理一個 job」。`;
-          await new Promise((res) => setTimeout(res, 5000));
+          await new Promise((res) => setTimeout(res, wait));
+          wait = Math.min(POLL_MAX_MS, Math.round(wait * POLL_BACKOFF));
           if (Date.now() - t0 > 30 * 60000) throw new Error('輪詢超過 30 分鐘，請到「紀錄」分頁看 Queue。');
           const j = await call('adminGetJob', job.id);
           if (!j) throw new Error(`job ${job.id} 消失了`);
