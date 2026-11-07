@@ -66,7 +66,7 @@ accounts/<name>/         # 每個 Google 帳號的 clasp.json（scriptId）與 d
 
 ### 零安裝：安裝頁
 
-<https://zaistudio.tw/agent>：先到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」，再用要安裝的 Google 帳號登入並允許，服務會建好專案與 A / B 兩個部署，給管理頁網址與升級取件碼；之後打開管理頁授權、按「安裝」（第一次打開管理頁會顯示安裝按鈕，等同編輯器執行 `installAgent()`）、填模型 key 與 Telegram token、`/upgrade code <取件碼>`。不需要 Node / clasp。細節見 [installer/README.md](installer/README.md)。
+<https://zaistudio.tw/agent>：按「免費開始安裝」進準備頁（<https://zaistudio.tw/agent/install>），照指示到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」、確認授權畫面說明後，再用要安裝的 Google 帳號登入並允許，服務會建好專案與 A / B 兩個部署，給管理頁網址與升級取件碼；之後打開管理頁授權、按「安裝」（第一次打開管理頁會顯示安裝按鈕，等同編輯器執行 `installAgent()`）、填模型 key 與 Telegram token、`/upgrade code <取件碼>`。不需要 Node / clasp。細節見 [installer/README.md](installer/README.md)。
 
 ### 一鍵安裝到一個 Google 帳號（維護者用 clasp）
 
