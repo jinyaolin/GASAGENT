@@ -1,16 +1,16 @@
 {
-  "version": "0.8.4",
-  "commit": "8715d968afc8b607806552290ca3f4d6eb72e3e5",
-  "date": "2026-11-07T15:03:56+08:00",
-  "notes": "DB id 有設就絕不自動重建",
+  "version": "0.9.0",
+  "commit": "5c62f0278e1bea7cc7b31788b0584bcc30b230d6",
+  "date": "2026-11-07T15:55:39+08:00",
+  "notes": "/upgrade 改走安裝服務的 OAuth 授權（/upgrade login / code），manifest 拿掉 script.* scope；installer/ 安裝服務",
   "files": {
     "src/Admin.gs": "6a65192a2486a4068c68fe4cc29d447530fa226ac38a9b75d4f4ddd32207ec0d",
     "src/AdminPage.html": "10b2275f644e8070f09defbdfe45346d1d6a8c94fbb011488da751e7b3b28c1b",
     "src/Agent.gs": "f65636ad316df51487cff0bca44561ce28ccfca2bfdcae67b898120ad0e4ca28",
     "src/Channels.gs": "45bf266f02e6f95a8e67b35de315aa718537647649e34984b05ee867c7389376",
     "src/Channels_Email.gs": "f9efda9d55d017e0d59b6a554a136f8a18c4dd53a8ee8a64c01d3296e2a4dffc",
-    "src/Channels_Telegram.gs": "65e475c94c27236d860b7da7224f9ed2d4be0e758408ba075d59cc72b295be3b",
-    "src/Config.gs": "53b5f46be8fc96a95f435cab4ba21a8dfa52c31fd716ffbff0b7f1a05b374e50",
+    "src/Channels_Telegram.gs": "03343cd88fe1751c0136c466763bbff5d059a848a1846f598e7ee455073f8507",
+    "src/Config.gs": "44c939d343ff310a9ad78bd12939cf60dfde0b68efb68bc6e177f9287cf00c62",
     "src/Cron.gs": "e0a860d19218a013d8ea4cdf4cdda774cf32280ab2327b2319290ea4adec1722",
     "src/Db.gs": "43c902d9ef2a549e39ae84ef977f6da0558cc184e01ae674a16ace2c62a71a7e",
     "src/Deliver.gs": "f3aeaa533a01339d9f848f1a7e6cb3b3ae477c1c327701a10c27329d4eb74940",
@@ -26,7 +26,7 @@
     "src/Sessions.gs": "e3835f6ddf4a2b779aa72ca780d91c10266979d606db7a87bcbf581db7874298",
     "src/Setup.gs": "4e0c7961e7631ce93dd3a672aede3fd852260a67a6b99f8ba6b7518a3773545c",
     "src/Skills.gs": "8f4fdd61d1fed41d1b7b89f5f448b986ac388db3b3a1a4ceb210841838ed9f3a",
-    "src/Tests.gs": "d86975276a8aade7aaef66055b5244de4f338447399e5a55dde1f6470348d6fc",
+    "src/Tests.gs": "91b55d911181f6ff4a680a89656d67ab35cd7fbbab1ca9830418d8740b2d8923",
     "src/ToolExecutor.gs": "e55fc920d5892015cbc574a630d4d674f765c7479d61d9df435c8681b77d97f3",
     "src/ToolRegistry.gs": "b8d1836ebd235709201bff35b3af4924fdb2a836223a77747b3e66e9031a7cba",
     "src/Tools_Calendar.gs": "3e7c5c202f2c81700cfbd7d79cf4a3219a992551b75eb77a072e6650cf3be49e",
@@ -42,10 +42,10 @@
     "src/Tools_Telegram.gs": "bd3427b3ed154cb15034ba166ae0893c6ced60c5cf504f62e10c950d57393d42",
     "src/Tools_Watcher.gs": "3349a143bc6453323f9c6accfa507cf8282c4b3d0e3e8ff0ee33ea4a63090695",
     "src/Tools_Web.gs": "0aa7eff0995e2904b2b6e49447ee4bd46008ae0a3eb244c3214fc32d439526c9",
-    "src/Upgrade.gs": "582e139efb33eab443774ac11b7d14bdde96f14b071fdc72d2fa396bebad232a",
+    "src/Upgrade.gs": "9f2039340a0c2c0d95389d4f0521f43928fd08351e0b1cc0c3fa6683ae58b488",
     "src/Watchers.gs": "95e59ceb2682b64afcf819293277719c593189cf8f68c01d2522bc167234f435",
     "src/admin_css.html": "899d30b56df080f0b5e3cc6d6f6e70579171de9f0f5753963271f0d8efcd261e",
     "src/admin_js.html": "55d6340dbb5525203da3d82274d3c5e4e0c63d25bbc053aa9d3f824c08b65c60",
-    "src/appsscript.json": "93c327619d80cab50808de9630378b55a1f3e5c54ec3f0e9f116e25ae71815b3"
+    "src/appsscript.json": "9e185e9e65da636ba0189e48b3af3edacc2a8524e396b18b3ac8d81447ba79fa"
   }
 }
