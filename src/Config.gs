@@ -8,7 +8,7 @@
  */
 
 /** 應用版本，顯示於管理頁與 Doctor。 */
-const APP_VERSION = '0.7.0-m7a';
+const APP_VERSION = '0.8.0';
 
 /** Script Properties 鍵名。 */
 const PROP = Object.freeze({
