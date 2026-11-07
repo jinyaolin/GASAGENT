@@ -719,7 +719,16 @@ agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技�
 
 **安全**：來源 repo / ref 只在 Script Properties `UPGRADE_REPO` / `UPGRADE_REF`（預設 `jinyaolin/GASAGENT` `main`），Telegram 改不了；只有白名單能 `/upgrade`；審批訊息顯示 commit；hash 不符、語法錯、**新版多要 OAuth scope** 一律拒絕（新 scope 得重新授權，自動換上去 trigger 會失敗，這種版本請維護者用 `deploy.sh` 推並在編輯器執行 `installAgent()`）。
 
-**前置（每個帳號一次）**：manifest 已含 `script.projects` / `script.deployments` 兩個 scope，所以**加上這個功能的那一版**本身要用 `deploy.sh` 推並重新授權；腳本必須掛在**標準 GCP 專案**並在該專案啟用 Apps Script API（編輯器「專案設定 → Google Cloud Platform (GCP) 專案 → 變更專案」填專案編號；不可逆；用 Apps Script 自建的預設專案會 403「has not been used in project …」，預設專案開不了這個 API）；帳號主人到 <https://script.google.com/home/usersettings> 打開「Google Apps Script API」（Workspace 帳號可能要管理員允許）。Doctor「程式升級（/upgrade）」會檢查這兩件事並列出部署 A / B 版號。
+**前置（每個帳號一次，2026-11-07 在 default 驗證過）**：Apps Script API 不接受「預設 GCP 專案」腳本的呼叫（403 `has not been used in project …`，預設專案開不了這個 API，也沒有對應的進階服務），所以每個帳號要做：
+
+1. 維護者 `scripts/deploy.sh --account <代號>` 推上 v0.8.0 以上（manifest 多了 `script.projects` / `script.deployments`；推完 trigger 會停到重新授權為止，所以要帳號主人在線）。
+2. 準備一個**標準 GCP 專案**並啟用 **Apps Script API + Drive / Sheets / Docs / Slides / Gmail / Calendar API**（標準專案不會像預設專案那樣自動開；少開會 Doctor 紅「啟用以下 API 時權限遭拒」）。OAuth 同意畫面：外部、不上傳標誌（上傳就得送驗證）、首頁 / 隱私權 / 服務條款填 repo 與 `PRIVACY.md`、已授權網域 `github.com`，**發布到正式版**（停在「測試中」授權七天就過期，整個 agent 會停）。多個帳號可共用同一個專案（把帳號加成專案 Owner）；Workspace 帳號可改用「內部」。
+3. 編輯器「專案設定 → Google Cloud Platform (GCP) 專案 → 變更專案」填專案**編號**（不可逆）。
+4. 編輯器執行 `installAgent()` 重新授權（會跳「尚未驗證」，進階 → 繼續）。帳號主人的 <https://script.google.com/home/usersettings> 要開著「Google Apps Script API」。
+5. 編輯器「部署 → 管理部署」封存多餘的舊部署（同一種存取權只留一個；多個時會取版本最新的並提醒）。
+6. Telegram `/doctor` 全綠後 `/upgrade`。
+
+Doctor「程式升級（/upgrade）」會檢查 API 與部署並列出 A / B 版號。
 
 **發佈**：`scripts/release.sh 0.8.0 "說明" --push`（跑測試 → `APP_VERSION` 改版號 commit → 產生 `release.json` 再 commit → push）。各帳號之後 `/upgrade` 就看得到。
 
