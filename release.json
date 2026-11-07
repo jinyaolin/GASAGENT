@@ -1,8 +1,8 @@
 {
-  "version": "0.8.0",
-  "commit": "2ee08f37589dd1ff917bc7204fc28d331595faba",
-  "date": "2026-11-07T14:01:14+08:00",
-  "notes": "Telegram /upgrade 自我升級與回滾",
+  "version": "0.8.1",
+  "commit": "e6ba4677f5b8c046086b74c34dbadcae784b7ea5",
+  "date": "2026-11-07T14:09:14+08:00",
+  "notes": "manifest 加進階服務 Script，/upgrade 的 Apps Script API 403 修正",
   "files": {
     "src/Admin.gs": "6a65192a2486a4068c68fe4cc29d447530fa226ac38a9b75d4f4ddd32207ec0d",
     "src/AdminPage.html": "10b2275f644e8070f09defbdfe45346d1d6a8c94fbb011488da751e7b3b28c1b",
@@ -10,7 +10,7 @@
     "src/Channels.gs": "45bf266f02e6f95a8e67b35de315aa718537647649e34984b05ee867c7389376",
     "src/Channels_Email.gs": "f9efda9d55d017e0d59b6a554a136f8a18c4dd53a8ee8a64c01d3296e2a4dffc",
     "src/Channels_Telegram.gs": "65e475c94c27236d860b7da7224f9ed2d4be0e758408ba075d59cc72b295be3b",
-    "src/Config.gs": "95b8b2ff73fe2a0672cd2557909ba4cfb7453f1b65c3ef0ab07ab650d9db5206",
+    "src/Config.gs": "69e291b103b448f55c84d344ae072f00b09c01b48fefd61287cad0be78d39ad7",
     "src/Cron.gs": "e0a860d19218a013d8ea4cdf4cdda774cf32280ab2327b2319290ea4adec1722",
     "src/Db.gs": "67e0461436f631bc0c7a5de1818f74f6b6b9ffc09488cab575e4bd3fe1672e8e",
     "src/Deliver.gs": "f3aeaa533a01339d9f848f1a7e6cb3b3ae477c1c327701a10c27329d4eb74940",
@@ -42,10 +42,10 @@
     "src/Tools_Telegram.gs": "bd3427b3ed154cb15034ba166ae0893c6ced60c5cf504f62e10c950d57393d42",
     "src/Tools_Watcher.gs": "3349a143bc6453323f9c6accfa507cf8282c4b3d0e3e8ff0ee33ea4a63090695",
     "src/Tools_Web.gs": "0aa7eff0995e2904b2b6e49447ee4bd46008ae0a3eb244c3214fc32d439526c9",
-    "src/Upgrade.gs": "0462130e9c3d1cb046196270da9e314cc7f364baeafd7f20539391150df6fe95",
+    "src/Upgrade.gs": "91b0441d57610aa0e15975fcbaed7586675beacb4b956014ec2ee7b1ef88b230",
     "src/Watchers.gs": "95e59ceb2682b64afcf819293277719c593189cf8f68c01d2522bc167234f435",
     "src/admin_css.html": "899d30b56df080f0b5e3cc6d6f6e70579171de9f0f5753963271f0d8efcd261e",
     "src/admin_js.html": "55d6340dbb5525203da3d82274d3c5e4e0c63d25bbc053aa9d3f824c08b65c60",
-    "src/appsscript.json": "93c327619d80cab50808de9630378b55a1f3e5c54ec3f0e9f116e25ae71815b3"
+    "src/appsscript.json": "5ab8dae4a42e41db01c9ffe1575ce5fdf06c0e4592b93af614209b0a36b15795"
   }
 }
