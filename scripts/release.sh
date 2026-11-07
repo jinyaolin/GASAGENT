@@ -58,6 +58,6 @@ fi
 
 if [[ -n "$PUSH" ]]; then
   step "推到 origin"
-  run git push
+  run git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
 fi
 echo; echo "完成：v$VERSION。各帳號 Telegram 輸入 /upgrade 即可看到新版並送審批；維護者仍可用 scripts/deploy.sh 直接推。"
