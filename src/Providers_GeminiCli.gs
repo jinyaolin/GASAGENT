@@ -50,15 +50,15 @@ const ANTIGRAVITY_USER_AGENT = `antigravity/hub/${ANTIGRAVITY_HUB_VERSION} (aide
 const ANTIGRAVITY_FALLBACK_PROJECT = 'rising-fact-p41fc';
 
 /**
- * 兩種 client 的差異處。OAuth client 都是安裝型 app、公開在各自的原始碼 / 二進位裡。
+ * 兩種 client 的差異處。OAuth client id / secret **不放在原始碼**（repo 公開；GitHub push protection 也會擋）：
+ * 由 scripts/gemini-login.js 從本機 ~/.config/gas-agent/oauth-clients.json 讀，寫進貼到管理頁的憑證 JSON（client_id / client_secret），
+ * GAS 端只用憑證裡的值；憑證缺這兩欄會在解析時報錯要求重新登入。
  * knownModels：Code Assist 的 fetchAvailableModels 只有 antigravity 有；拿不到時用這份靜態名單（社群 2026 年中實測過的）。
- * @type {!Object<string, {id: string, label: string, clientId: string, clientSecret: string, endpoint: string, scopes: !Array<string>, loadMetadata: !Object, knownModels: !Array<{slug: string, display_name: string}>}>}
+ * @type {!Object<string, {id: string, label: string, endpoint: string, scopes: !Array<string>, loadMetadata: !Object, knownModels: !Array<{slug: string, display_name: string}>}>}
  */
 const GEMINI_CLI_CLIENTS = Object.freeze({
   antigravity: Object.freeze({
     id: 'antigravity', label: 'Antigravity',
-    clientId: '<antigravity client id removed>.apps.googleusercontent.com',
-    clientSecret: 'GOCSPX-<antigravity client secret removed>',
     endpoint: 'https://daily-cloudcode-pa.googleapis.com',
     scopes: Object.freeze(['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/cclog', 'https://www.googleapis.com/auth/experimentsandconfigs']),
     loadMetadata: Object.freeze({ ideType: 'ANTIGRAVITY' }),
@@ -76,8 +76,6 @@ const GEMINI_CLI_CLIENTS = Object.freeze({
   }),
   gemini_cli: Object.freeze({
     id: 'gemini_cli', label: 'Gemini CLI',
-    clientId: '<gemini cli client id removed>.apps.googleusercontent.com',
-    clientSecret: 'GOCSPX-<gemini cli client secret removed>',
     endpoint: 'https://cloudcode-pa.googleapis.com',
     scopes: Object.freeze(['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile']),
     loadMetadata: Object.freeze({ ideType: 'IDE_UNSPECIFIED', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }),
@@ -94,8 +92,6 @@ const GEMINI_CLI_CLIENTS = Object.freeze({
 /** 預設 client（個人帳號只有這條能走）。 */
 const GEMINI_CLI_DEFAULT_CLIENT = 'antigravity';
 /** 相容舊程式 / 文件的別名。 */
-const GEMINI_CLI_CLIENT_ID = GEMINI_CLI_CLIENTS.gemini_cli.clientId;
-const GEMINI_CLI_CLIENT_SECRET = GEMINI_CLI_CLIENTS.gemini_cli.clientSecret;
 const GEMINI_CLI_ENDPOINT = GEMINI_CLI_CLIENTS.gemini_cli.endpoint;
 const ANTIGRAVITY_ENDPOINT = GEMINI_CLI_CLIENTS.antigravity.endpoint;
 
@@ -122,16 +118,14 @@ function geminiCliClient_(client) {
 }
 
 /**
- * 從憑證判斷 client：明寫的 client 欄位 → 對得上的 client_id → 預設 antigravity（沒有 client_id 的 ~/.gemini/oauth_creds.json 是 Gemini CLI 的）。純函式。
+ * 從憑證判斷 client：明寫的 client 欄位 → 有 expiry_date（google-auth-library 格式 = Gemini CLI 的 ~/.gemini/oauth_creds.json）→ 預設 antigravity。純函式。
  * @param {!Object} o
  * @return {string}
  */
 function geminiCliDetectClient_(o) {
   const explicit = String(o.client || '').trim().replace(/-/g, '_');
   if (explicit) return explicit;
-  const cid = String(o.client_id || '').trim();
-  if (cid) { const hit = Object.keys(GEMINI_CLI_CLIENTS).find((k) => GEMINI_CLI_CLIENTS[k].clientId === cid); if (hit) return hit; }
-  return cid ? GEMINI_CLI_DEFAULT_CLIENT : (o.expiry_date !== undefined ? 'gemini_cli' : GEMINI_CLI_DEFAULT_CLIENT);
+  return o.expiry_date !== undefined && !o.client_id ? 'gemini_cli' : GEMINI_CLI_DEFAULT_CLIENT;
 }
 
 /**
@@ -168,10 +162,13 @@ function parseGeminiCliCredentials_(input, now) {
   const idPayload = decodeJwtPayload_(o.id_token) || {};
   const projectId = str('project_id') || str('cloudaicompanionProject');
   if (/^\d+$/.test(projectId)) throw new Error(`project_id「${projectId}」是專案編號（數字），要用專案 ID（字串，例如 my-project-123）。`);
+  if (!str('client_id') || !str('client_secret')) {
+    throw new Error('憑證沒有 client_id / client_secret（OAuth client 不放在程式裡）：請在本機重新執行 node scripts/gemini-login.js --account <代號>（它會從 ~/.config/gas-agent/oauth-clients.json 讀 client 並寫進憑證），再把印出的 JSON 貼回來。');
+  }
   return {
     client,
-    client_id: str('client_id') || spec.clientId,
-    client_secret: str('client_secret') || spec.clientSecret,
+    client_id: str('client_id'),
+    client_secret: str('client_secret'),
     access_token: str('access_token'),
     refresh_token: str('refresh_token'),
     id_token: str('id_token'),
@@ -194,8 +191,8 @@ function parseGeminiCliCredentials_(input, now) {
  * @return {{url: string, payload: string, headers: !Object}}
  */
 function geminiCliRefreshRequest_(creds) {
-  const spec = GEMINI_CLI_CLIENTS[creds.client] || GEMINI_CLI_CLIENTS[GEMINI_CLI_DEFAULT_CLIENT];
-  const form = ['grant_type=refresh_token', 'client_id=' + encodeURIComponent(creds.client_id || spec.clientId), 'client_secret=' + encodeURIComponent(creds.client_secret || spec.clientSecret), 'refresh_token=' + encodeURIComponent(creds.refresh_token)];
+  if (!creds.client_id || !creds.client_secret) throw new Error('憑證沒有 client_id / client_secret，無法 refresh；請重新執行 scripts/gemini-login.js 並貼新憑證。');
+  const form = ['grant_type=refresh_token', 'client_id=' + encodeURIComponent(creds.client_id), 'client_secret=' + encodeURIComponent(creds.client_secret), 'refresh_token=' + encodeURIComponent(creds.refresh_token)];
   return { url: GEMINI_CLI_TOKEN_URL, payload: form.join('&'), headers: { Accept: 'application/json' } };
 }
 

@@ -1,0 +1,5 @@
+{
+  "_comment": "複製到 ~/.config/gas-agent/oauth-clients.json 並 chmod 600。安裝型 app 的 OAuth client；不要 commit 真值。",
+  "antigravity": { "client_id": "<antigravity client id>.apps.googleusercontent.com", "client_secret": "GOCSPX-<antigravity client secret>" },
+  "gemini_cli": { "client_id": "<gemini cli client id>.apps.googleusercontent.com", "client_secret": "GOCSPX-<gemini cli client secret>" }
+}

@@ -227,6 +227,7 @@ Doctor 多 `chatgpt_<id>`：憑證存在、未失效、refresh token 未超過 2
 
 | 項目 | 說明 |
 |---|---|
+| OAuth client | 兩種 client 的 id / secret **不在 repo 裡**（repo 公開，GitHub push protection 也會擋）：放本機 `~/.config/gas-agent/oauth-clients.json`（chmod 600；格式見 [scripts/oauth-clients.example.json](scripts/oauth-clients.example.json)，從各自的 CLI / 程式取得），`gemini-login.js` 讀它並寫進憑證 JSON 的 `client_id` / `client_secret`，GAS 端只用憑證裡的值；憑證缺這兩欄會報「請重新執行 gemini-login.js」 |
 | 登入 | 在 **Mac 上**跑 `node scripts/gemini-login.js --account <代號>`（node ≥ 18，零依賴；預設 antigravity，`--client gemini-cli` 走舊 client）：開瀏覽器 → 選 Google 帳號 → 全部允許 → 腳本換 token、取 email、呼叫 `loadCodeAssist` /（第一次）`onboardUser` 開通並拿到專案 ID、antigravity 再列出可用模型 → 印出一段憑證 JSON。憑證同時存在 `~/.config/gas-agent/gemini-cli/<代號>.json`（0600；`--print` 可重印）。本機已登入 `agy`（或 `gemini`）的，`--from-cli` 直接沿用它的 token 檔不用開瀏覽器。Standard / Enterprise 加 `--project <GCP 專案 ID>`。Antigravity 的回呼 port 固定 51121，被占用（例如 `agy` 正在登入）就先關掉 |
 | 設定 | 管理頁「模型」→ 新增 provider → 範本「Google 帳號」（protocol `gemini_cli`、base_url `https://daily-cloudcode-pa.googleapis.com`、model `gemini-3-flash`）→ 儲存 → 編輯 → 把那段 JSON 貼進「Google 帳號憑證」→ 儲存 →「可用模型」挑一個 →「測試連線」。base_url 留在任一預設值時會依憑證的 client 自動選 host；填別的就照填的打（例如自架 proxy）。憑證只進 Script Property `PROVIDER_OAUTH_<id>`（驗過 `cloud-platform` scope 才收），不存 sheet、不回傳 token |
 | 續期 | access token 1 小時；剩不到 5 分鐘就用 refresh token 向 `oauth2.googleapis.com/token` 換新（帶 client_secret；與 chatgpt 共用 `oauthAccessToken_`：LockService 序列化、終端錯誤 `invalid_grant` → 標失效、推 Telegram、Doctor 紅燈）。Google 的 refresh token 不會定期到期，撤銷存取權或改密碼才失效，重跑 `gemini-login.js` 貼新憑證即可 |
@@ -764,6 +765,7 @@ node scripts/local-tests.js
 | watcher 建好後既有的信 / 檔沒觸發 | 刻意的：建立時只記 cursor（baseline），只對之後的新事件反應；要測就寄一封新的 |
 | watcher `enabled=TRUE` 但 `last_check` / `cursor` 不動、Queue 沒有 `watch` job（Cron 照常） | 舊版（2026-11-07 前）全部 watcher 停用時會清空 `WATCH_NEXT_CHECK`，之後**直接在 sheet** 把 `enabled` 改回 TRUE 不會重算旗標，`queueTick` 就不再開 Watchers tab。新版旗標永遠有值（最多 10 分鐘重掃一次），而且旗標空會被 `queueTick` 當成到期、下一分鐘就自動補掃寫回；要立刻確認就用 Telegram `/status`、Doctor 或開「排程 / 事件」分頁，三者都會顯示健康狀態並重設旗標。直接改表啟用不會重做 baseline，cursor 之後累積的事件會被撿起來（一次最多 5 件，每 `every_minutes` 再撿） |
 | Email 回信「（這輪沒有文字結果）」或 Telegram 回「系統中止：模型輸出撞到 max_tokens」 | 模型 reasoning 把 `max_tokens` 吃完、沒吐文字（GLM `reasoning_effort` 設 high / max 時常見；Usage tab 那幾輪 `completion_tokens` ≈ provider `max_tokens`）。到「模型」調高 `max_tokens`（例 10000+）或把 `extra_body` 的 `reasoning_effort` 改 `"low"` / `"medium"`。新版沒文字就不回信，撞上限會給說明而不是空白 |
+| gemini_cli provider 報「憑證沒有 client_id / client_secret」 | 2026-11-07 起 OAuth client 不放在程式裡，舊憑證若是 `--from-cli` 沿用 CLI token 檔產生的就沒有這兩欄。在本機確認 `~/.config/gas-agent/oauth-clients.json` 有值，重跑 `node scripts/gemini-login.js --account <代號>`，把新憑證 JSON 貼回管理頁 |
 | /owner 委託者帶 passkey 的信沒被處理 | 先看 Config `email_enabled`：Email 指令信掃描關著就連委託者的信都不掃（`/status` 會顯示）；再確認 passkey 在主旨或內文、對方 From 就是登記的 email、信未加星 |
 | `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |

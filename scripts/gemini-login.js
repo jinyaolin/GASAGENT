@@ -30,11 +30,14 @@ const { execFile } = require('child_process');
 
 const HUB_VERSION = '2.24.0';
 const HUB_UA = `antigravity/hub/${HUB_VERSION} (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)`;
-/** 兩種 client（安裝型 app 的公開 client；與 src/Providers_GeminiCli.gs 的 GEMINI_CLI_CLIENTS 一致）。 */
+/**
+ * 兩種 client（與 src/Providers_GeminiCli.gs 的 GEMINI_CLI_CLIENTS 一致）。OAuth client id / secret 不放在 repo：
+ * 從 ~/.config/gas-agent/oauth-clients.json 讀（格式見 scripts/oauth-clients.example.json），登入後一併寫進憑證 JSON，GAS 端只用憑證裡的值。
+ */
+const OAUTH_CLIENTS_FILE = path.join(os.homedir(), '.config', 'gas-agent', 'oauth-clients.json');
 const CLIENTS = {
   antigravity: {
     id: 'antigravity', label: 'Antigravity',
-    clientId: '<antigravity client id removed>.apps.googleusercontent.com', clientSecret: 'GOCSPX-<antigravity client secret removed>',
     scopes: ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/cclog', 'https://www.googleapis.com/auth/experimentsandconfigs'],
     endpoint: 'https://daily-cloudcode-pa.googleapis.com',
     redirect: { host: 'localhost', port: 51121, path: '/oauth-callback' },
@@ -44,7 +47,6 @@ const CLIENTS = {
   },
   gemini_cli: {
     id: 'gemini_cli', label: 'Gemini CLI',
-    clientId: '<gemini cli client id removed>.apps.googleusercontent.com', clientSecret: 'GOCSPX-<gemini cli client secret removed>',
     scopes: ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile'],
     endpoint: 'https://cloudcode-pa.googleapis.com',
     redirect: { host: '127.0.0.1', port: 0, path: '/oauth2callback' },
@@ -66,6 +68,18 @@ const account = opt('--account', 'default');
 const clientKey = String(opt('--client', 'antigravity')).replace(/-/g, '_');
 const C = CLIENTS[clientKey];
 if (!C) { console.error(`--client 只能是 antigravity 或 gemini-cli（不是「${clientKey}」）。`); process.exit(1); }
+{
+  let clientsCfg = null;
+  try { clientsCfg = JSON.parse(fs.readFileSync(OAUTH_CLIENTS_FILE, 'utf8')); } catch (err) { clientsCfg = null; }
+  const entry = clientsCfg && (clientsCfg[C.id] || clientsCfg[C.id.replace(/_/g, '-')]);
+  C.clientId = entry && String(entry.client_id || entry.clientId || '').trim();
+  C.clientSecret = entry && String(entry.client_secret || entry.clientSecret || '').trim();
+  if (!C.clientId || !C.clientSecret) {
+    console.error(`找不到 ${C.label} 的 OAuth client：請建立 ${OAUTH_CLIENTS_FILE}（chmod 600），格式見 scripts/oauth-clients.example.json，` +
+      `"${C.id}" 底下填 client_id 與 client_secret（安裝型 app 的 client，從各自的 CLI / 程式取得）。`);
+    process.exit(1);
+  }
+}
 const port = Number(opt('--port', String(C.redirect.port)));
 const projectHint = opt('--project', process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID || '');
 const debug = flag('--debug');

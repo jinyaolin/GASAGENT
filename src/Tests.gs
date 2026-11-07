@@ -4005,9 +4005,12 @@ function testChatgptFlow_() {
 // ---- M7 gemini_cli（Google 帳號登入，Gemini CLI 方案）----------------------------------------------
 
 /** @return {!Object} 合法憑證（gemini-login.js 的輸出） */
+/** 測試用的假 OAuth client（真值不在 repo；登入腳本從 ~/.config/gas-agent/oauth-clients.json 讀）。 */
+const TEST_OAUTH_CLIENT_ID = 'test-client.apps.googleusercontent.com';
+const TEST_OAUTH_CLIENT_SECRET = 'GOCSPX-test-secret';
 function fakeGeminiCliCreds_(overrides) {
   return Object.assign({
-    client: 'gemini_cli', client_id: GEMINI_CLI_CLIENT_ID, client_secret: GEMINI_CLI_CLIENT_SECRET, access_token: 'ya29.a', refresh_token: '1//rt_1',
+    client: 'gemini_cli', client_id: TEST_OAUTH_CLIENT_ID, client_secret: TEST_OAUTH_CLIENT_SECRET, access_token: 'ya29.a', refresh_token: '1//rt_1',
     id_token: fakeJwt_({ sub: 'g1', email: 'me@gmail.com' }), expires_at: 1900000000000, scopes: ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'openid'],
     email: 'me@gmail.com', saved_at: '2026-11-03T00:00:00.000Z',
   }, overrides || {});
@@ -4016,17 +4019,20 @@ function fakeGeminiCliCreds_(overrides) {
 function testGeminiCliCredentials_() {
   const now = 1800000000000;
   const c = parseGeminiCliCredentials_(JSON.stringify(fakeGeminiCliCreds_()), now);
-  assertEqual_([c.client, c.client_id, c.client_secret, c.refresh_token, c.expires_at, c.email, c.subject, c.project_id, c.invalid], ['gemini_cli', GEMINI_CLI_CLIENT_ID, GEMINI_CLI_CLIENT_SECRET, '1//rt_1', 1900000000000, 'me@gmail.com', 'g1', '', ''], '登入腳本 JSON（gemini_cli client）');
-  // antigravity：明寫 client、或只給 access/refresh（登入腳本預設）、或 client_id 對得上
-  const ag = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: undefined, client_secret: undefined }), now);
-  assertEqual_([ag.client, ag.client_id, ag.client_secret, ag.scopes.length], ['antigravity', GEMINI_CLI_CLIENTS.antigravity.clientId, GEMINI_CLI_CLIENTS.antigravity.clientSecret, 4], 'antigravity 明寫 client → 補 client id / secret');
-  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r' }, now).client, 'antigravity', '沒 client / client_id → 預設 antigravity');
-  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client_id: GEMINI_CLI_CLIENTS.antigravity.clientId }, now).client, 'antigravity', 'client_id 對到 antigravity');
-  assertEqual_(parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client: 'gemini-cli' }, now).client, 'gemini_cli', 'client 寫 gemini-cli 也認');
-  assertThrows_(() => parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r', client: 'nope' }), '不認識的 client');
-  // Gemini CLI 自己的 ~/.gemini/oauth_creds.json（google-auth-library 格式）
-  const cli = parseGeminiCliCredentials_({ access_token: 'ya29.b', refresh_token: '1//rt_2', scope: 'https://www.googleapis.com/auth/cloud-platform openid', token_type: 'Bearer', id_token: fakeJwt_({ sub: 'g2', email: 'cli@gmail.com' }), expiry_date: 1850000000000 }, now);
-  assertEqual_([cli.client, cli.client_id, cli.expires_at, cli.email, cli.scopes.length, cli.saved_at], ['gemini_cli', GEMINI_CLI_CLIENT_ID, 1850000000000, 'cli@gmail.com', 2, new Date(now).toISOString()], 'oauth_creds.json 格式（expiry_date）→ gemini_cli client、email 從 id_token');
+  assertEqual_([c.client, c.client_id, c.client_secret, c.refresh_token, c.expires_at, c.email, c.subject, c.project_id, c.invalid], ['gemini_cli', TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET, '1//rt_1', 1900000000000, 'me@gmail.com', 'g1', '', ''], '登入腳本 JSON（gemini_cli client）');
+  // antigravity：明寫 client；client id / secret 一律來自憑證（不在程式裡），缺了就報錯要求重新登入
+  const ag = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: 'ag-id.apps.googleusercontent.com', client_secret: 'GOCSPX-ag' }), now);
+  assertEqual_([ag.client, ag.client_id, ag.client_secret, ag.scopes.length], ['antigravity', 'ag-id.apps.googleusercontent.com', 'GOCSPX-ag', 4], 'antigravity 明寫 client、client id / secret 來自憑證');
+  assert_(/client_id \/ client_secret/.test(assertThrows_(() => parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: undefined, client_secret: undefined }), now), '缺 client').message), '缺 client id / secret 要求重新登入');
+  assert_(/gemini-login\.js/.test(assertThrows_(() => parseGeminiCliCredentials_({ access_token: 'a', refresh_token: 'r' }, now), '只有 token').message), '只有 token 也要求重新登入');
+  const minimal = { access_token: 'a', refresh_token: 'r', client_id: 'x', client_secret: 'y' };
+  assertEqual_(parseGeminiCliCredentials_(minimal, now).client, 'antigravity', '沒 client → 預設 antigravity');
+  assertEqual_(parseGeminiCliCredentials_(Object.assign({ client: 'gemini-cli' }, minimal), now).client, 'gemini_cli', 'client 寫 gemini-cli 也認');
+  assertThrows_(() => parseGeminiCliCredentials_(Object.assign({ client: 'nope' }, minimal)), '不認識的 client');
+  assertEqual_(geminiCliDetectClient_({ expiry_date: 1 }), 'gemini_cli', 'oauth_creds.json 格式（expiry_date、無 client_id）判成 gemini_cli');
+  // Gemini CLI 自己的 ~/.gemini/oauth_creds.json（google-auth-library 格式）→ 登入腳本 --from-cli 會補 client / client_id / client_secret
+  const cli = parseGeminiCliCredentials_({ client: 'gemini_cli', client_id: TEST_OAUTH_CLIENT_ID, client_secret: TEST_OAUTH_CLIENT_SECRET, access_token: 'ya29.b', refresh_token: '1//rt_2', scope: 'https://www.googleapis.com/auth/cloud-platform openid', token_type: 'Bearer', id_token: fakeJwt_({ sub: 'g2', email: 'cli@gmail.com' }), expiry_date: 1850000000000 }, now);
+  assertEqual_([cli.client, cli.client_id, cli.expires_at, cli.email, cli.scopes.length, cli.saved_at], ['gemini_cli', TEST_OAUTH_CLIENT_ID, 1850000000000, 'cli@gmail.com', 2, new Date(now).toISOString()], 'oauth_creds.json 格式（expiry_date）→ email 從 id_token');
   assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ expires_at: undefined, saved_at: undefined }), now).expires_at, now, '不知道到期就當已過期');
   assertEqual_(parseGeminiCliCredentials_(fakeGeminiCliCreds_({ project_id: 'my-proj-1', tier: 'free-tier', project_hint: 'x' }), now).project_id, 'my-proj-1', 'project_id 帶入');
   assertThrows_(() => parseGeminiCliCredentials_('nope'), '非 JSON');
@@ -4037,7 +4043,8 @@ function testGeminiCliCredentials_() {
   const req = geminiCliRefreshRequest_(c);
   assertEqual_(req.url, GEMINI_CLI_TOKEN_URL, 'token url');
   assert_(/grant_type=refresh_token/.test(req.payload) && /client_secret=GOCSPX/.test(req.payload) && /refresh_token=1%2F%2Frt_1/.test(req.payload), 'refresh form：' + req.payload);
-  assert_(geminiCliRefreshRequest_(ag).payload.indexOf('client_id=' + encodeURIComponent(GEMINI_CLI_CLIENTS.antigravity.clientId)) !== -1, 'antigravity refresh 用自己的 client');
+  assert_(geminiCliRefreshRequest_(ag).payload.indexOf('client_id=' + encodeURIComponent('ag-id.apps.googleusercontent.com')) !== -1, 'antigravity refresh 用憑證裡的 client');
+  assertThrows_(() => geminiCliRefreshRequest_(Object.assign({}, ag, { client_secret: '' })), '沒 secret 不能 refresh');
   // 摘要
   const sum = geminiCliCredentialSummary_(Object.assign({}, c, { project_id: 'p1', tier: 'free-tier' }), now);
   assertEqual_([sum.email, sum.scopesOk, sum.projectId, sum.tier, sum.refreshExpiresAt, sum.invalid, sum.client], ['me@gmail.com', true, 'p1', 'free-tier', '', '', 'gemini_cli'], '摘要');
@@ -4049,7 +4056,7 @@ function testGeminiCliCredentials_() {
   assertEqual_([geminiCliEndpoint_(p, { client: 'gemini_cli' }), geminiCliEndpoint_(p, { client: 'antigravity' }), geminiCliEndpoint_(Object.assign({}, p, { base_url: 'https://my-proxy.example.com/' }), { client: 'antigravity' })], [GEMINI_CLI_ENDPOINT, ANTIGRAVITY_ENDPOINT, 'https://my-proxy.example.com'], 'endpoint 依 client；自訂 base_url 尊重');
   assertThrows_(() => validateProvider_(fakeProviderInput_({ protocol: 'gemini_cli', role: 'embed' })), '不能 embed');
   assertEqual_([isOAuthProtocol_('gemini_cli'), isOAuthProtocol_('chatgpt'), isOAuthProtocol_('gemini')], [true, true, false], 'isOAuthProtocol_');
-  assertEqual_(parseOAuthCredentials_('gemini_cli', fakeGeminiCliCreds_()).client_id, GEMINI_CLI_CLIENT_ID, '分派解析');
+  assertEqual_(parseOAuthCredentials_('gemini_cli', fakeGeminiCliCreds_()).client_id, TEST_OAUTH_CLIENT_ID, '分派解析');
   assertEqual_(oauthLoginScript_('gemini_cli'), 'scripts/gemini-login.js', '登入腳本名');
   assert_(geminiCliListModels_(p, { store: { get: () => null } }).length > 3 && geminiCliListModels_(p, { store: { get: () => null } })[0].slug === 'gemini-3-flash', '沒憑證 → antigravity 靜態名單');
   assertEqual_(geminiCliListModels_(p, { store: { get: () => c } })[0].slug, 'gemini-2.5-pro', 'gemini_cli client → 靜態名單');
@@ -4146,7 +4153,7 @@ function testGeminiCliFlow_() {
   const sent = JSON.parse(stub.calls[0].options.payload);
   assertEqual_([sent.project, sent.model, sent.request.contents[0].parts[0].text, sent.requestType, stub.calls[0].options.headers.Authorization, stub.calls[0].url], ['P', 'gemini-2.5-pro', 'x', 'agent', 'Bearer T', ANTIGRAVITY_ENDPOINT + '/v1internal:generateContent'], '送出 Antigravity 包層 body');
   // antigravity 開通流程：loadCodeAssist 沒專案 → onboardUser（第一次沒 done，重送）→ done 帶專案
-  const agFresh = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: undefined, client_secret: undefined, expires_at: now + 3600000 }), now);
+  const agFresh = parseGeminiCliCredentials_(fakeGeminiCliCreds_({ client: 'antigravity', client_id: 'ag-id.apps.googleusercontent.com', client_secret: 'GOCSPX-ag', expires_at: now + 3600000 }), now);
   let agStore = mem(agFresh);
   stub = fetchStub_([fakeResponse_(200, { allowedTiers: [{ id: 'free-tier', isDefault: true }] }), fakeResponse_(200, { done: false }), fakeResponse_(200, { done: true, response: { cloudaicompanionProject: { id: 'ag-managed' } } })]);
   const agAuth = geminiCliAuth_(gcli, { store: agStore, now: () => now, lock, fetch: stub.fetch, sleep });
