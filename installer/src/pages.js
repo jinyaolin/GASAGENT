@@ -66,7 +66,7 @@ function installed(o) {
 </div>
 <h2>接下來</h2>
 <ol>
-<li>打開上面的管理頁。第一次 Google 會要你授權 agent 本身的 Gmail / Drive / 日曆等權限（這一步一定要本人按，無法代做；一樣會有「尚未驗證」警告）。授權後到「Doctor」分頁按「重新安裝」，它會建好資料庫試算表與每分鐘的 trigger。</li>
+<li>打開上面的管理頁。第一次 Google 會要你授權 agent 本身的 Gmail / Drive / 日曆等權限（這一步一定要本人按，無法代做；一樣會有「尚未驗證」警告）。授權後頁面會顯示「GAS Agent 尚未安裝」，按「安裝」就會建好資料庫試算表與每分鐘的 trigger。</li>
 <li>到「模型」分頁填你的 AI 模型 API key。</li>
 <li>到「通道」分頁貼 Telegram bot token、把上面的 webhook 網址填進去並按「設定 webhook」，把你自己的 Telegram user id 加進白名單。</li>
 <li>在 Telegram 對 bot 輸入 <code>/upgrade code ${esc(o.code)}</code>，agent 之後就能用 <code>/upgrade</code> 自己更新。</li>

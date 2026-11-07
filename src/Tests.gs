@@ -75,6 +75,7 @@ function smokeTestTable_() {
     ['watchers: 輸入 / config 驗證（四種 type、odoo 白名單、after: 拒絕）；gmail / drive baseline → 新事件 → cursor 推進與 seen 去重、一次最多 5 件；sheets 新列成一事件；odoo id > last_id', testWatcherCheck_, 'pure'],
     ['upgrade: release.json 解析與拒絕（commit / src 外 / 子資料夾 / 副檔名 / 同名 / 缺 manifest / sha）、版本比較、抓檔驗 sha256（不符 / 404 報錯）、manifest access 翻轉、scope 差異、語法預檢、部署 A / B 挑選（@HEAD 略過、多個候選要 override）、API 錯誤訊息、來源驗證、upgradePlan_（可升級 / 已最新 / 降版 / scope 新增擋 / API 未開擋 / 沒 release.json）、狀態文字', testUpgradePure_, 'pure'],
     ['upgrade: Telegram /upgrade status / 用法 / 非白名單；/upgrade 寫 Approvals（釘 commit、按鈕、AuditLog）且待審不重複、已最新與被擋不寫；rollback 沒備份；decideApproval_ 批准排 upgrade job 不續跑、拒絕不排；runUpgradeJob_ 順序同 deploy.sh（備份 → A → B → HEAD 還原）、props / 通知 / AuditLog；commit 變了 / 語法錯 / scope 新增 → failed 不動程式；rollback 讀備份；tick 分派；post-install 清旗標跑 installAgent + Doctor；Doctor 檢查', testUpgradeFlow_, 'pure'],
+    ['admin: 第一次安裝守門 firstInstallAllowed_（active = effective 才放行；匿名 / 不同帳號拒絕）；firstRunHtml_ 含安裝按鈕與 adminFirstInstall', testFirstInstall_, 'pure'],
     ['upgrade: OAuth 授權 — 取件回應解析、access token（沒授權 / 失效 throw、新鮮直接回、快到期向 Google refresh 並寫回、invalid_grant 標失效 + AuditLog、5xx 不標）、scriptApi_ 帶該 token、/upgrade code 取件（格式 / 404 / 成功存 UPGRADE_OAUTH 並驗證部署）、UPGRADE_RELAY 覆寫、Telegram login / code / logout / status', testUpgradeOauth_, 'pure'],
     ['housekeeping: contiguousRowGroups_ 由下往上合併；housekeepPlan_ 各 tab 規則（Queue done/failed 且過期且未被 pending 審批引用、AuditLog / Usage ts、Approvals 已決定、Messages 只刪 seq ≤ compact_seq）、最舊優先、上限；housekeepRun_ 讀上下文並刪列、沒刪完 complete=false；housekeepIfDue_ 旗標空只排 24 小時後、到期才跑、retention 0 關閉、沒刪完 2 分鐘後再來、AuditLog 摘要；retention_days 設定解析', testHousekeeping_, 'pure'],
     ['watchers: create 立刻 baseline 並寫旗標；scanIfDue 旗標沒到不開 sheet、到期檢查入列 watch job、next_check 推進；watch job 建 session（channel watch、autonomous）、user 訊息含事件資料區塊、投遞、更新 last_status；update 改來源重做 baseline；watcher_manage autonomous 只能 list', testWatcherFlow_, 'pure'],
@@ -4602,4 +4603,10 @@ function testUpgradeOauth_() {
   assert_(/尚未授權升級/.test(upgradeStatusText_({ version: '1', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null, oauth: null })), 'status 未授權');
   assert_(/已失效（invalid_grant）/.test(upgradeStatusText_({ version: '1', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null, oauth: { email: 'a', obtainedAt: '', invalid: 'invalid_grant' } })), 'status 失效');
   assert_(/\/upgrade login/.test(handleTelegramUpdate_(tgMessage_('/upgrade xyz', 111), t.deps).text), '用法含 login');
+}
+
+function testFirstInstall_() {
+  assertEqual_([firstInstallAllowed_('Me@X.com', 'me@x.com'), firstInstallAllowed_('', 'me@x.com'), firstInstallAllowed_('a@x.com', 'me@x.com'), firstInstallAllowed_('me@x.com', '')], [true, false, false, false], '守門');
+  const html = firstRunHtml_();
+  assert_(/adminFirstInstall\(\)/.test(html) && /id="go"/.test(html) && /installAgent\(\)/.test(html), '安裝頁含按鈕與替代做法');
 }

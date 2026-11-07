@@ -23,10 +23,8 @@ function doGet(e) {
   }
 
   if (!getOwnerEmail_()) {
-    return HtmlService.createHtmlOutput(
-      '<p style="font-family:system-ui,sans-serif;padding:2rem">GAS Agent 尚未安裝：' +
-      '請先在 Apps Script 編輯器執行 <code>installAgent()</code> 並完成授權，再重新整理此頁。</p>'
-    ).setTitle('GAS Agent');
+    // 第一次打開（安裝頁建好的專案）：owner 本人在這裡按「安裝」就好，不必進編輯器。
+    return HtmlService.createHtmlOutput(firstRunHtml_()).setTitle('GAS Agent 安裝');
   }
 
   try {
@@ -46,6 +44,51 @@ function doGet(e) {
   return template.evaluate()
     .setTitle('GAS Agent 管理頁')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * 還沒安裝時的首頁：一顆「安裝」按鈕 → adminFirstInstall()。純函式。
+ * @return {string}
+ */
+function firstRunHtml_() {
+  return '<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<style>body{font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;max-width:640px;margin:0 auto;padding:2rem;line-height:1.6;color:#1f2328}' +
+    'button{font-size:16px;padding:10px 20px;border-radius:8px;border:0;background:#1f6feb;color:#fff;cursor:pointer}button[disabled]{opacity:.5}' +
+    'pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:8px}.err{color:#cf222e}.ok{color:#1a7f37}</style></head><body>' +
+    '<h1>GAS Agent 尚未安裝</h1>' +
+    '<p>這個 Apps Script 專案已經有程式了，但還沒建資料庫試算表與每分鐘的 trigger。以 owner 身分按下面的按鈕完成安裝（等同在編輯器執行 <code>installAgent()</code>）；' +
+    '若 Google 還沒要你授權 Gmail / Drive 等權限，按下去會先跳授權畫面，授權後再按一次。</p>' +
+    '<p><button id="go">安裝</button></p><pre id="out"></pre>' +
+    '<p>按鈕不管用時的替代做法：到 <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a> 打開這個專案，執行 <code>installAgent()</code>。</p>' +
+    '<script>' +
+    'var b=document.getElementById("go"),o=document.getElementById("out");' +
+    'b.onclick=function(){b.disabled=true;o.textContent="安裝中…（建立試算表、trigger、預設設定，約 10–20 秒）";' +
+    'google.script.run.withSuccessHandler(function(r){o.className="ok";o.textContent="安裝完成：owner "+r.owner+"\\nDB "+r.db.url+"\\n3 秒後重新整理…";setTimeout(function(){location.reload();},3000);})' +
+    '.withFailureHandler(function(e){b.disabled=false;o.className="err";o.textContent="安裝失敗："+(e&&e.message||e);}).adminFirstInstall();};' +
+    '</script></body></html>';
+}
+
+/**
+ * 第一次安裝（還沒有 OWNER_EMAIL 時由 firstRunHtml_ 的按鈕呼叫）。只接受「owner 本人打開自己的 Web App」：
+ * 目前使用者（active）必須等於執行身分（effective）；部署 B（任何人、匿名）拿不到 active email 就拒絕。
+ * @return {!Object} installAgent() 的摘要
+ */
+function adminFirstInstall() {
+  if (getOwnerEmail_()) { assertOwner(); return installAgent(); }
+  const active = Session.getActiveUser().getEmail();
+  const effective = Session.getEffectiveUser().getEmail();
+  if (!firstInstallAllowed_(active, effective)) throw new Error('只有 owner 本人透過「只限我」的部署（管理頁）才能安裝；請用部署 A 的網址並以本人帳號登入。');
+  return installAgent();
+}
+
+/**
+ * 第一次安裝的守門：active 與 effective 都有值且相同。純函式。
+ * @param {string} active
+ * @param {string} effective
+ * @return {boolean}
+ */
+function firstInstallAllowed_(active, effective) {
+  return !!active && !!effective && normalizeEmail_(active) === normalizeEmail_(effective);
 }
 
 /**
