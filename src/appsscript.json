@@ -12,9 +12,7 @@
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/script.external_request",
     "https://www.googleapis.com/auth/script.scriptapp",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/script.projects",
-    "https://www.googleapis.com/auth/script.deployments"
+    "https://www.googleapis.com/auth/userinfo.email"
   ],
   "webapp": {
     "executeAs": "USER_DEPLOYING",

@@ -1,0 +1,27 @@
+# systemd unit：複製到 /etc/systemd/system/gas-agent-installer.service（installer/deploy/deploy.sh 會做）
+#   useradd --system --home /opt/gas-agent-installer --shell /usr/sbin/nologin gasinstaller
+#   .env：/opt/gas-agent-installer/.env（0600，owner gasinstaller），填 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / BASE_URL
+#   systemctl daemon-reload && systemctl enable --now gas-agent-installer
+#   journalctl -u gas-agent-installer -f
+[Unit]
+Description=gas-agent-installer（GAS Agent 安裝 / 升級授權服務）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gasinstaller
+Group=gasinstaller
+WorkingDirectory=/opt/gas-agent-installer
+ExecStart=/snap/node/current/bin/node src/server.js
+Restart=on-failure
+RestartSec=3
+ReadWritePaths=/opt/gas-agent-installer/data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+{
+  "name": "gas-agent-installer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GAS Agent 安裝 / 升級授權服務：用 Google 登入就把 agent 裝進使用者自己的帳號；既有 agent 取 /upgrade 的授權",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

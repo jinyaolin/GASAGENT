@@ -18,9 +18,11 @@
  * 只有白名單（owner）能 `/upgrade`；審批訊息顯示 commit；檔案 hash 必須和 release.json 一致；新版多要 OAuth scope 時拒絕自動升級
  * （trigger 會因未授權而失敗），要維護者用 deploy.sh 推並在編輯器重新授權。
  *
- * 前置（每個帳號一次）：manifest 要有 script.projects / script.deployments 兩個 scope（已在 appsscript.json）；
- * 腳本必須掛在**標準 GCP 專案**（編輯器「專案設定 → 變更專案」填專案編號；不可逆）且該專案啟用 Apps Script API——用預設 GCP 專案會 403
- * 「has not been used in project …」，預設專案沒有辦法開這個 API；帳號主人到 https://script.google.com/home/usersettings 打開
+ * 授權（每個帳號一次，`/upgrade login`）：Apps Script API **不接受**用預設 GCP 專案的腳本自己的 token（403 has not been used in project），
+ * 所以不用 ScriptApp.getOAuthToken()，改走安裝服務（installer/，https://zaistudio.tw/agent）的 OAuth client——和 clasp 的做法一樣：
+ * owner 在瀏覽器對「GAS Agent Installer」同意 script.projects / script.deployments 兩個 scope，服務換到 refresh token 後給一組取件碼，
+ * owner 在 Telegram `/upgrade code <取件碼>`，agent 向服務領走 refresh token + client id / secret 存進 Script Property UPGRADE_OAUTH，
+ * 之後自己向 Google refresh。腳本的 GCP 專案、manifest scope 都不用動。帳號主人的 https://script.google.com/home/usersettings 要開著
  * 「Google Apps Script API」。Doctor「程式升級」會檢查。
  */
 
@@ -50,6 +52,152 @@ const SCRIPT_API_ENABLE_URL = 'https://script.google.com/home/usersettings';
 /** 兩個部署的 webapp.access。 */
 const UPGRADE_ACCESS_ADMIN = 'MYSELF';
 const UPGRADE_ACCESS_WEBHOOK = 'ANYONE_ANONYMOUS';
+/** 安裝 / 升級授權服務（installer/）；Script Property UPGRADE_RELAY 可覆寫。 */
+const UPGRADE_RELAY_DEFAULT = 'https://zaistudio.tw/agent';
+/** Google token endpoint（refresh）。 */
+const UPGRADE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+/** access token 剩不到這麼久就先 refresh。 */
+const UPGRADE_TOKEN_SKEW_MS = 120000;
+/** 取件碼格式（服務產生：XXXX-XXXX）。 */
+const UPGRADE_PICKUP_RE = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+
+// ---- 升級授權（OAuth，/upgrade login） -------------------------------------------------------------------
+
+/**
+ * @param {{getProp: (Function|undefined)}=} deps
+ * @return {string} 安裝服務網址（無尾斜線）
+ */
+function upgradeRelayUrl_(deps) {
+  const get = (deps && deps.getProp) || getProp_;
+  return String(get(PROP.UPGRADE_RELAY) || UPGRADE_RELAY_DEFAULT).trim().replace(/\/+$/, '');
+}
+
+/**
+ * UPGRADE_OAUTH 的讀寫。
+ * @param {{getProp: (Function|undefined), setProp: (Function|undefined)}=} deps
+ * @return {{get: function(): ?Object, set: function(?Object)}}
+ */
+function upgradeOauthStore_(deps) {
+  const get = (deps && deps.getProp) || getProp_;
+  const set = (deps && deps.setProp) || setProp_;
+  return {
+    get: () => { try { const raw = get(PROP.UPGRADE_OAUTH); return raw ? JSON.parse(raw) : null; } catch (err) { return null; } },
+    set: (o) => set(PROP.UPGRADE_OAUTH, o ? JSON.stringify(o) : ''),
+  };
+}
+
+/**
+ * 服務取件回應 → 要存的憑證。純函式。
+ * @param {*} bundle {refresh_token, client_id, client_secret, email?, scope?}
+ * @param {number} nowMs
+ * @return {!Object}
+ * @throws {Error}
+ */
+function upgradeOauthParse_(bundle, nowMs) {
+  const b = bundle && typeof bundle === 'object' ? bundle : {};
+  ['refresh_token', 'client_id', 'client_secret'].forEach((k) => { if (!b[k] || typeof b[k] !== 'string') throw new Error(`授權資料缺 ${k}。`); });
+  return {
+    refresh_token: b.refresh_token, client_id: b.client_id, client_secret: b.client_secret,
+    email: String(b.email || ''), scope: String(b.scope || ''),
+    access_token: String(b.access_token || ''), expires_at: b.expires_at ? Number(b.expires_at) : 0,
+    obtained_at: fmtDate_(new Date(nowMs)), invalid: '',
+  };
+}
+
+/**
+ * 憑證摘要（不含 token）。純函式。
+ * @param {?Object} creds
+ * @return {?{email: string, obtainedAt: string, invalid: string}}
+ */
+function upgradeOauthSummary_(creds) {
+  if (!creds || !creds.refresh_token) return null;
+  return { email: String(creds.email || ''), obtainedAt: String(creds.obtained_at || ''), invalid: String(creds.invalid || '') };
+}
+
+/**
+ * 可用的 access token；快到期就向 Google refresh（LockService 序列化）。invalid_grant → 標失效並要求重新 /upgrade login。
+ * @param {{getProp: (Function|undefined), setProp: (Function|undefined), fetch: (Function|undefined), now: (Function|undefined), lock: (Object|undefined)}=} deps
+ * @return {string}
+ * @throws {Error}
+ */
+function upgradeAccessToken_(deps) {
+  deps = deps || {};
+  const now = deps.now || (() => Date.now());
+  const store = upgradeOauthStore_(deps);
+  let creds = store.get();
+  if (!creds || !creds.refresh_token) throw new Error('尚未授權升級：在 Telegram 輸入 /upgrade login，依連結完成 Google 授權後把取件碼用 /upgrade code <取件碼> 送回來。');
+  if (creds.invalid) throw new Error(`升級授權已失效（${creds.invalid}）：請重新 /upgrade login。`);
+  const fresh = (c) => c.access_token && Number(c.expires_at || 0) - now() > UPGRADE_TOKEN_SKEW_MS;
+  if (fresh(creds)) return creds.access_token;
+  const lock = deps.lock || (() => { try { return LockService.getScriptLock(); } catch (err) { return null; } })();
+  let locked = false;
+  if (lock) { try { lock.waitLock(20000); locked = true; } catch (err) { locked = false; } }
+  try {
+    if (locked) { creds = store.get() || creds; if (fresh(creds)) return creds.access_token; }
+    const fetch = deps.fetch || ((url, params) => UrlFetchApp.fetch(url, params));
+    const form = ['grant_type=refresh_token', 'client_id=' + encodeURIComponent(creds.client_id), 'client_secret=' + encodeURIComponent(creds.client_secret), 'refresh_token=' + encodeURIComponent(creds.refresh_token)].join('&');
+    const res = fetch(UPGRADE_TOKEN_URL, { method: 'post', contentType: 'application/x-www-form-urlencoded', payload: form, muteHttpExceptions: true });
+    const code = res.getResponseCode();
+    let json = null;
+    try { json = JSON.parse(res.getContentText()); } catch (err) { json = null; }
+    if (code >= 200 && code < 300 && json && json.access_token) {
+      const next = Object.assign({}, creds, { access_token: String(json.access_token), expires_at: now() + Number(json.expires_in || 3600) * 1000 });
+      store.set(next);
+      return next.access_token;
+    }
+    const errCode = json && (json.error || (json.error_description || '')) ? String(json.error || '') : '';
+    if (code === 400 || code === 401) {
+      store.set(Object.assign({}, creds, { invalid: errCode || ('http_' + code), access_token: '', expires_at: 0 }));
+      securityAudit_('upgrade:oauth_invalid', errCode || ('HTTP ' + code), deps.audit);
+      throw new Error(`升級授權已失效（${errCode || 'HTTP ' + code}）：請重新 /upgrade login。`);
+    }
+    throw new Error(`refresh 升級授權失敗：HTTP ${code} ${json && json.error_description ? json.error_description : ''}`.trim());
+  } finally {
+    if (locked) { try { lock.releaseLock(); } catch (err) { /* 忽略 */ } }
+  }
+}
+
+/**
+ * /upgrade login 要給 owner 點的連結。
+ * @param {Object=} deps
+ * @return {string}
+ */
+function upgradeLoginUrl_(deps) { return upgradeRelayUrl_(deps) + '/upgrade/start'; }
+
+/**
+ * /upgrade code <取件碼>：向安裝服務領 refresh token + client，存 UPGRADE_OAUTH，再打一次 deployments.list 驗證。
+ * @param {string} code
+ * @param {{fetch: (Function|undefined), api: (Object|undefined), scriptId: (string|undefined), getProp: (Function|undefined), setProp: (Function|undefined), now: (Function|undefined), audit: (Function|undefined)}=} deps
+ * @return {{email: string, deployA: number, deployB: number}}
+ * @throws {Error}
+ */
+function upgradePickup_(code, deps) {
+  deps = deps || {};
+  const c = String(code || '').trim().toUpperCase();
+  if (!UPGRADE_PICKUP_RE.test(c)) throw new Error('取件碼格式是 XXXX-XXXX（英數 8 碼）。');
+  const fetch = deps.fetch || ((url, params) => UrlFetchApp.fetch(url, params));
+  const res = fetch(upgradeRelayUrl_(deps) + '/pickup', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ code: c }), muteHttpExceptions: true });
+  const status = res.getResponseCode();
+  let json = null;
+  try { json = JSON.parse(res.getContentText()); } catch (err) { json = null; }
+  if (status === 404 || status === 410) throw new Error('取件碼不存在、已用過或已過期（24 小時）：請重新 /upgrade login。');
+  if (status !== 200 || !json) throw new Error(`安裝服務回應 ${status}：${json && json.error ? json.error : '(無內容)'}`);
+  const now = deps.now || (() => Date.now());
+  const creds = upgradeOauthParse_(json, now());
+  const store = upgradeOauthStore_(deps);
+  store.set(creds);
+  // 驗證：列部署
+  const api = deps.api || scriptApi_(deps);
+  const scriptId = deps.scriptId || ScriptApp.getScriptId();
+  let sel;
+  try {
+    sel = upgradeSelectDeployments_(api.listDeployments(scriptId), { a: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_A), b: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_B) });
+  } catch (err) {
+    throw new Error(`授權已存檔（${creds.email || '未知帳號'}），但驗證失敗：${err && err.message || err}`);
+  }
+  securityAudit_('upgrade:login', `${creds.email || '?'} 完成升級授權（取件碼）`, deps.audit);
+  return { email: creds.email, deployA: sel.a.version, deployB: sel.b ? sel.b.version : 0 };
+}
 
 // ---- 來源與 release.json ------------------------------------------------------------------------
 
@@ -321,7 +469,7 @@ function upgradeSelectDeployments_(deployments, overrides) {
 function scriptApi_(deps) {
   deps = deps || {};
   const fetch = deps.fetch || ((url, params) => UrlFetchApp.fetch(url, params));
-  const token = deps.token || (() => ScriptApp.getOAuthToken());
+  const token = deps.token || (() => upgradeAccessToken_(deps));
   const call = (method, path, body) => {
     const params = { method, muteHttpExceptions: true, headers: { Authorization: 'Bearer ' + token() } };
     if (body !== undefined) { params.contentType = 'application/json'; params.payload = JSON.stringify(body); }
@@ -386,7 +534,7 @@ function upgradeStatus_(deps) {
   let source = { repo: UPGRADE_DEFAULT_REPO, ref: UPGRADE_DEFAULT_REF };
   let sourceError = '';
   try { source = upgradeSource_(deps); } catch (err) { sourceError = String(err && err.message || err); }
-  return { version: APP_VERSION, source, sourceError, last: parse(get(PROP.UPGRADE_LAST)), backup: parse(get(PROP.UPGRADE_BACKUP)) };
+  return { version: APP_VERSION, source, sourceError, last: parse(get(PROP.UPGRADE_LAST)), backup: parse(get(PROP.UPGRADE_BACKUP)), oauth: upgradeOauthSummary_(upgradeOauthStore_(deps).get()), relay: upgradeRelayUrl_(deps) };
 }
 
 /**
@@ -399,6 +547,7 @@ function upgradeStatusText_(st) {
   if (st.last) lines.push(`上次${st.last.action === 'rollback' ? '回滾' : '升級'}：${st.last.at || '?'} v${st.last.from || '?'} → v${st.last.version || '?'}${st.last.commit ? '（' + String(st.last.commit).slice(0, 7) + '）' : ''}${st.last.versionA ? `，部署 A @${st.last.versionA}${st.last.versionB ? ' / B @' + st.last.versionB : ''}` : ''}`);
   else lines.push('尚未透過 /upgrade 升級過。');
   lines.push(st.backup ? `可回滾到：v${st.backup.version || '?'}（備份於 ${st.backup.at || '?'}，/upgrade rollback）` : '沒有可回滾的備份。');
+  lines.push(st.oauth ? (st.oauth.invalid ? `升級授權已失效（${st.oauth.invalid}）：請 /upgrade login` : `升級授權：${st.oauth.email || '已授權'}（${st.oauth.obtainedAt || '?'}）`) : '尚未授權升級：/upgrade login');
   return lines.join('\n');
 }
 
@@ -718,11 +867,13 @@ function upgradeDoctorCheck_(deps) {
   const st = upgradeStatus_(deps);
   const base = `v${st.version}；來源 ${st.source.repo}@${st.source.ref}${st.last ? `；上次 ${st.last.action === 'rollback' ? '回滾' : '升級'} ${st.last.at}` : ''}${st.backup ? `；可回滾到 v${st.backup.version}` : ''}`;
   if (st.sourceError) return { status: 'warn', detail: `${base}。${st.sourceError}` };
+  if (!st.oauth) return { status: 'warn', detail: `${base}。尚未授權升級：Telegram /upgrade login（一次性），之後才能 /upgrade。` };
+  if (st.oauth.invalid) return { status: 'warn', detail: `${base}。升級授權已失效（${st.oauth.invalid}）：請重新 /upgrade login。` };
   try {
     const api = deps.api || scriptApi_(deps);
     const scriptId = deps.scriptId || ScriptApp.getScriptId();
     const d = upgradeSelectDeployments_(api.listDeployments(scriptId), { a: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_A), b: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_B) });
-    return { status: d.warnings.length ? 'warn' : 'ok', detail: `${base}；Telegram /upgrade 可更新部署 A @${d.a.version}${d.b ? ' / B @' + d.b.version : '（沒有部署 B）'}${d.warnings.length ? '。' + d.warnings.join(' ') : ''}` };
+    return { status: d.warnings.length ? 'warn' : 'ok', detail: `${base}；授權 ${st.oauth.email || '已授權'}；Telegram /upgrade 可更新部署 A @${d.a.version}${d.b ? ' / B @' + d.b.version : '（沒有部署 B）'}${d.warnings.length ? '。' + d.warnings.join(' ') : ''}` };
   } catch (err) {
     return { status: 'warn', detail: `${base}。/upgrade 目前不能用：${err && err.message || err}` };
   }

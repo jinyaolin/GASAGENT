@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/doctor [all | reinstall] — 健檢（預設只列失敗與提醒；all 全列）；reinstall = 管理頁「重新安裝」：補 tab / trigger / 設定預設值再健檢', '/upgrade [status | rollback] — 檢查 GitHub 有沒有新版並送審批（批准後自動備份、更新程式與部署）；status 看版本 / 上次升級 / 備份；rollback 送「還原到上一版」的審批', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/doctor [all | reinstall] — 健檢（預設只列失敗與提醒；all 全列）；reinstall = 管理頁「重新安裝」：補 tab / trigger / 設定預設值再健檢', '/upgrade [status | login | code <取件碼> | rollback | logout] — 檢查 GitHub 有沒有新版並送審批（批准後自動備份、更新程式與部署）；第一次先 /upgrade login 做一次性 Google 授權再 /upgrade code <取件碼>；status 看版本 / 上次升級 / 備份 / 授權；rollback 送「還原到上一版」的審批', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -970,8 +970,29 @@ function telegramUpgradeCommand_(rest, u, deps) {
   const out = { text: '', action: 'upgrade_status', replyMarkup: null, approvalId: '' };
   const status = () => (deps.upgradeStatus || upgradeStatus_)();
   if (sub === 'status') { out.text = upgradeStatusText_(status()); return out; }
+  if (sub === 'login') {
+    const url = deps.upgradeLoginUrl ? deps.upgradeLoginUrl() : upgradeLoginUrl_();
+    out.text = `🔐 升級授權（一次性）：\n1. 用這個 Google 帳號打開 ${url}\n2. 同意「GAS Agent Installer」存取你的 Apps Script 專案（只要 script.projects / script.deployments 兩項；未驗證警告按「進階 → 繼續」）\n3. 頁面會給一組取件碼，回來輸入 /upgrade code <取件碼>（24 小時內有效）\n事先確認 https://script.google.com/home/usersettings 的「Google Apps Script API」是開的。`;
+    out.action = 'upgrade_login'; return out;
+  }
+  if (/^code\b/.test(sub)) {
+    const code = String(rest || '').trim().replace(/^code\s*/i, '').trim();
+    try {
+      const r = deps.upgradePickup ? deps.upgradePickup(code) : upgradePickup_(code);
+      out.text = `✅ 升級授權完成（${r.email || '已授權'}）：找得到部署 A @${r.deployA}${r.deployB ? ' / B @' + r.deployB : ''}。之後輸入 /upgrade 就能檢查並升級。`;
+      out.action = 'upgrade_login_done';
+    } catch (err) {
+      out.text = `取件失敗：${err && err.message || err}`; out.action = 'upgrade_login_failed';
+    }
+    return out;
+  }
+  if (sub === 'logout') {
+    (deps.upgradeLogout || (() => upgradeOauthStore_().set(null)))();
+    securityAudit_('upgrade:logout', `${who} 清除升級授權`, deps.audit);
+    out.text = '已清除升級授權；要再升級請重新 /upgrade login。'; out.action = 'upgrade_logout'; return out;
+  }
   if (sub && sub !== 'rollback' && sub !== 'check') {
-    out.text = '用法：/upgrade — 檢查新版並送審批\n/upgrade status — 版本 / 上次升級 / 備份\n/upgrade rollback — 還原到上一版（送審批）';
+    out.text = '用法：/upgrade — 檢查新版並送審批\n/upgrade status — 版本 / 上次升級 / 備份 / 授權\n/upgrade login — 一次性 Google 授權（取得取件碼）\n/upgrade code <取件碼> — 完成授權\n/upgrade rollback — 還原到上一版（送審批）\n/upgrade logout — 清除授權';
     out.action = 'upgrade_usage'; return out;
   }
   let pending = [];
@@ -1049,6 +1070,9 @@ function telegramWebhook_(e) {
       emailDelegates: { get: () => getEmailDelegates_(), set: (m) => setEmailDelegates_(m) },
       upgradePlan: () => upgradePlan_(),
       upgradeStatus: () => upgradeStatus_(),
+      upgradePickup: (code) => upgradePickup_(code),
+      upgradeLoginUrl: () => upgradeLoginUrl_(),
+      upgradeLogout: () => upgradeOauthStore_().set(null),
       approvalSink: (row) => appendTableRow_('Approvals', row),
     });
   } catch (err) {

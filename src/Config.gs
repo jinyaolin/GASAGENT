@@ -51,6 +51,10 @@ const PROP = Object.freeze({
   /** 認不出部署 A / B 時手動指定部署 id（通常不用）。 */
   UPGRADE_DEPLOY_A: 'UPGRADE_DEPLOY_A',
   UPGRADE_DEPLOY_B: 'UPGRADE_DEPLOY_B',
+  /** 安裝 / 升級授權服務的網址（installer/）；沒設用 Upgrade.gs 的預設。 */
+  UPGRADE_RELAY: 'UPGRADE_RELAY',
+  /** /upgrade login 取回的 Google OAuth 憑證（JSON：refresh_token / client_id / client_secret / email / access_token / expires_at）。只在這裡。 */
+  UPGRADE_OAUTH: 'UPGRADE_OAUTH',
   /** 上次升級 / 回滾（JSON）、可回滾的備份（JSON {fileId, name, version, at}）、升級後第一次 tick 要跑 post-install 的旗標（JSON）。 */
   UPGRADE_LAST: 'UPGRADE_LAST',
   UPGRADE_BACKUP: 'UPGRADE_BACKUP',
@@ -72,9 +76,6 @@ const REQUIRED_SCOPES = Object.freeze([
   'https://www.googleapis.com/auth/script.external_request',
   'https://www.googleapis.com/auth/script.scriptapp',
   'https://www.googleapis.com/auth/userinfo.email',
-  // Upgrade.gs：Apps Script API 改寫自己（updateContent / versions）與切換部署
-  'https://www.googleapis.com/auth/script.projects',
-  'https://www.googleapis.com/auth/script.deployments',
 ]);
 
 /**

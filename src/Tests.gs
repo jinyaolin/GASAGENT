@@ -75,6 +75,7 @@ function smokeTestTable_() {
     ['watchers: 輸入 / config 驗證（四種 type、odoo 白名單、after: 拒絕）；gmail / drive baseline → 新事件 → cursor 推進與 seen 去重、一次最多 5 件；sheets 新列成一事件；odoo id > last_id', testWatcherCheck_, 'pure'],
     ['upgrade: release.json 解析與拒絕（commit / src 外 / 子資料夾 / 副檔名 / 同名 / 缺 manifest / sha）、版本比較、抓檔驗 sha256（不符 / 404 報錯）、manifest access 翻轉、scope 差異、語法預檢、部署 A / B 挑選（@HEAD 略過、多個候選要 override）、API 錯誤訊息、來源驗證、upgradePlan_（可升級 / 已最新 / 降版 / scope 新增擋 / API 未開擋 / 沒 release.json）、狀態文字', testUpgradePure_, 'pure'],
     ['upgrade: Telegram /upgrade status / 用法 / 非白名單；/upgrade 寫 Approvals（釘 commit、按鈕、AuditLog）且待審不重複、已最新與被擋不寫；rollback 沒備份；decideApproval_ 批准排 upgrade job 不續跑、拒絕不排；runUpgradeJob_ 順序同 deploy.sh（備份 → A → B → HEAD 還原）、props / 通知 / AuditLog；commit 變了 / 語法錯 / scope 新增 → failed 不動程式；rollback 讀備份；tick 分派；post-install 清旗標跑 installAgent + Doctor；Doctor 檢查', testUpgradeFlow_, 'pure'],
+    ['upgrade: OAuth 授權 — 取件回應解析、access token（沒授權 / 失效 throw、新鮮直接回、快到期向 Google refresh 並寫回、invalid_grant 標失效 + AuditLog、5xx 不標）、scriptApi_ 帶該 token、/upgrade code 取件（格式 / 404 / 成功存 UPGRADE_OAUTH 並驗證部署）、UPGRADE_RELAY 覆寫、Telegram login / code / logout / status', testUpgradeOauth_, 'pure'],
     ['housekeeping: contiguousRowGroups_ 由下往上合併；housekeepPlan_ 各 tab 規則（Queue done/failed 且過期且未被 pending 審批引用、AuditLog / Usage ts、Approvals 已決定、Messages 只刪 seq ≤ compact_seq）、最舊優先、上限；housekeepRun_ 讀上下文並刪列、沒刪完 complete=false；housekeepIfDue_ 旗標空只排 24 小時後、到期才跑、retention 0 關閉、沒刪完 2 分鐘後再來、AuditLog 摘要；retention_days 設定解析', testHousekeeping_, 'pure'],
     ['watchers: create 立刻 baseline 並寫旗標；scanIfDue 旗標沒到不開 sheet、到期檢查入列 watch job、next_check 推進；watch job 建 session（channel watch、autonomous）、user 訊息含事件資料區塊、投遞、更新 last_status；update 改來源重做 baseline；watcher_manage autonomous 只能 list', testWatcherFlow_, 'pure'],
     ['odoo: execute 流程（authenticate 取 uid 進快取、第二次不再登入、execute_kw args 順序）、search_read / create / call handler 透過 fetch stub；白名單外 model 不打網路；odoo_call 不能叫 unlink', testOdooFlow_, 'pure'],
@@ -4527,9 +4528,78 @@ function testUpgradeFlow_() {
   pp.props.UPGRADE_POST_INSTALL = JSON.stringify({ action: 'upgrade', version: '0.9.1', from: '0.8.0' });
   pi = upgradePostInstallIfDue_(Object.assign({}, pDeps, { install: () => { throw new Error('boom'); } }));
   assert_(pi.error === 'boom' && pi.doctor && /不一致/.test(pp.note) && /installAgent 失敗：boom/.test(pp.note), 'install 失敗仍跑 Doctor、版本不一致提醒：' + pp.note);
-  // Doctor 檢查
-  const dc = upgradeDoctorCheck_({ api: f.api, scriptId: 'S', getProp: () => '' });
-  assert_(dc.status === 'ok' && /部署 A @89 \/ B @90/.test(dc.detail), 'Doctor ok：' + dc.detail);
-  const dc2 = upgradeDoctorCheck_({ api: upgradeFixture_({ apiDisabled: true }).api, scriptId: 'S', getProp: () => '' });
+  // Doctor 檢查：未授權 warn；授權後 ok；API 未開 warn
+  const dc0 = upgradeDoctorCheck_({ api: f.api, scriptId: 'S', getProp: () => '' });
+  assert_(dc0.status === 'warn' && /upgrade login/.test(dc0.detail), 'Doctor 未授權 warn：' + dc0.detail);
+  const authed = (k) => (k === PROP.UPGRADE_OAUTH ? JSON.stringify({ refresh_token: 'r', client_id: 'c', client_secret: 's', email: 'me@x.com', obtained_at: '2026-11-08 10:00' }) : '');
+  const dc = upgradeDoctorCheck_({ api: f.api, scriptId: 'S', getProp: authed });
+  assert_(dc.status === 'ok' && /授權 me@x\.com/.test(dc.detail) && /部署 A @89 \/ B @90/.test(dc.detail), 'Doctor ok：' + dc.detail);
+  const dc2 = upgradeDoctorCheck_({ api: upgradeFixture_({ apiDisabled: true }).api, scriptId: 'S', getProp: authed });
   assert_(dc2.status === 'warn' && /usersettings/.test(dc2.detail), 'Doctor API 未開 warn：' + dc2.detail);
+}
+
+function testUpgradeOauth_() {
+  const now = () => 1700000000000;
+  // 取件回應解析
+  const creds = upgradeOauthParse_({ refresh_token: 'R', client_id: 'C', client_secret: 'S', email: 'me@x.com', scope: 'a b' }, now());
+  assertEqual_([creds.refresh_token, creds.client_id, creds.email, creds.access_token, creds.expires_at, creds.invalid], ['R', 'C', 'me@x.com', '', 0, ''], '解析');
+  ['refresh_token', 'client_id', 'client_secret'].forEach((k) => { const b = { refresh_token: 'R', client_id: 'C', client_secret: 'S' }; delete b[k]; assertThrows_(() => upgradeOauthParse_(b, now()), '缺 ' + k); });
+  assertEqual_(upgradeOauthSummary_(null), null, '沒憑證摘要 null');
+  assertEqual_(upgradeOauthSummary_(creds).email, 'me@x.com', '摘要');
+  // access token：沒授權 / 失效 / 仍新鮮 / refresh / invalid_grant
+  const props = {};
+  const pd = { getProp: (k) => props[k] || '', setProp: (k, v) => { if (!v) delete props[k]; else props[k] = v; }, now, lock: { waitLock: () => {}, releaseLock: () => {} } };
+  assertThrows_(() => upgradeAccessToken_(pd), '沒授權要 throw');
+  const store = upgradeOauthStore_(pd);
+  store.set(Object.assign({}, creds, { access_token: 'A1', expires_at: now() + 3600000 }));
+  assertEqual_(upgradeAccessToken_(pd), 'A1', '仍新鮮直接回');
+  store.set(Object.assign({}, creds, { access_token: 'A1', expires_at: now() + 60000 }));
+  const calls = [];
+  const resp = (code, body) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(body) });
+  let tok = upgradeAccessToken_(Object.assign({}, pd, { fetch: (url, p) => { calls.push([url, p.payload]); return resp(200, { access_token: 'A2', expires_in: 3599 }); } }));
+  assert_(tok === 'A2' && calls.length === 1 && calls[0][0] === UPGRADE_TOKEN_URL && /grant_type=refresh_token/.test(calls[0][1]) && /client_secret=S/.test(calls[0][1]) && /refresh_token=R/.test(calls[0][1]), 'refresh 請求：' + JSON.stringify(calls));
+  assertEqual_(store.get().expires_at, now() + 3599000, '寫回到期時間');
+  assertEqual_(upgradeAccessToken_(Object.assign({}, pd, { fetch: () => { throw new Error('不該再打'); } })), 'A2', '第二次用快取');
+  store.set(Object.assign({}, creds, { access_token: '', expires_at: 0 }));
+  const audits = [];
+  assertThrows_(() => upgradeAccessToken_(Object.assign({}, pd, { audit: (e) => audits.push(e), fetch: () => resp(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }) })), 'invalid_grant 要 throw');
+  assert_(store.get().invalid === 'invalid_grant' && audits.some((e) => e.tool === 'security:upgrade:oauth_invalid'), '標失效並記 AuditLog');
+  assertThrows_(() => upgradeAccessToken_(pd), '失效後不再打網路直接 throw');
+  store.set(Object.assign({}, creds, { access_token: '', expires_at: 0 }));
+  assertThrows_(() => upgradeAccessToken_(Object.assign({}, pd, { fetch: () => resp(503, {}) })), '503 throw 但不標失效');
+  assertEqual_(store.get().invalid, '', '503 不標失效');
+  // scriptApi_ 用 upgradeAccessToken_ 的 token
+  store.set(Object.assign({}, creds, { access_token: 'A9', expires_at: now() + 3600000 }));
+  const seen = [];
+  const api = scriptApi_(Object.assign({}, pd, { fetch: (url, p) => { seen.push(p.headers.Authorization); return resp(200, { deployments: [] }); } }));
+  api.listDeployments('S');
+  assertEqual_(seen, ['Bearer A9'], 'Apps Script API 帶授權 token');
+  // 取件：格式、404、成功存檔並驗證
+  const f = upgradeFixture_();
+  const props2 = {};
+  const pd2 = { getProp: (k) => props2[k] || '', setProp: (k, v) => { if (!v) delete props2[k]; else props2[k] = v; }, now, api: f.api, scriptId: 'S', audit: (e) => audits.push(e) };
+  assertThrows_(() => upgradePickup_('bad', pd2), '格式');
+  assertThrows_(() => upgradePickup_('ABCD-EFGH', Object.assign({}, pd2, { fetch: () => resp(404, { error: 'not found' }) })), '404');
+  const posted = [];
+  const r = upgradePickup_('abcd-efgh', Object.assign({}, pd2, { fetch: (url, p) => { posted.push([url, p.payload]); return resp(200, { refresh_token: 'R', client_id: 'C', client_secret: 'S', email: 'me@x.com' }); } }));
+  assertEqual_([r.email, r.deployA, r.deployB, posted[0][0], posted[0][1]], ['me@x.com', 89, 90, UPGRADE_RELAY_DEFAULT + '/pickup', '{"code":"ABCD-EFGH"}'], '取件成功並驗證部署（取件碼轉大寫）');
+  assert_(JSON.parse(props2.UPGRADE_OAUTH).refresh_token === 'R' && audits.some((e) => e.tool === 'security:upgrade:login'), '存 UPGRADE_OAUTH、記 AuditLog');
+  assertEqual_(upgradeRelayUrl_({ getProp: (k) => (k === PROP.UPGRADE_RELAY ? 'https://x.example/agent/' : '') }), 'https://x.example/agent', 'UPGRADE_RELAY 覆寫、去尾斜線');
+  // Telegram：login / code / logout / status 帶授權
+  let logouts = 0;
+  const t = fakeTelegramDeps_({ upgradeLoginUrl: () => 'https://x.example/agent/upgrade/start', upgradePickup: (code) => { if (code !== 'ABCD-EFGH') throw new Error('不存在'); return { email: 'me@x.com', deployA: 89, deployB: 90 }; }, upgradeLogout: () => { logouts++; },
+    upgradeStatus: () => ({ version: '0.8.4', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null, oauth: { email: 'me@x.com', obtainedAt: '2026-11-08', invalid: '' } }) });
+  let h = handleTelegramUpdate_(tgMessage_('/upgrade login', 111), t.deps);
+  assert_(h.action === 'upgrade_login' && /https:\/\/x\.example\/agent\/upgrade\/start/.test(h.text) && /\/upgrade code/.test(h.text), 'login 文字：' + h.text);
+  h = handleTelegramUpdate_(tgMessage_('/upgrade code ABCD-EFGH', 111), t.deps);
+  assert_(h.action === 'upgrade_login_done' && /me@x\.com/.test(h.text) && /A @89 \/ B @90/.test(h.text), 'code 成功：' + h.text);
+  h = handleTelegramUpdate_(tgMessage_('/upgrade code nope', 111), t.deps);
+  assert_(h.action === 'upgrade_login_failed' && /取件失敗/.test(h.text), 'code 失敗');
+  h = handleTelegramUpdate_(tgMessage_('/upgrade logout', 111), t.deps);
+  assert_(h.action === 'upgrade_logout' && logouts === 1 && t.audits.some((e) => e.tool === 'security:upgrade:logout'), 'logout');
+  h = handleTelegramUpdate_(tgMessage_('/upgrade status', 111), t.deps);
+  assert_(/升級授權：me@x\.com/.test(h.text), 'status 帶授權：' + h.text);
+  assert_(/尚未授權升級/.test(upgradeStatusText_({ version: '1', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null, oauth: null })), 'status 未授權');
+  assert_(/已失效（invalid_grant）/.test(upgradeStatusText_({ version: '1', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null, oauth: { email: 'a', obtainedAt: '', invalid: 'invalid_grant' } })), 'status 失效');
+  assert_(/\/upgrade login/.test(handleTelegramUpdate_(tgMessage_('/upgrade xyz', 111), t.deps).text), '用法含 login');
 }

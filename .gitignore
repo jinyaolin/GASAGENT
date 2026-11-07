@@ -5,3 +5,5 @@
 node_modules/
 # 每個 Google 帳號一份（scriptId / 部署 ID）；由 scripts/install.sh 產生
 accounts/
+installer/.env
+installer/data/
