@@ -719,7 +719,7 @@ agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技�
 
 **安全**：來源 repo / ref 只在 Script Properties `UPGRADE_REPO` / `UPGRADE_REF`（預設 `jinyaolin/GASAGENT` `main`），Telegram 改不了；只有白名單能 `/upgrade`；審批訊息顯示 commit；hash 不符、語法錯、**新版多要 OAuth scope** 一律拒絕（新 scope 得重新授權，自動換上去 trigger 會失敗，這種版本請維護者用 `deploy.sh` 推並在編輯器執行 `installAgent()`）。
 
-**前置（每個帳號一次）**：manifest 已含 `script.projects` / `script.deployments` 兩個 scope與進階服務 `Script`（`dependencies.enabledAdvancedServices`；少了它，預設 GCP 專案沒開 script.googleapis.com，API 回 403「has not been used in project …」，而預設專案無法從 Console 開），所以**加上這個功能的那一版**本身要用 `deploy.sh` 推並重新授權；帳號主人到 <https://script.google.com/home/usersettings> 打開「Google Apps Script API」（Workspace 帳號可能要管理員允許）。Doctor「程式升級（/upgrade）」會檢查這兩件事並列出部署 A / B 版號。
+**前置（每個帳號一次）**：manifest 已含 `script.projects` / `script.deployments` 兩個 scope，所以**加上這個功能的那一版**本身要用 `deploy.sh` 推並重新授權；腳本必須掛在**標準 GCP 專案**並在該專案啟用 Apps Script API（編輯器「專案設定 → Google Cloud Platform (GCP) 專案 → 變更專案」填專案編號；不可逆；用 Apps Script 自建的預設專案會 403「has not been used in project …」，預設專案開不了這個 API）；帳號主人到 <https://script.google.com/home/usersettings> 打開「Google Apps Script API」（Workspace 帳號可能要管理員允許）。Doctor「程式升級（/upgrade）」會檢查這兩件事並列出部署 A / B 版號。
 
 **發佈**：`scripts/release.sh 0.8.0 "說明" --push`（跑測試 → `APP_VERSION` 改版號 commit → 產生 `release.json` 再 commit → push）。各帳號之後 `/upgrade` 就看得到。
 
@@ -819,7 +819,7 @@ node scripts/local-tests.js
 | 寄給自己的指令信沒被處理 | 沒貼標籤、寄件者不是 OWNER_EMAIL、已加星、或超過 7 天；「通道」按「立刻掃一次」看報告；Doctor 看旗標 |
 | 委託寄件者的信沒被處理 | 主旨與內文都沒有 passkey（引用區塊 `>` 裡的不算）、passkey 大小寫不符、Email 指令信未啟用、已加星、或超過 7 天；Telegram `/owner list` 看名單、「通道」按「立刻掃一次」看報告（會列出寄件者） |
 | agent 把自己的回信當成指令迴圈 | 不該發生：回信顯示名稱 `GAS Agent` 會被排除且已加星；若手動把星星拿掉就會重跑 |
-| `/upgrade` 說「背後的 GCP 專案沒開 Apps Script API」（`has not been used in project …`） | manifest 缺進階服務 `Script`：用 `deploy.sh` 重推 v0.8.1 以上，或編輯器左側「服務 +」加「Apps Script API」 |
+| `/upgrade` 說「還用預設 GCP 專案」（`has not been used in project …`） | 編輯器「專案設定 → 變更專案」改掛有啟用 Apps Script API 的標準 GCP 專案（見「程式升級」前置），再執行 `installAgent()` 重新授權 |
 | `/upgrade` 說 Apps Script API 尚未啟用 / 401 | 帳號主人到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」；401 是 manifest 還沒有 `script.projects` / `script.deployments` 或沒重新授權：編輯器執行 `installAgent()`。Doctor「程式升級」同一項 |
 | `/upgrade` 說「新版需要新的 OAuth scope」 | 刻意擋下：這版要維護者 `scripts/deploy.sh` 推，各帳號在編輯器執行 `installAgent()` 重新授權 |
 | `/upgrade` 說「有 N 個 webapp.access=MYSELF 的部署」 | 專案裡有多餘的版本部署；到編輯器「部署 → 管理部署」封存不用的，或把要更新的部署 id 寫到 Script Property `UPGRADE_DEPLOY_A` / `UPGRADE_DEPLOY_B` |

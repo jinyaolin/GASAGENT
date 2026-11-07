@@ -1,10 +1,6 @@
 {
   "timeZone": "Asia/Taipei",
-  "dependencies": {
-    "enabledAdvancedServices": [
-      { "userSymbol": "Script", "serviceId": "script", "version": "v1" }
-    ]
-  },
+  "dependencies": {},
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "oauthScopes": [
