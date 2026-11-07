@@ -255,7 +255,7 @@ Doctor 多 `gemini_cli_<id>`：憑證存在、未失效、scope 齊、client 與
 
 | toolset | 工具（風險） |
 |---|---|
-| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W) `drive_rename`(W) `drive_copy`(W，整份複製) `drive_export_pdf`(W) `drive_export`(W，匯出 xlsx / docx / pptx / csv / pdf 存回 Drive) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
+| drive | `drive_search`(R) `drive_list`(R) `drive_read_text`(R，Docs / Sheets / Slides / 純文字 / PDF 與圖片 OCR) `drive_list_permissions`(R，分享給誰 / 連結狀態) `drive_create_folder`(W) `drive_move`(W，`file_ids` 可一次移多個、逐件回報) `drive_rename`(W) `drive_copy`(W，整份複製；`file_ids` 可一次複製多個) `drive_export_pdf`(W) `drive_export`(W，匯出 xlsx / docx / pptx / csv / pdf 存回 Drive) `drive_unshare`(W，移除某人存取或關閉連結分享) `drive_share`(**X**) |
 | docs | `docs_create`(W) `docs_read`(R) `docs_append`(W) `docs_replace_text`(W) `docs_insert_table`(W) `docs_outline`(R) |
 | sheets | `sheets_create`(W) `sheets_add_sheet`(W，在既有試算表新增分頁，可帶表頭；寫到不存在的分頁會報錯並提示用它) `sheets_list_sheets`(R，工作表清單與表頭) `sheets_find`(R，TextFinder 找儲存格) `sheets_read_range`(R) `sheets_write_range`(W) `sheets_append_rows`(W) `sheets_set_formula`(W) `sheets_add_chart`(W) `sheets_copy_sheet`(W，跨試算表整張複製，保留公式 / 格式；來源有檢視權即可) |
 | slides | `slides_create_deck`(W，一次收整份 deck，可套範本；類型 title / section / content(可左文右圖) / two_column / quote / image / image_full / table / closing，上限 40 頁，項目以 `> ` 開頭為第二層) `slides_read`(R) `slides_add_slide`(W，可指定位置) `slides_update_slide`(W，整頁重寫) `slides_move_slide`(W) `slides_delete_slide`(**D**，預設關) `slides_replace_text`(W，可限單頁) |

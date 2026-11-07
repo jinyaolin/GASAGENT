@@ -26,10 +26,13 @@ const DRIVE_PDF_MAX_BYTES = 10 * 1024 * 1024;
  * 被 Drive 拒絕時 ocrUploadWithFallback_ 會自動改成不帶語言重送一次。
  */
 const DRIVE_OCR_LANGUAGE = '';
+/** drive_move / drive_copy 一次最多處理幾個檔案（每個約 0.2–0.5 秒；單次工具執行要留在時間預算內）。 */
+const DRIVE_BATCH_MAX = 200;
 
 /** @return {!Array<ToolDecl>} */
 function driveTools_() {
   const idProp = (what) => ({ type: 'string', description: `${what} 的 Drive id` });
+  const idsProp = (what) => ({ type: 'array', items: { type: 'string' }, description: `${what}：多個 Drive id 一次給（最多 ${DRIVE_BATCH_MAX} 個）。有多個檔案要處理時用這個，不要一個檔案呼叫一次。` });
   return [
     {
       name: 'drive_search', toolset: 'drive', risk: 'R',
@@ -82,11 +85,11 @@ function driveTools_() {
     },
     {
       name: 'drive_move', toolset: 'drive', risk: 'W',
-      description: '把檔案或資料夾移到另一個資料夾。',
+      description: '把檔案或資料夾移到另一個資料夾。可一次移多個：用 file_ids 給全部 id（逐件回報成功 / 失敗，一件失敗不影響其他）。',
       parameters: {
         type: 'object',
-        properties: { file_id: idProp('要移動的檔案或資料夾'), folder_id: idProp('目標資料夾') },
-        required: ['file_id', 'folder_id'], additionalProperties: false,
+        properties: { file_id: idProp('要移動的檔案或資料夾（單一）'), file_ids: idsProp('要移動的檔案或資料夾'), folder_id: idProp('目標資料夾') },
+        required: ['folder_id'], additionalProperties: false,
       },
       handler: driveMove_,
     },
@@ -102,15 +105,16 @@ function driveTools_() {
     },
     {
       name: 'drive_copy', toolset: 'drive', risk: 'W',
-      description: '複製一份檔案（Google 文件 / 試算表 / 簡報或一般檔案都可，含格式與內容；資料夾不支援）。預設放在原檔同一資料夾、檔名「原檔名 的副本」。回傳新檔 id 與網址。',
+      description: '複製檔案（Google 文件 / 試算表 / 簡報或一般檔案都可，含格式與內容；資料夾不支援）。預設放在原檔同一資料夾、檔名「原檔名 的副本」。可一次複製多個：用 file_ids（此時 name 不適用，逐件回報）。回傳新檔 id 與網址。',
       parameters: {
         type: 'object',
         properties: {
-          file_id: idProp('來源檔案'),
-          name: { type: 'string', description: '新檔名（選填）' },
+          file_id: idProp('來源檔案（單一）'),
+          file_ids: idsProp('來源檔案'),
+          name: { type: 'string', description: '新檔名（選填；只對單一 file_id 有效）' },
           folder_id: idProp('目標資料夾（選填）'),
         },
-        required: ['file_id'], additionalProperties: false,
+        required: [], additionalProperties: false,
       },
       handler: driveCopy_,
     },
@@ -416,11 +420,48 @@ function driveCreateFolder_(args) {
   return driveFolderInfo_(parent.createFolder(name));
 }
 
+/**
+ * 單一 / 批次參數統一：file_ids（陣列或逗號 / 換行分隔字串）+ file_id 合併、去重、解析網址、上限 DRIVE_BATCH_MAX。純函式。
+ * @param {!Object} args
+ * @return {{ids: !Array<string>, batch: boolean}} batch = 呼叫端給了 file_ids（回傳用批次格式）
+ * @throws {Error} 一個都沒有、或超過上限
+ */
+function driveBatchIds_(args) {
+  const raw = [];
+  const push = (v) => { const id = parseDriveId_(v); if (id) raw.push(id); };
+  const many = args.file_ids;
+  if (Array.isArray(many)) many.forEach(push);
+  else if (typeof many === 'string' && many.trim()) many.split(/[\s,，;；]+/).forEach(push);
+  if (args.file_id !== undefined && args.file_id !== null && String(args.file_id).trim()) push(args.file_id);
+  const ids = raw.filter((id, i) => raw.indexOf(id) === i);
+  if (!ids.length) throw new Error('請給 file_id（單一）或 file_ids（多個 Drive id）。');
+  if (ids.length > DRIVE_BATCH_MAX) throw new Error(`一次最多 ${DRIVE_BATCH_MAX} 個（給了 ${ids.length}）；請分批。`);
+  return { ids, batch: many !== undefined && many !== null && many !== '' };
+}
+
+/**
+ * 逐件執行、一件失敗不影響其他；全部失敗才 throw（讓 executor 當成失敗、熔斷才算得到）。純函式（fn 注入）。
+ * @param {!Array<string>} ids
+ * @param {function(string): !Object} fn 回該件的結果
+ * @return {{total: number, succeeded: number, failed: number, results: !Array<!Object>, errors: !Array<{id: string, error: string}>}}
+ */
+function driveBatch_(ids, fn) {
+  const results = [];
+  const errors = [];
+  ids.forEach((id) => {
+    try { results.push(fn(id)); } catch (err) { errors.push({ id, error: String(err && err.message || err) }); }
+  });
+  if (ids.length && !results.length) throw new Error(`${ids.length} 件全部失敗：${errors[0].error}${errors.length > 1 ? `（其餘 ${errors.length - 1} 件錯誤類似）` : ''}`);
+  return { total: ids.length, succeeded: results.length, failed: errors.length, results, errors };
+}
+
 function driveMove_(args) {
   const target = requireFolder_(requireString_(args.folder_id, 'folder_id'));
-  const got = driveGetItem_(args.file_id);
-  got.item.moveTo(target);
-  return { moved: got.kind === 'folder' ? driveFolderInfo_(got.item) : driveFileInfo_(got.item), to: driveFolderInfo_(target) };
+  const { ids, batch } = driveBatchIds_(args);
+  const moveOne = (id) => { const got = driveGetItem_(id); got.item.moveTo(target); return got.kind === 'folder' ? driveFolderInfo_(got.item) : driveFileInfo_(got.item); };
+  if (!batch && ids.length === 1) return { moved: moveOne(ids[0]), to: driveFolderInfo_(target) };
+  const r = driveBatch_(ids, moveOne);
+  return { to: driveFolderInfo_(target), total: r.total, succeeded: r.succeeded, failed: r.failed, moved: r.results, errors: r.errors };
 }
 
 function driveRename_(args) {
@@ -450,19 +491,24 @@ function driveExportPdf_(args) {
 }
 
 function driveCopy_(args) {
-  const got = driveGetItem_(args.file_id);
-  if (got.kind === 'folder') throw new Error('資料夾不支援複製，請建新資料夾後逐檔複製。');
-  const file = got.item;
-  const name = args.name ? String(args.name).trim() : `${file.getName()} 的副本`;
-  let folder = null;
-  if (args.folder_id) {
-    folder = requireFolder_(args.folder_id);
-  } else {
-    const parents = file.getParents();
-    if (parents.hasNext()) folder = parents.next();
-  }
-  const copy = folder ? file.makeCopy(name, folder) : file.makeCopy(name);
-  return { copied_from: { id: file.getId(), name: file.getName() }, copy: driveFileInfo_(copy), folder: folder ? driveFolderInfo_(folder) : null };
+  const { ids, batch } = driveBatchIds_(args);
+  const targetFolder = args.folder_id ? requireFolder_(args.folder_id) : null;
+  const copyOne = (id, name) => {
+    const got = driveGetItem_(id);
+    if (got.kind === 'folder') throw new Error('資料夾不支援複製，請建新資料夾後逐檔複製。');
+    const file = got.item;
+    const newName = name ? String(name).trim() : `${file.getName()} 的副本`;
+    let folder = targetFolder;
+    if (!folder) {
+      const parents = file.getParents();
+      if (parents.hasNext()) folder = parents.next();
+    }
+    const copy = folder ? file.makeCopy(newName, folder) : file.makeCopy(newName);
+    return { copied_from: { id: file.getId(), name: file.getName() }, copy: driveFileInfo_(copy), folder: folder ? driveFolderInfo_(folder) : null };
+  };
+  if (!batch && ids.length === 1) return copyOne(ids[0], args.name);
+  const r = driveBatch_(ids, (id) => copyOne(id, ''));
+  return { folder: targetFolder ? driveFolderInfo_(targetFolder) : null, total: r.total, succeeded: r.succeeded, failed: r.failed, copies: r.results, errors: r.errors };
 }
 
 /**

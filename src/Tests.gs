@@ -86,6 +86,7 @@ function smokeTestTable_() {
     ['agent: 同一工具 + 同參數失敗 3 次即熔斷', testRunTurnCircuitBreaker_, 'pure'],
     ['agent: 步數上限與時間預算到就停並回報；重複的待審批不再寫第二筆', testRunTurnLimits_, 'pure'],
     ['config: parseToolConfig_ 預設值與 rbac.<toolset> 解析', testToolConfigParse_, 'pure'],
+    ['drive: drive_move / drive_copy 批次 — driveBatchIds_ 合併 file_id + file_ids（陣列 / 分隔字串 / 網址）、去重、空與超量報錯；driveBatch_ 逐件執行一件失敗不影響其他、全部失敗才 throw；宣告 required 只剩 folder_id / 空', testDriveBatch_, 'pure'],
     ['drive: OCR 預設不帶 ocrLanguage（Drive 自動偵測；zh / zh-TW 都曾被回 400）、Config drive_ocr_language 解析（壞值當自動）、語言被拒自動改不帶語言重送一次、錯誤訊息', testDriveOcrUrl_, 'pure'],
     ['web: 域名白名單（exact / *.wildcard / 空 = 全拒）與 HTML 轉文字', testWebHelpers_, 'pure'],
     ['docs/slides: 輕量 markdown 解析、deck spec 驗證（九種版面、table / image 必填、>40 頁）、兩層項目、簡報規則進 prompt、刪頁預設被 RBAC 擋', testDocsSlidesSpecs_, 'pure'],
@@ -4281,4 +4282,24 @@ function testHousekeeping_() {
   // 設定解析
   assertEqual_([parseAgentConfig_({}).retentionDays, parseAgentConfig_({ retention_days: '0' }).retentionDays, parseAgentConfig_({ retention_days: '99999' }).retentionDays], [30, 0, 3650], 'retention_days 預設 30、0 關、夾限');
   setProp_(PROP.HOUSEKEEP_NEXT_RUN, ''); setProp_(PROP.HOUSEKEEP_LAST_RUN, '');
+}
+
+function testDriveBatch_() {
+  assertEqual_(driveBatchIds_({ file_id: 'abc' }), { ids: ['abc'], batch: false }, '單一 file_id');
+  assertEqual_(driveBatchIds_({ file_ids: ['a1', 'b2', 'a1'] }), { ids: ['a1', 'b2'], batch: true }, '陣列去重');
+  assertEqual_(driveBatchIds_({ file_ids: 'a1, b2\nc3；d4', file_id: 'b2' }).ids, ['a1', 'b2', 'c3', 'd4'], '分隔字串 + file_id 合併去重');
+  assertEqual_(driveBatchIds_({ file_ids: ['https://drive.google.com/file/d/1234567890abc/view'] }).ids, ['1234567890abc'], '網址解析成 id');
+  assertEqual_(driveBatchIds_({ file_ids: [], file_id: 'x' }).batch, true, '給了空陣列但有 file_id：仍視為批次格式');
+  assertThrows_(() => driveBatchIds_({}), '一個都沒有');
+  assertThrows_(() => driveBatchIds_({ file_ids: Array.from({ length: DRIVE_BATCH_MAX + 1 }, (_, i) => 'f' + i) }), /最多/, '超過上限');
+  const r = driveBatch_(['a', 'bad', 'c'], (id) => { if (id === 'bad') throw new Error('找不到 ' + id); return { id, ok: true }; });
+  assertEqual_([r.total, r.succeeded, r.failed, r.results.map((x) => x.id), r.errors], [3, 2, 1, ['a', 'c'], [{ id: 'bad', error: '找不到 bad' }]], '逐件：一件失敗不影響其他');
+  assert_(/2 件全部失敗：boom（其餘 1 件錯誤類似）/.test(assertThrows_(() => driveBatch_(['a', 'b'], () => { throw new Error('boom'); }), '全部失敗').message), '全部失敗 throw 摘要');
+  assertEqual_(driveBatch_([], () => ({})).total, 0, '空清單不 throw');
+  const decls = driveTools_();
+  const mv = decls.find((t) => t.name === 'drive_move');
+  const cp = decls.find((t) => t.name === 'drive_copy');
+  assertEqual_([mv.parameters.required, Object.keys(mv.parameters.properties).sort(), mv.parameters.properties.file_ids.type, mv.parameters.properties.file_ids.items.type], [['folder_id'], ['file_id', 'file_ids', 'folder_id'], 'array', 'string'], 'drive_move 宣告');
+  assertEqual_([cp.parameters.required, Object.keys(cp.parameters.properties).sort()], [[], ['file_id', 'file_ids', 'folder_id', 'name']], 'drive_copy 宣告');
+  assert_(/file_ids/.test(buildSystemPrompt_(fakeToolConfig_(), buildToolRegistry_(fakeToolDecls_()), '', [])), 'system prompt 提醒批次參數');
 }
