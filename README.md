@@ -21,6 +21,7 @@ src/
   Config.gs         # Script Properties 封裝、APP_VERSION、REQUIRED_SCOPES、assertOwner()、Config sheet 讀寫
   Db.gs             # 開/建「GAS Agent DB」spreadsheet、DB_SCHEMA（11 個 tab）、幂等補 schema、以表頭為鍵的列讀寫；readTableTail_（只讀表尾）、findTableRowById_（TextFinder 按 id 定位）、deleteTableRows_（批次刪列）
   Housekeeping.gs   # 保留期限清理：Queue / AuditLog / Usage / Approvals / Messages 超過 retention_days 的列每天刪一次（queueTick lock 內、每 tab 500 列）
+  Upgrade.gs        # Telegram /upgrade 自我升級與回滾：抓 GitHub release.json、驗 sha256、語法 / scope 預檢、備份到 Drive、Apps Script API 改寫自己並切部署 A / B；upgrade job、post-install、Doctor 檢查；編輯器 upgradeNow() / upgradeRollbackNow()
   Providers.gs      # M1：三個 adapter（openai / anthropic / gemini）、備援鏈、Usage 記錄、runChatTurn_()；M7：chainForRequest_（chatgpt 只服務 owner）
   Providers_ChatGPT.gs  # M7：protocol chatgpt —— Sign in with ChatGPT 憑證（PROVIDER_OAUTH_<id>）、自動 refresh（oauthAccessToken_，兩種 OAuth 協定共用）、Responses API + SSE adapter、模型清單、登出
   Providers_GeminiCli.gs  # M7：protocol gemini_cli —— Google 帳號登入（Antigravity / Gemini CLI 兩種 client）憑證、Google token refresh、Code Assist 開通（loadCodeAssist / onboardUser）、generateContent 包層 adapter、fetchAvailableModels、登出
@@ -51,6 +52,8 @@ scripts/siwc-login.js    # M7：在本機完成 Sign in with ChatGPT（動態註
 scripts/gemini-login.js  # M7：在本機用 Antigravity（預設）或 Gemini CLI 的 OAuth client 完成 Google 登入、開通 Code Assist、列可用模型，印出要貼到管理頁的憑證 JSON（--from-cli 可沿用 agy / gemini 的 token 檔）
 scripts/gemini-probe.js  # 診斷：用存好的憑證以不同 User-Agent 打一次 Code Assist，比對哪個條件被 403
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
+scripts/release.sh       # 發佈給 /upgrade 用：APP_VERSION 改版號 commit → 以該 commit 與 src/ 各檔 sha256 產生 release.json 再 commit（--push 推上去）
+release.json             # 最新 release 清單（版本、code commit、檔案 sha256、說明）；各帳號的 agent /upgrade 時抓這個檔
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
 scripts/lib.sh           # 以上三支共用（帳號設定檔、manifest 翻轉、clasp -u 包裝）
@@ -557,7 +560,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 群組 | **先關 bot 的隱私模式**：Telegram 預設的隱私模式下，群組裡 `@bot …` 的一般訊息**根本不會送到 bot**（只有 /指令、回覆 bot 的訊息會到），所以 @bot 沒反應。到 **@BotFather → `/setprivacy` → 選 bot → Disable**，然後把 bot 退出群組再加回來（或把 bot 設成群組管理員，管理員永遠收得到全部訊息）。`/group` 指令與 Doctor（`tg_privacy`）會用 `getMe` 的 `can_read_all_group_messages` 檢查並提醒。<br>把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 幫忙；但**非白名單成員觸發的那一輪**是 principal `group_member`（M7-A，見「安全」）：只能用 Config `telegram_member_toolsets`（預設 `web` / `skill` / `session`）的讀取工具，owner 的 Gmail / Drive / Docs / Sheets / Slides / Calendar **一律不可讀**（連工具清單都看不到；被擋時回覆末尾附一句中性說明），`memory` / `cronjob` 永遠不開放；R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive。owner 可在管理頁「通道」逐 toolset 放寬（Doctor 會提醒放寬了 Workspace）<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
-| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）、`/email [on \| off \| name <名稱> \| every <分鐘>]`（Email 指令信：看狀態、啟用 / 停用掃描、回覆的寄件者名稱、掃描間隔；token / secret / Telegram 白名單仍只在管理頁）、`/doctor [all \| reinstall]`（健檢：預設只列失敗與提醒，`all` 全列；`reinstall` 與管理頁「重新安裝」同一支 `installAgent()`，補 tab / 欄位 / trigger / Config 預設值 / 旗標後再健檢，不重建 DB、不動既有資料；記 AuditLog `security:reinstall`。OAuth 授權仍只能在編輯器執行 `installAgent()` 時跳出）—— 這些只有白名單成員能用、異動記 AuditLog；`/stats [天數]`（使用分析，見下）、`/help`；`/status` 除了 session 也列 Email 指令信是否啟用與事件監看健康狀態（上次掃描 / 下次 / 逾期），旗標失效會順手修好；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）、`/email [on \| off \| name <名稱> \| every <分鐘>]`（Email 指令信：看狀態、啟用 / 停用掃描、回覆的寄件者名稱、掃描間隔；token / secret / Telegram 白名單仍只在管理頁）、`/doctor [all \| reinstall]`（健檢：預設只列失敗與提醒，`all` 全列；`reinstall` 與管理頁「重新安裝」同一支 `installAgent()`，補 tab / 欄位 / trigger / Config 預設值 / 旗標後再健檢，不重建 DB、不動既有資料；記 AuditLog `security:reinstall`。OAuth 授權仍只能在編輯器執行 `installAgent()` 時跳出）、`/upgrade [status \| rollback]`（程式自我升級，見「程式升級」）—— 這些只有白名單成員能用、異動記 AuditLog；`/stats [天數]`（使用分析，見下）、`/help`；`/status` 除了 session 也列 Email 指令信是否啟用與事件監看健康狀態（上次掃描 / 下次 / 逾期），旗標失效會順手修好；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼；「更換 token」先 getMe 驗證才寫入）、白名單 user id、部署 B 網址、secret（儲存時自動產生；「重新產生 secret」會自動重登 webhook）、群聊模式成員可用的 toolset、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
 ### Email 指令信
@@ -705,6 +708,21 @@ agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技�
 
 `telegram_send_file({file_id, caption?, as_photo?, format?})` 把 Drive 檔案 multipart 上傳到 Telegram（Google 試算表預設轉 xlsx、文件 / 簡報預設轉 PDF，`format` 可改；上限 50 MB）。目標 chat **不由模型指定**：任務來自 Telegram 就送回同一個 chat，否則送 owner 的 Telegram，模型拿不到任意 chat_id 當外洩管道。
 
+### 程式升級（`/upgrade`，[Upgrade.gs](src/Upgrade.gs)）
+
+讓每個帳號的 agent 自己從 GitHub 更新，不必維護者用 clasp 登入每個帳號：
+
+1. `/upgrade`：抓 `raw.githubusercontent.com/<repo>/<ref>/release.json`（版本、code commit、`src/` 每個檔的 sha256、說明；由 `scripts/release.sh` 產生），和 `APP_VERSION` 比對；同時預檢 Apps Script API 能不能用、認得出部署 A（`webapp.access=MYSELF`）/ B（`ANYONE_ANONYMOUS`）、新 manifest 的 OAuth scope 有沒有變。有新版且沒被擋就寫一筆 Approvals（tool `system_upgrade`，args 釘住 commit）附批准 / 拒絕按鈕；已有待審的升級不重複送。`/upgrade status` 看版本 / 來源 / 上次升級 / 可回滾的備份。
+2. 批准（按鈕、`/approve <id>` 或管理頁）→ 排一個 `upgrade` job，下一分鐘 queueTick 在 lock 裡執行：再抓一次 release.json 確認 commit 沒變 → 以 commit 釘住抓全部檔案並逐檔驗 sha256 → 語法預檢（`new Function`）→ scope 沒新增 → 把目前程式備份成 Drive「GAS Agent/upgrades/backup-v…json」（留 5 份）→ Apps Script API：`updateContent`（manifest MYSELF）→ 建版 → 部署 A 切新版 → `updateContent`（ANYONE_ANONYMOUS）→ 建版 → 部署 B 切新版 → `updateContent`（MYSELF，HEAD 還原）—— 與 `deploy.sh` 同一順序 → 寫 `UPGRADE_LAST` / `UPGRADE_BACKUP`、AuditLog `security:upgrade`、Telegram 通知。失敗不重試、通知 owner，程式不變。
+3. 下一分鐘的 tick 已是新程式：看到 `UPGRADE_POST_INSTALL` 就跑 `installAgent()`（補 tab / trigger / 預設值）+ Doctor，結果推 Telegram。
+4. `/upgrade rollback`：同樣送審批，批准後以備份的檔案走同一套部署流程還原（目前版本會再備份一份）。Telegram 與管理頁都壞掉時，到編輯器執行 `upgradeRollbackNow()`；沒有 Telegram 的帳號可在編輯器執行 `upgradeNow()`。
+
+**安全**：來源 repo / ref 只在 Script Properties `UPGRADE_REPO` / `UPGRADE_REF`（預設 `jinyaolin/GASAGENT` `main`），Telegram 改不了；只有白名單能 `/upgrade`；審批訊息顯示 commit；hash 不符、語法錯、**新版多要 OAuth scope** 一律拒絕（新 scope 得重新授權，自動換上去 trigger 會失敗，這種版本請維護者用 `deploy.sh` 推並在編輯器執行 `installAgent()`）。
+
+**前置（每個帳號一次）**：manifest 已含 `script.projects` / `script.deployments` 兩個 scope，所以**加上這個功能的那一版**本身要用 `deploy.sh` 推並重新授權；帳號主人到 <https://script.google.com/home/usersettings> 打開「Google Apps Script API」（Workspace 帳號可能要管理員允許）。Doctor「程式升級（/upgrade）」會檢查這兩件事並列出部署 A / B 版號。
+
+**發佈**：`scripts/release.sh 0.8.0 "說明" --push`（跑測試 → `APP_VERSION` 改版號 commit → 產生 `release.json` 再 commit → push）。各帳號之後 `/upgrade` 就看得到。
+
 ### M7-B 驗收步驟（請在瀏覽器與手機操作）
 
 1. Doctor「重新安裝」補 `Watchers` tab（新版本加的 tab；Doctor 會先紅燈）。
@@ -726,10 +744,11 @@ clasp status
 node scripts/local-tests.js
 ```
 
-- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（70 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
+- 編輯 `src/` 下的檔案 → `node scripts/local-tests.js`（87 項 pure 測試，不碰 Google 服務）→ `scripts/deploy.sh [--account <代號>] "說明"`（push + 更新該帳號的部署 A 與 B；等同 `clasp push` 加兩次 `clasp deploy -i`）→ 用管理頁 URL 驗證 → `git commit`。只在編輯器測函式時可省略 deploy。多個帳號用 `scripts/deploy.sh --all "說明"` 一次推完 `accounts/` 底下全部。腳本執行期間才把該帳號的 `clasp.json` 換進根目錄 `.clasp.json`，結束後還原；`accounts/<代號>/clasp.json` 與 `deploy.json` 的 scriptId 不一致、或與另一個帳號相同時拒絕推送。
 - **不要**手動把 `appsscript.json` 的 `webapp.access` 留在 `ANYONE_ANONYMOUS` 後 `clasp deploy -i` 部署 A，那會讓管理頁變成任何人可達（雖然 `assertOwner()` 仍會擋，但少了第一道門）。`scripts/deploy.sh` 用 trap 保證翻回。
 - `clasp push -w` 可監看自動推送。
-- 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權。
+- 改 `appsscript.json` 的 scopes 時，`Config.gs` 的 `REQUIRED_SCOPES` 要同步，並重新執行 `installAgent()` 以觸發重新授權；這種版本不能靠 `/upgrade` 自動換（會被擋），要用 `deploy.sh`。
+- 要讓各帳號能用 Telegram `/upgrade` 自己更新：`scripts/release.sh <版本> "說明" --push`（見「程式升級」）。沒跑 release 只 push，`/upgrade` 看到的還是上一版。
 - 不要把 `.clasp.json`（含 scriptId）以外的任何金鑰放進 repo；金鑰只進 Script Properties。
 
 ## 疑難排解
@@ -800,6 +819,11 @@ node scripts/local-tests.js
 | 寄給自己的指令信沒被處理 | 沒貼標籤、寄件者不是 OWNER_EMAIL、已加星、或超過 7 天；「通道」按「立刻掃一次」看報告；Doctor 看旗標 |
 | 委託寄件者的信沒被處理 | 主旨與內文都沒有 passkey（引用區塊 `>` 裡的不算）、passkey 大小寫不符、Email 指令信未啟用、已加星、或超過 7 天；Telegram `/owner list` 看名單、「通道」按「立刻掃一次」看報告（會列出寄件者） |
 | agent 把自己的回信當成指令迴圈 | 不該發生：回信顯示名稱 `GAS Agent` 會被排除且已加星；若手動把星星拿掉就會重跑 |
+| `/upgrade` 說 Apps Script API 尚未啟用 / 401 | 帳號主人到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」；401 是 manifest 還沒有 `script.projects` / `script.deployments` 或沒重新授權：編輯器執行 `installAgent()`。Doctor「程式升級」同一項 |
+| `/upgrade` 說「新版需要新的 OAuth scope」 | 刻意擋下：這版要維護者 `scripts/deploy.sh` 推，各帳號在編輯器執行 `installAgent()` 重新授權 |
+| `/upgrade` 說「有 N 個 webapp.access=MYSELF 的部署」 | 專案裡有多餘的版本部署；到編輯器「部署 → 管理部署」封存不用的，或把要更新的部署 id 寫到 Script Property `UPGRADE_DEPLOY_A` / `UPGRADE_DEPLOY_B` |
+| 升級後 Telegram 沒反應 / 管理頁開不了 | 編輯器執行 `upgradeRollbackNow()` 以 Drive 備份還原（部署 A / B 一起切回）；或維護者 `deploy.sh` 重推。升級前後各一列 AuditLog `security:upgrade`，Queue 的 upgrade job 有錯誤訊息 |
+| `/upgrade` 一直說已是最新但 GitHub 明明有新 commit | 只 push 沒跑 `scripts/release.sh`（release.json 沒更新），或 raw CDN 快取（最多 5 分鐘） |
 
 ## 里程碑
 
@@ -810,4 +834,4 @@ node scripts/local-tests.js
 - [x] M4 排程與非同步 Queue：job 狀態機、checkpoint 續跑、審批後續跑、Cron 解析與到期掃描、`cronjob_manage`、投遞 doc / email、排程 / Queue 分頁、背景執行
 - [x] M5 技能：Drive `skills/<name>/SKILL.md`、索引快取、system prompt 只放名稱 + 描述、`skill_load` / `/<skill>` / cron skills 全文注入、`skill_manage` 提案進審批、≥ 5 步自動提案、技能分頁
 - [x] M6 通道：Telegram webhook（部署 B「任何人」+ URL secret + 白名單、/new /status /model /skills /group、審批 inline button、附件、群組模式）、Email 指令信（標籤掃描、thread = session、回信加星）、通道分頁、`deliver_to=telegram`、`scripts/deploy.sh --all`
-- [ ] M7 加固與維運：**A 安全**（principal 模型、紅隊、秘密輪替、多帳號隔離）程式完成待驗收；B 可靠度與配額、C 備份與還原、D 文件與交接未做
+- [ ] M7 加固與維運：**A 安全**（principal 模型、紅隊、秘密輪替、多帳號隔離）程式完成待驗收；**B** watchers / 使用分析 / 保留期限清理 / Telegram `/upgrade` 自我升級與回滾完成；C 備份與還原、D 文件與交接未做

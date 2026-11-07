@@ -43,6 +43,13 @@ const sandbox = {
     base64DecodeWebSafe: (s) => Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
     base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')),
     base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
+    DigestAlgorithm: { SHA_256: 'SHA_256', MD5: 'MD5' },
+    Charset: { UTF_8: 'UTF_8' },
+    // GAS 回的是有號位元組（-128..127）
+    computeDigest: (alg, data) => {
+      const buf = Array.isArray(data) ? Buffer.from(data.map((b) => b & 0xff)) : Buffer.from(String(data), 'utf8');
+      return Array.from(crypto.createHash(alg === 'MD5' ? 'md5' : 'sha256').update(buf).digest()).map((b) => (b > 127 ? b - 256 : b));
+    },
   },
   MimeType: { PLAIN_TEXT: 'text/plain', FOLDER: 'application/vnd.google-apps.folder', PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document', GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet', GOOGLE_SLIDES: 'application/vnd.google-apps.presentation' },
   Charts: { ChartType: {} },

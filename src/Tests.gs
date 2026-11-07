@@ -73,6 +73,8 @@ function smokeTestTable_() {
     ['email: 委託寄件者 — Telegram /owner list / <email> [passkey] / delete（passkey 只進 Script Property、自動產生只顯示一次、AuditLog 不含 passkey、owner / 壞 email / 含空白拒絕）；掃描每位委託者另搜 from:<email>、主旨或內文含 passkey 才排隊且去掉 passkey、payload 帶 email_delegate、沒 passkey 不理不加星；管理頁端點', testEmailDelegates_, 'pure'],
     ['telegram: 回覆 bot 的提問訊息即回答；/answer <q_id> 文字、/answer 單一待答直接答、多筆列清單、沒有待答提示；非白名單不處理', testTelegramAnswer_, 'pure'],
     ['watchers: 輸入 / config 驗證（四種 type、odoo 白名單、after: 拒絕）；gmail / drive baseline → 新事件 → cursor 推進與 seen 去重、一次最多 5 件；sheets 新列成一事件；odoo id > last_id', testWatcherCheck_, 'pure'],
+    ['upgrade: release.json 解析與拒絕（commit / src 外 / 子資料夾 / 副檔名 / 同名 / 缺 manifest / sha）、版本比較、抓檔驗 sha256（不符 / 404 報錯）、manifest access 翻轉、scope 差異、語法預檢、部署 A / B 挑選（@HEAD 略過、多個候選要 override）、API 錯誤訊息、來源驗證、upgradePlan_（可升級 / 已最新 / 降版 / scope 新增擋 / API 未開擋 / 沒 release.json）、狀態文字', testUpgradePure_, 'pure'],
+    ['upgrade: Telegram /upgrade status / 用法 / 非白名單；/upgrade 寫 Approvals（釘 commit、按鈕、AuditLog）且待審不重複、已最新與被擋不寫；rollback 沒備份；decideApproval_ 批准排 upgrade job 不續跑、拒絕不排；runUpgradeJob_ 順序同 deploy.sh（備份 → A → B → HEAD 還原）、props / 通知 / AuditLog；commit 變了 / 語法錯 / scope 新增 → failed 不動程式；rollback 讀備份；tick 分派；post-install 清旗標跑 installAgent + Doctor；Doctor 檢查', testUpgradeFlow_, 'pure'],
     ['housekeeping: contiguousRowGroups_ 由下往上合併；housekeepPlan_ 各 tab 規則（Queue done/failed 且過期且未被 pending 審批引用、AuditLog / Usage ts、Approvals 已決定、Messages 只刪 seq ≤ compact_seq）、最舊優先、上限；housekeepRun_ 讀上下文並刪列、沒刪完 complete=false；housekeepIfDue_ 旗標空只排 24 小時後、到期才跑、retention 0 關閉、沒刪完 2 分鐘後再來、AuditLog 摘要；retention_days 設定解析', testHousekeeping_, 'pure'],
     ['watchers: create 立刻 baseline 並寫旗標；scanIfDue 旗標沒到不開 sheet、到期檢查入列 watch job、next_check 推進；watch job 建 session（channel watch、autonomous）、user 訊息含事件資料區塊、投遞、更新 last_status；update 改來源重做 baseline；watcher_manage autonomous 只能 list', testWatcherFlow_, 'pure'],
     ['odoo: execute 流程（authenticate 取 uid 進快取、第二次不再登入、execute_kw args 順序）、search_read / create / call handler 透過 fetch stub；白名單外 model 不打網路；odoo_call 不能叫 unlink', testOdooFlow_, 'pure'],
@@ -4302,4 +4304,228 @@ function testDriveBatch_() {
   assertEqual_([mv.parameters.required, Object.keys(mv.parameters.properties).sort(), mv.parameters.properties.file_ids.type, mv.parameters.properties.file_ids.items.type], [['folder_id'], ['file_id', 'file_ids', 'folder_id'], 'array', 'string'], 'drive_move 宣告');
   assertEqual_([cp.parameters.required, Object.keys(cp.parameters.properties).sort()], [[], ['file_id', 'file_ids', 'folder_id', 'name']], 'drive_copy 宣告');
   assert_(/file_ids/.test(buildSystemPrompt_(fakeToolConfig_(), buildToolRegistry_(fakeToolDecls_()), '', [])), 'system prompt 提醒批次參數');
+}
+
+// ---- Upgrade.gs（Telegram /upgrade 自我升級與回滾） ------------------------------------------------------
+
+/** 升級測試共用的假資料：release / 檔案 / fetch / Apps Script API。 */
+function upgradeFixture_(opts) {
+  opts = opts || {};
+  const bytesOf = (s) => Utilities.newBlob(s).getBytes();
+  const shaOf = (s) => upgradeSha256Hex_(bytesOf(s));
+  const scopes = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/script.external_request'];
+  const manifest = (extraScopes, access) => JSON.stringify({ timeZone: 'Asia/Taipei', runtimeVersion: 'V8', oauthScopes: scopes.concat(extraScopes || []), webapp: { executeAs: 'USER_DEPLOYING', access: access || 'MYSELF' } }, null, 2);
+  const newFiles = { 'src/appsscript.json': manifest(opts.extraScopes), 'src/Agent.gs': opts.badSyntax ? 'function broken( {' : 'function agentNew() { return 2; }', 'src/admin_js.html': '<b>new</b>' };
+  const commit = (opts.commit || 'a').repeat(40).slice(0, 40);
+  const release = { version: opts.version || '0.9.0', commit, date: '2026-11-08T10:00:00+08:00', notes: '測試用新版', files: {} };
+  Object.keys(newFiles).forEach((p) => { release.files[p] = shaOf(newFiles[p]); });
+  const urls = {};
+  const repo = 'jinyaolin/GASAGENT';
+  urls[upgradeRawUrl_(repo, 'main', 'release.json')] = JSON.stringify(release);
+  Object.keys(newFiles).forEach((p) => { urls[upgradeRawUrl_(repo, commit, p)] = newFiles[p]; });
+  const fetched = [];
+  const resp = (code, text) => ({ getResponseCode: () => code, getContentText: () => text, getContent: () => bytesOf(text) });
+  const fetch = (url) => { fetched.push(url); return url in urls ? resp(200, urls[url]) : resp(404, 'nf'); };
+  const fetchAll = (reqs) => reqs.map((r) => fetch(r.url));
+  const currentFiles = [{ name: 'appsscript', type: 'JSON', source: manifest() }, { name: 'Agent', type: 'SERVER_JS', source: 'function agentOld() { return 1; }' }, { name: 'admin_js', type: 'HTML', source: '<b>old</b>' }];
+  const calls = [];
+  let version = 90;
+  const deployments = [
+    { deploymentId: 'HEAD1', deploymentConfig: { description: 'head' }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { entryPointConfig: { access: 'MYSELF' } } }] },
+    { deploymentId: 'AKfyA', deploymentConfig: { versionNumber: 89, description: 'A' }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { url: 'https://a', entryPointConfig: { access: 'MYSELF', executeAs: 'USER_DEPLOYING' } } }] },
+    { deploymentId: 'AKfyB', deploymentConfig: { versionNumber: 90, description: 'B' }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { url: 'https://b', entryPointConfig: { access: 'ANYONE_ANONYMOUS', executeAs: 'USER_DEPLOYING' } } }] },
+  ];
+  const api = {
+    getContent: (sid) => { calls.push(['getContent', sid]); return { files: currentFiles.map((f) => Object.assign({}, f)) }; },
+    updateContent: (sid, files) => { calls.push(['updateContent', JSON.parse(files.find((f) => f.name === 'appsscript').source).webapp.access, files.length]); },
+    createVersion: (sid, desc) => { version += 1; calls.push(['createVersion', version, desc]); return version; },
+    listDeployments: (sid) => { calls.push(['listDeployments']); if (opts.apiDisabled) throw new Error(scriptApiErrorMessage_(403, JSON.stringify({ error: { message: 'User has not enabled the Apps Script API.' } }))); return deployments.slice(); },
+    updateDeployment: (sid, id, v, desc) => { calls.push(['updateDeployment', id, v]); },
+  };
+  const props = {};
+  return { bytesOf, shaOf, manifest, newFiles, release, commit, urls, fetch, fetchAll, fetched, currentFiles, calls, api, deployments, props,
+    getProp: (k) => props[k] || '', setProp: (k, v) => { if (v === '' || v === null || v === undefined) delete props[k]; else props[k] = String(v); } };
+}
+
+function testUpgradePure_() {
+  const f = upgradeFixture_();
+  // release.json 解析
+  const rel = upgradeParseRelease_(JSON.stringify(f.release));
+  assertEqual_([rel.version, rel.commit, rel.entries.length, rel.entries.map((e) => e.name + ':' + e.type).sort()], ['0.9.0', f.commit, 3, ['Agent:SERVER_JS', 'admin_js:HTML', 'appsscript:JSON']], 'release 解析');
+  const bad = (mut, why) => { const r = JSON.parse(JSON.stringify(f.release)); mut(r); assertThrows_(() => upgradeParseRelease_(JSON.stringify(r)), why); };
+  assertThrows_(() => upgradeParseRelease_('{nope'), '壞 JSON');
+  bad((r) => { delete r.commit; }, '缺 commit');
+  bad((r) => { r.commit = 'abc'; }, 'commit 不是 40 碼');
+  bad((r) => { r.files['README.md'] = f.shaOf('x'); }, '不在 src/');
+  bad((r) => { r.files['src/sub/A.gs'] = f.shaOf('x'); }, '子資料夾');
+  bad((r) => { r.files['src/notes.txt'] = f.shaOf('x'); }, '副檔名不支援');
+  bad((r) => { r.files['src/other.json'] = f.shaOf('x'); }, 'JSON 只接受 appsscript.json');
+  bad((r) => { r.files['src/Agent.html'] = f.shaOf('x'); }, 'Apps Script 同名');
+  bad((r) => { delete r.files['src/appsscript.json']; }, '缺 manifest');
+  bad((r) => { r.files['src/Agent.gs'] = 'zz'; }, 'sha 不合法');
+  bad((r) => { r.files = {}; }, 'files 空');
+  // 版本比較
+  assertEqual_([upgradeCompareVersion_('0.8.0', '0.7.0-m7a'), upgradeCompareVersion_('0.7.0', '0.7.0-m7a'), upgradeCompareVersion_('0.7.0-m7a', '0.7.0-m7b'), upgradeCompareVersion_('1.0', '1.0.0'), upgradeCompareVersion_('0.9', '0.10'), upgradeCompareVersion_('v2', '1.9.9'), upgradeCompareVersion_('x', 'x')], [1, 1, -1, 0, -1, 1, 0], '版本比較');
+  // 檔名對應、manifest 翻轉、scope 差異、語法預檢
+  assertEqual_(upgradeGasName_('src/AdminPage.html'), { name: 'AdminPage', type: 'HTML' }, 'html');
+  const files = upgradeFetchFiles_({ repo: 'jinyaolin/GASAGENT' }, rel, { fetchAll: f.fetchAll });
+  assertEqual_(files.map((x) => x.name).sort(), ['Agent', 'admin_js', 'appsscript'], '抓檔並驗 hash');
+  const flipped = upgradeWithManifestAccess_(files, 'ANYONE_ANONYMOUS');
+  assertEqual_([upgradeManifestOf_(flipped).webapp.access, upgradeManifestOf_(files).webapp.access, flipped.find((x) => x.name === 'Agent').source === files.find((x) => x.name === 'Agent').source], ['ANYONE_ANONYMOUS', 'MYSELF', true], 'manifest 翻 access、其他檔不動、原陣列不變');
+  assertEqual_(upgradeScopeDiff_({ oauthScopes: ['a', 'b'] }, { oauthScopes: ['b', 'c'] }), { added: ['c'], removed: ['a'] }, 'scope 差異');
+  assertEqual_(upgradeSyntaxCheck_(files), [], '語法 OK');
+  const errs = upgradeSyntaxCheck_([{ name: 'Bad', type: 'SERVER_JS', source: 'function ( {' }, { name: 'appsscript', type: 'JSON', source: '{' }]);
+  assert_(errs.length === 2 && /^Bad\.gs：/.test(errs[0]) && /^appsscript\.json：/.test(errs[1]), '語法錯誤列出檔名：' + errs.join(' | '));
+  // hash 不符 / 抓不到
+  const tampered = JSON.parse(JSON.stringify(rel)); tampered.files['src/Agent.gs'] = f.shaOf('evil'); tampered.entries = upgradeParseRelease_(JSON.stringify(tampered)).entries;
+  assertThrows_(() => upgradeFetchFiles_({ repo: 'jinyaolin/GASAGENT' }, tampered, { fetchAll: f.fetchAll }), 'hash 不符要 throw');
+  assertThrows_(() => upgradeFetchFiles_({ repo: 'someone/else' }, rel, { fetchAll: f.fetchAll }), '404 要 throw');
+  // 部署挑選
+  const sel = upgradeSelectDeployments_(f.deployments, {});
+  assertEqual_([sel.a.id, sel.a.version, sel.b.id, sel.b.version], ['AKfyA', 89, 'AKfyB', 90], '@HEAD 略過、A=MYSELF、B=ANYONE');
+  assertEqual_(upgradeSelectDeployments_(f.deployments.slice(0, 2), {}).b, null, '沒有 B');
+  assertThrows_(() => upgradeSelectDeployments_(f.deployments.slice(0, 1), {}), '沒有 A 要 throw');
+  const dup = f.deployments.concat([{ deploymentId: 'AKfyA2', deploymentConfig: { versionNumber: 50 }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { entryPointConfig: { access: 'MYSELF' } } }] }]);
+  assertThrows_(() => upgradeSelectDeployments_(dup, {}), '兩個 MYSELF 分不出 A');
+  assertEqual_(upgradeSelectDeployments_(dup, { a: 'AKfyA2' }).a.version, 50, 'override 指定 A');
+  assertThrows_(() => upgradeSelectDeployments_(dup, { a: 'nope' }), 'override 不存在');
+  // API 錯誤訊息、來源驗證
+  assert_(/usersettings/.test(scriptApiErrorMessage_(403, JSON.stringify({ error: { message: 'User has not enabled the Apps Script API.' } }))), '403 提示開 API');
+  assert_(/401/.test(scriptApiErrorMessage_(401, '')), '401');
+  assertEqual_(upgradeSource_({ getProp: () => '' }), { repo: 'jinyaolin/GASAGENT', ref: 'main' }, '預設來源');
+  assertThrows_(() => upgradeSource_({ getProp: (k) => (k === PROP.UPGRADE_REPO ? 'bad repo!' : '') }), 'repo 格式');
+  assertThrows_(() => upgradeSource_({ getProp: (k) => (k === PROP.UPGRADE_REF ? '../x' : '') }), 'ref 格式');
+  // 計畫
+  const base = { fetch: f.fetch, fetchAll: f.fetchAll, api: f.api, scriptId: 'S', getProp: () => '', currentVersion: '0.8.0' };
+  let plan = upgradePlan_(base);
+  assert_(plan.ok && !plan.upToDate && plan.latest.version === '0.9.0' && plan.deployments.a.version === 89 && plan.scopes.added.length === 0 && /🆕 v0\.8\.0 → v0\.9\.0/.test(plan.text) && /批准後/.test(plan.text), '可升級：' + plan.text);
+  plan = upgradePlan_(Object.assign({}, base, { currentVersion: '0.9.0' }));
+  assert_(plan.ok && plan.upToDate && /已是最新版 v0\.9\.0/.test(plan.text), '已最新：' + plan.text);
+  plan = upgradePlan_(Object.assign({}, base, { currentVersion: '1.0.0' }));
+  assert_(plan.ok && plan.warnings.some((w) => /降版/.test(w)), '降版警告');
+  const g = upgradeFixture_({ extraScopes: ['https://www.googleapis.com/auth/gmail.modify'] });
+  plan = upgradePlan_(Object.assign({}, base, { fetch: g.fetch, fetchAll: g.fetchAll, api: g.api }));
+  assert_(!plan.ok && plan.scopes.added.length === 1 && /❌ 新版需要新的 OAuth scope/.test(plan.text), 'scope 新增擋下：' + plan.text);
+  const dis = upgradeFixture_({ apiDisabled: true });
+  plan = upgradePlan_(Object.assign({}, base, { api: dis.api }));
+  assert_(!plan.ok && /usersettings/.test(plan.text) && dis.calls.filter((c) => c[0] === 'getContent').length === 0, 'API 未開是阻擋、不再呼叫 getContent：' + plan.text);
+  plan = upgradePlan_(Object.assign({}, base, { fetch: () => ({ getResponseCode: () => 404, getContentText: () => '', getContent: () => [] }) }));
+  assert_(!plan.ok && /沒有 release\.json/.test(plan.text), '沒 release.json');
+  // 狀態文字
+  const st = upgradeStatusText_({ version: '0.8.0', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: { action: 'upgrade', at: '2026-11-08 10:00', from: '0.7.0', version: '0.8.0', commit: 'abcdef1234', versionA: 91, versionB: 92 }, backup: { version: '0.7.0', at: '2026-11-08 10:00', fileId: 'F' } });
+  assert_(/目前版本 v0\.8\.0/.test(st) && /上次升級.*v0\.7\.0 → v0\.8\.0（abcdef1）.*A @91 \/ B @92/.test(st) && /可回滾到：v0\.7\.0/.test(st), '狀態文字：' + st);
+  assert_(/尚未透過/.test(upgradeStatusText_({ version: '0.8.0', source: { repo: 'r/p', ref: 'main' }, sourceError: '', last: null, backup: null })), '沒升級過');
+}
+
+function testUpgradeFlow_() {
+  const f = upgradeFixture_();
+  const rows = [];
+  const pendingList = () => rows.filter((r) => r.state === 'pending').map((r) => ({ id: r.id, tool: r.tool, args: r.args, reason: r.reason, created_at: '' }));
+  const status = { version: '0.8.0', source: { repo: 'jinyaolin/GASAGENT', ref: 'main' }, sourceError: '', last: null, backup: null };
+  const planDeps = { fetch: f.fetch, fetchAll: f.fetchAll, api: f.api, scriptId: 'S', getProp: () => '', currentVersion: '0.8.0' };
+  const t = fakeTelegramDeps_({ upgradePlan: () => upgradePlan_(planDeps), upgradeStatus: () => status, approvalSink: (row) => rows.push(row), pendingApprovals: pendingList });
+  // /upgrade status、用法、非白名單
+  let r = handleTelegramUpdate_(tgMessage_('/upgrade status', 111), t.deps);
+  assert_(r.action === 'upgrade_status' && /目前版本 v0\.8\.0/.test(r.text) && /沒有可回滾/.test(r.text), '/upgrade status：' + r.text);
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/upgrade foo', 111), t.deps).action, 'upgrade_usage', '用法');
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/upgrade', 999), t.deps).action, 'rejected', '非白名單');
+  assert_(/\/upgrade/.test(handleTelegramUpdate_(tgMessage_('/help', 111), t.deps).text), '/help 提到 /upgrade');
+  // /upgrade rollback 沒備份
+  assertEqual_(handleTelegramUpdate_(tgMessage_('/upgrade rollback', 111), t.deps).action, 'upgrade_no_backup', '沒備份不能回滾');
+  // /upgrade → 寫 Approvals + 按鈕；第二次不重複
+  r = handleTelegramUpdate_(tgMessage_('/upgrade', 111), t.deps);
+  assert_(r.action === 'upgrade_proposed' && rows.length === 1 && rows[0].tool === UPGRADE_TOOL && rows[0].job_id === '' && rows[0].state === 'pending', '寫一筆審批');
+  const args = JSON.parse(rows[0].args);
+  assertEqual_([args.action, args.version, args.commit, args.from, args.repo, args.ref], ['upgrade', '0.9.0', f.commit, '0.8.0', 'jinyaolin/GASAGENT', 'main'], '審批 args 釘住 commit');
+  assert_(rows[0].reason.indexOf(UPGRADE_REASON_PREFIX) === 0 && /v0\.8\.0 → v0\.9\.0/.test(rows[0].reason), 'reason：' + rows[0].reason);
+  const kb = t.sent[t.sent.length - 1].opts.replyMarkup.inline_keyboard;
+  assertEqual_(kb[0].map((b) => b.callback_data), [`apr:${rows[0].id}:approve`, `apr:${rows[0].id}:deny`], '批准 / 拒絕按鈕');
+  assert_(/升級到 v0\.9\.0/.test(kb[0][0].text), '按鈕文字');
+  assert_(t.audits.some((e) => e.tool === 'security:upgrade:proposed' && new RegExp(f.commit.slice(0, 7)).test(e.args_preview)), 'AuditLog 記提案與 commit');
+  r = handleTelegramUpdate_(tgMessage_('/upgrade', 111), t.deps);
+  assert_(r.action === 'upgrade_pending' && rows.length === 1 && r.approvalId === rows[0].id, '已有待審不重複');
+  // 已是最新 / 被擋就不寫審批
+  const rows2 = [];
+  const t2 = fakeTelegramDeps_({ upgradePlan: () => upgradePlan_(Object.assign({}, planDeps, { currentVersion: '0.9.0' })), upgradeStatus: () => status, approvalSink: (row) => rows2.push(row), pendingApprovals: () => [] });
+  assert_(handleTelegramUpdate_(tgMessage_('/upgrade', 111), t2.deps).action === 'upgrade_up_to_date' && rows2.length === 0, '已最新不寫審批');
+  const dis = upgradeFixture_({ apiDisabled: true });
+  const t3 = fakeTelegramDeps_({ upgradePlan: () => upgradePlan_(Object.assign({}, planDeps, { api: dis.api })), upgradeStatus: () => status, approvalSink: (row) => rows2.push(row), pendingApprovals: () => [] });
+  assert_(handleTelegramUpdate_(tgMessage_('/upgrade', 111), t3.deps).action === 'upgrade_blocked' && rows2.length === 0, '被擋不寫審批');
+  // decideApproval_：批准 → enqueue upgrade job（不執行工具、不續跑）；拒絕 → denied
+  const q = memoryQueueStore_();
+  const enq = (type, payload, sid) => { const j = { id: 'job_u' + (q.jobs.length + 1), type, payload, session_id: sid, state: 'queued', attempts: 0, started: null, finished: null, error: '' }; q.store.add(j); return j; };
+  const ap = memoryApprovalStore_(rows.map((x) => Object.assign({}, x)));
+  let d = decideApproval_(rows[0].id, true, { approvalStore: ap.store, enqueue: enq, queueStore: q.store, sessionStore: memorySessionStore_().store });
+  assert_(d.state === 'approved' && d.outcome.ok && /job_u1/.test(d.outcome.content) && d.continuation === '', '批准排 job：' + JSON.stringify(d));
+  assertEqual_([q.jobs.length, q.jobs[0].type, q.jobs[0].payload.action, q.jobs[0].payload.commit, q.jobs[0].payload.approval_id, q.jobs[0].session_id], [1, 'upgrade', 'upgrade', f.commit, rows[0].id, ''], 'upgrade job payload');
+  assert_(ap.rows[0].state === 'approved' && /job_u1/.test(ap.rows[0].result), 'Approvals 標 approved');
+  const ap2 = memoryApprovalStore_([upgradeApprovalRow_({ action: 'upgrade', version: '0.9.0', commit: f.commit, from: '0.8.0' }, 'tester', 'apr_u2')]);
+  d = decideApproval_('apr_u2', false, { approvalStore: ap2.store, enqueue: enq, queueStore: q.store });
+  assert_(d.state === 'denied' && q.jobs.length === 1 && ap2.rows[0].state === 'denied', '拒絕不排 job');
+  // runUpgradeJob_：順序與 manifest 翻轉、備份、props、通知、AuditLog
+  const notes = [];
+  const audits = [];
+  const backups = [];
+  const jobDeps = { api: f.api, scriptId: 'S', fetch: f.fetch, fetchAll: f.fetchAll, getProp: f.getProp, setProp: f.setProp, currentVersion: '0.8.0', now: () => new Date(2026, 10, 8, 10, 0, 0).getTime(),
+    backupWrite: (files, meta) => { backups.push({ n: files.length, meta }); return { fileId: 'BK1', name: 'backup-v0.8.0-x.json', version: meta.version, at: meta.at }; },
+    notify: (txt) => notes.push(txt), audit: (e) => audits.push(e) };
+  f.calls.length = 0;
+  let res = runUpgradeJob_(q.jobs[0], jobDeps);
+  assertEqual_(res.state, 'done', '升級 done：' + (res.error || ''));
+  assertEqual_(f.calls.map((c) => c[0]), ['getContent', 'listDeployments', 'updateContent', 'createVersion', 'updateDeployment', 'updateContent', 'createVersion', 'updateDeployment', 'updateContent'], 'API 呼叫順序（同 deploy.sh）');
+  assertEqual_(f.calls.filter((c) => c[0] === 'updateContent').map((c) => c[1]), ['MYSELF', 'ANYONE_ANONYMOUS', 'MYSELF'], 'manifest access：A → B → HEAD 還原');
+  assertEqual_(f.calls.filter((c) => c[0] === 'updateDeployment').map((c) => [c[1], c[2]]), [['AKfyA', 91], ['AKfyB', 92]], '部署 A @91、B @92');
+  assertEqual_([backups.length, backups[0].n, backups[0].meta.version], [1, 3, '0.8.0'], '先備份目前 3 個檔（v0.8.0）');
+  const last = JSON.parse(f.props.UPGRADE_LAST);
+  assertEqual_([last.action, last.from, last.version, last.commit, last.versionA, last.versionB, last.backup], ['upgrade', '0.8.0', '0.9.0', f.commit, 91, 92, 'BK1'], 'UPGRADE_LAST');
+  assertEqual_(JSON.parse(f.props.UPGRADE_BACKUP).fileId, 'BK1', 'UPGRADE_BACKUP');
+  assertEqual_(JSON.parse(f.props.UPGRADE_POST_INSTALL).version, '0.9.0', 'UPGRADE_POST_INSTALL 旗標');
+  assert_(notes.length === 1 && /✅ 已升級：v0\.8\.0 → v0\.9\.0/.test(notes[0]) && /rollback/.test(notes[0]), '通知：' + notes[0]);
+  assert_(audits.some((e) => e.tool === 'security:upgrade' && /A @91 \/ B @92/.test(e.args_preview)), 'AuditLog security:upgrade');
+  // release 變了 → failed、不動程式、不重試
+  const changed = Object.assign({}, q.jobs[0], { payload: Object.assign({}, q.jobs[0].payload, { commit: 'b'.repeat(40) }) });
+  f.calls.length = 0; notes.length = 0;
+  res = runUpgradeJob_(changed, jobDeps);
+  assert_(res.state === 'failed' && /release 已經變了/.test(res.error) && f.calls.length === 0 && /❌ 升級失敗/.test(notes[0]), 'commit 不符：' + res.error);
+  // 語法錯 / scope 新增 → failed、沒有 updateContent
+  const badF = upgradeFixture_({ badSyntax: true });
+  res = runUpgradeJob_(q.jobs[0], Object.assign({}, jobDeps, { fetch: badF.fetch, fetchAll: badF.fetchAll, api: badF.api }));
+  assert_(res.state === 'failed' && /語法預檢失敗/.test(res.error) && !badF.calls.some((c) => c[0] === 'updateContent'), '語法錯擋下：' + res.error);
+  const scF = upgradeFixture_({ extraScopes: ['https://www.googleapis.com/auth/calendar'] });
+  res = runUpgradeJob_(q.jobs[0], Object.assign({}, jobDeps, { fetch: scF.fetch, fetchAll: scF.fetchAll, api: scF.api }));
+  assert_(res.state === 'failed' && /OAuth scope/.test(res.error) && !scF.calls.some((c) => c[0] === 'updateContent'), 'scope 新增擋下：' + res.error);
+  // rollback：讀備份走同一套部署
+  const rb = upgradeFixture_();
+  const rbNotes = [];
+  res = runUpgradeJob_({ id: 'job_rb', type: 'upgrade', payload: { action: 'rollback', version: '0.8.0', backup_file_id: 'BK1', approval_id: 'apr_rb' } },
+    Object.assign({}, jobDeps, { api: rb.api, getProp: rb.getProp, setProp: rb.setProp, currentVersion: '0.9.0', notify: (txt) => rbNotes.push(txt), backupRead: (id) => ({ version: '0.8.0', at: 'x', files: f.currentFiles.map((x) => Object.assign({}, x)) }) }));
+  assert_(res.state === 'done' && res.result.action === 'rollback', '回滾 done：' + (res.error || ''));
+  assertEqual_(rb.calls.filter((c) => c[0] === 'updateContent').map((c) => c[1]), ['MYSELF', 'ANYONE_ANONYMOUS', 'MYSELF'], '回滾也翻 manifest');
+  assertEqual_([JSON.parse(rb.props.UPGRADE_LAST).action, JSON.parse(rb.props.UPGRADE_LAST).from, JSON.parse(rb.props.UPGRADE_LAST).version], ['rollback', '0.9.0', '0.8.0'], '回滾 UPGRADE_LAST');
+  assert_(/✅ 已回滾：v0\.9\.0 → v0\.8\.0/.test(rbNotes[0]), '回滾通知');
+  assertEqual_(runUpgradeJob_({ id: 'j', type: 'upgrade', payload: { action: 'rollback' } }, jobDeps).state, 'failed', '缺 backup_file_id 失敗');
+  // queueTickCore_ 分派 upgrade job 到 runUpgradeJob_
+  const q2 = memoryQueueStore_();
+  const g2 = upgradeFixture_();
+  q2.store.add({ id: 'job_t1', type: 'upgrade', payload: { action: 'upgrade', version: '0.9.0', commit: g2.commit, from: '0.8.0', repo: 'jinyaolin/GASAGENT', ref: 'main' }, session_id: '', state: 'queued', attempts: 0, started: null, finished: null, error: '' });
+  const tick = queueTickCore_({ housekeep: () => null, watchDeps: { watcherStore: memoryWatcherStore_().store }, store: q2.store, cronStore: memoryCronStore_().store, lock: fakeLock_().lock, now: () => Date.now(),
+    upgradeDeps: Object.assign({}, jobDeps, { api: g2.api, fetch: g2.fetch, fetchAll: g2.fetchAll, getProp: g2.getProp, setProp: g2.setProp }) });
+  assertEqual_([tick.ran.type, tick.ran.state, q2.store.get('job_t1').payload.result.version], ['upgrade', 'done', '0.9.0'], 'tick 跑 upgrade job');
+  // post-install：旗標沒設 → null；設了 → 清旗標、installAgent + Doctor、通知；install 失敗 Doctor 仍跑
+  const pp = { props: {} };
+  const pDeps = { getProp: (k) => pp.props[k] || '', setProp: (k, v) => { if (!v) delete pp.props[k]; else pp.props[k] = v; }, currentVersion: '0.9.0',
+    install: () => ({ schema: { createdTabs: ['Foo'] }, trigger: { created: false }, toolConfig: { addedKeys: ['x'] } }),
+    doctor: () => ({ ok: true, version: '0.9.0', checks: [{ id: 'a', label: 'A', status: 'ok', detail: '' }] }), notify: (txt) => pp.note = txt };
+  assertEqual_(upgradePostInstallIfDue_(pDeps), null, '沒旗標不跑');
+  pp.props.UPGRADE_POST_INSTALL = JSON.stringify({ action: 'upgrade', version: '0.9.0', from: '0.8.0' });
+  let pi = upgradePostInstallIfDue_(pDeps);
+  assert_(pi && pi.install.createdTabs[0] === 'Foo' && pi.doctor.ok && !pp.props.UPGRADE_POST_INSTALL && /升級後檢查：現在跑的是 v0\.9\.0/.test(pp.note) && /新增 Foo/.test(pp.note) && /Doctor ✅/.test(pp.note), 'post-install：' + pp.note);
+  pp.props.UPGRADE_POST_INSTALL = JSON.stringify({ action: 'upgrade', version: '0.9.1', from: '0.8.0' });
+  pi = upgradePostInstallIfDue_(Object.assign({}, pDeps, { install: () => { throw new Error('boom'); } }));
+  assert_(pi.error === 'boom' && pi.doctor && /不一致/.test(pp.note) && /installAgent 失敗：boom/.test(pp.note), 'install 失敗仍跑 Doctor、版本不一致提醒：' + pp.note);
+  // Doctor 檢查
+  const dc = upgradeDoctorCheck_({ api: f.api, scriptId: 'S', getProp: () => '' });
+  assert_(dc.status === 'ok' && /部署 A @89 \/ B @90/.test(dc.detail), 'Doctor ok：' + dc.detail);
+  const dc2 = upgradeDoctorCheck_({ api: upgradeFixture_({ apiDisabled: true }).api, scriptId: 'S', getProp: () => '' });
+  assert_(dc2.status === 'warn' && /usersettings/.test(dc2.detail), 'Doctor API 未開 warn：' + dc2.detail);
 }

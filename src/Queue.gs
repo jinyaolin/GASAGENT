@@ -26,7 +26,7 @@
 /** time trigger 指向的函式名；Setup / Doctor 用它找 trigger。 */
 const QUEUE_TICK_HANDLER = 'queueTick';
 
-const QUEUE_JOB_TYPES = Object.freeze(['turn', 'cron', 'continuation', 'curation', 'watch']);
+const QUEUE_JOB_TYPES = Object.freeze(['turn', 'cron', 'continuation', 'curation', 'watch', 'upgrade']);
 const QUEUE_STATES = Object.freeze(['queued', 'running', 'needs_approval', 'needs_input', 'done', 'failed']);
 /** 同一 job 最多嘗試幾次（例外才算失敗重試；正常結束不會重跑）。 */
 const QUEUE_MAX_ATTEMPTS = 3;
@@ -254,6 +254,8 @@ function scriptLock_() {
  * @return {void}
  */
 function queueTick() {
+  // 升級 / 回滾後的第一次 tick（已是新程式）：補 tab / trigger / 預設值並健檢，結果推 Telegram；旗標沒設不花任何時間
+  if (getProp_(PROP.UPGRADE_POST_INSTALL)) { try { upgradePostInstallIfDue_(); } catch (err) { console.warn('升級後檢查失敗：' + (err && err.message || err)); } }
   const dirty = getProp_(PROP.QUEUE_DIRTY) === '1';
   const nextCron = getProp_(PROP.CRON_NEXT_RUN);
   const cronDue = !!nextCron && new Date(nextCron).getTime() <= Date.now();
@@ -386,6 +388,8 @@ function runQueueJob_(job, deps) {
       return runCurationJob_(job, deps);
     case 'watch':
       return runWatchJob_(job, deps);
+    case 'upgrade':
+      return runUpgradeJob_(job, deps.upgradeDeps || {});
     default:
       throw new Error(`未知的 job type：${job.type}`);
   }

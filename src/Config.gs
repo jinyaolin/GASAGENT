@@ -45,6 +45,16 @@ const PROP = Object.freeze({
   HOUSEKEEP_LAST_RUN: 'HOUSEKEEP_LAST_RUN',
   /** 委託寄件者（Telegram /owner）：JSON {email: passkey}。只在 Script Properties，管理頁與 Telegram 只列 email。 */
   EMAIL_DELEGATE_KEYS: 'EMAIL_DELEGATE_KEYS',
+  /** 程式升級（Upgrade.gs）：來源 repo（owner/name）與 ref；沒設用 jinyaolin/GASAGENT main。只能在這裡改，Telegram 不能改。 */
+  UPGRADE_REPO: 'UPGRADE_REPO',
+  UPGRADE_REF: 'UPGRADE_REF',
+  /** 認不出部署 A / B 時手動指定部署 id（通常不用）。 */
+  UPGRADE_DEPLOY_A: 'UPGRADE_DEPLOY_A',
+  UPGRADE_DEPLOY_B: 'UPGRADE_DEPLOY_B',
+  /** 上次升級 / 回滾（JSON）、可回滾的備份（JSON {fileId, name, version, at}）、升級後第一次 tick 要跑 post-install 的旗標（JSON）。 */
+  UPGRADE_LAST: 'UPGRADE_LAST',
+  UPGRADE_BACKUP: 'UPGRADE_BACKUP',
+  UPGRADE_POST_INSTALL: 'UPGRADE_POST_INSTALL',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */
 });
 
@@ -62,6 +72,9 @@ const REQUIRED_SCOPES = Object.freeze([
   'https://www.googleapis.com/auth/script.external_request',
   'https://www.googleapis.com/auth/script.scriptapp',
   'https://www.googleapis.com/auth/userinfo.email',
+  // Upgrade.gs：Apps Script API 改寫自己（updateContent / versions）與切換部署
+  'https://www.googleapis.com/auth/script.projects',
+  'https://www.googleapis.com/auth/script.deployments',
 ]);
 
 /**

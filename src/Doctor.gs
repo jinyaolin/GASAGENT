@@ -319,6 +319,14 @@ function runDoctor() {
     }
   }
 
+  // 程式升級（Telegram /upgrade）：Apps Script API 開了沒、部署 A / B 認得出來、版本與備份
+  try {
+    const up = upgradeDoctorCheck_();
+    push('upgrade', '程式升級（/upgrade）：Apps Script API 與部署', up.status, up.detail);
+  } catch (err) {
+    push('upgrade', '程式升級（/upgrade）：Apps Script API 與部署', 'warn', String(err && err.message || err));
+  }
+
   const ok = checks.every((c) => c.status !== 'fail');
   return { ok, version: APP_VERSION, ts: new Date().toISOString(), checks };
 }

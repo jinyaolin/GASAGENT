@@ -44,7 +44,7 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'email', 'doctor', 'answer', 'approve', 'deny', 'pending', 'stats']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'email', 'doctor', 'upgrade', 'answer', 'approve', 'deny', 'pending', 'stats']);
 /** /approve 清單一次最多列幾筆（每筆兩個按鈕；Telegram inline keyboard 不宜太長）。 */
 const TELEGRAM_PENDING_MAX = 10;
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/doctor [all | reinstall] — 健檢（預設只列失敗與提醒；all 全列）；reinstall = 管理頁「重新安裝」：補 tab / trigger / 設定預設值再健檢', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/doctor [all | reinstall] — 健檢（預設只列失敗與提醒；all 全列）；reinstall = 管理頁「重新安裝」：補 tab / trigger / 設定預設值再健檢', '/upgrade [status | rollback] — 檢查 GitHub 有沒有新版並送審批（批准後自動備份、更新程式與部署）；status 看版本 / 上次升級 / 備份；rollback 送「還原到上一版」的審批', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -704,6 +704,12 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     }
     report.text = parts.join('\n');
     send(report.text); return report;
+  }
+  if (cmd.command === 'upgrade') {
+    const r = telegramUpgradeCommand_(cmd.rest, u, deps);
+    report.text = r.text; report.action = r.action; report.approvalId = r.approvalId || '';
+    send(r.text, r.replyMarkup ? { replyMarkup: r.replyMarkup } : undefined);
+    return report;
   }
   if (TELEGRAM_LIST_COMMANDS[cmd.command]) {
     report.text = telegramListCommand_(cmd.command, cmd.rest, u, deps);
@@ -946,6 +952,60 @@ function telegramEmailCommand_(rest, u, deps) {
  * @param {TelegramUpdate} u
  * @return {!Object}
  */
+/**
+ * /upgrade（Upgrade.gs）：
+ *   /upgrade            檢查 GitHub release 與目前版本、預檢 API / 部署 / scope；有新版就寫一筆 Approvals（tool system_upgrade）附按鈕
+ *   /upgrade status     目前版本、來源、上次升級、可回滾的備份
+ *   /upgrade rollback   送「還原到備份版本」的審批
+ * 已有待審的升級就不再送第二筆。只有白名單（owner）到得了這裡。
+ * @param {string} rest
+ * @param {!Object} u
+ * @param {{upgradePlan: (Function|undefined), upgradeStatus: (Function|undefined), approvalSink: (Function|undefined),
+ *   pendingApprovals: (Function|undefined), audit: (Function|undefined)}} deps
+ * @return {{text: string, action: string, replyMarkup: ?Object, approvalId: string}}
+ */
+function telegramUpgradeCommand_(rest, u, deps) {
+  const sub = String(rest || '').trim().toLowerCase();
+  const who = `Telegram user ${u.userId}${u.username ? ' @' + u.username : ''}`;
+  const out = { text: '', action: 'upgrade_status', replyMarkup: null, approvalId: '' };
+  const status = () => (deps.upgradeStatus || upgradeStatus_)();
+  if (sub === 'status') { out.text = upgradeStatusText_(status()); return out; }
+  if (sub && sub !== 'rollback' && sub !== 'check') {
+    out.text = '用法：/upgrade — 檢查新版並送審批\n/upgrade status — 版本 / 上次升級 / 備份\n/upgrade rollback — 還原到上一版（送審批）';
+    out.action = 'upgrade_usage'; return out;
+  }
+  let pending = [];
+  try { pending = (deps.pendingApprovals ? deps.pendingApprovals() : []).filter((a) => a.tool === UPGRADE_TOOL); } catch (err) { pending = []; }
+  if (pending.length) {
+    out.text = `已有待審的程式升級 ${pending[0].id}（${pending[0].reason || ''}），請先 /approve ${pending[0].id} 或 /deny ${pending[0].id}。`;
+    out.action = 'upgrade_pending'; out.approvalId = pending[0].id;
+    out.replyMarkup = telegramApprovalKeyboard_([{ tool: UPGRADE_TOOL, approvalId: pending[0].id }]);
+    return out;
+  }
+  const sink = deps.approvalSink || ((row) => appendTableRow_('Approvals', row));
+  if (sub === 'rollback') {
+    const st = status();
+    if (!st.backup || !st.backup.fileId) { out.text = '沒有可回滾的備份（只有透過 /upgrade 升級過才會有）。'; out.action = 'upgrade_no_backup'; return out; }
+    const row = upgradeApprovalRow_({ action: 'rollback', version: String(st.backup.version || '?'), from: st.version, backup_file_id: st.backup.fileId }, who);
+    sink(row);
+    securityAudit_('upgrade:proposed', `${who} 提出回滾 v${st.version} → v${st.backup.version}（${row.id}）`, deps.audit);
+    out.text = `↩️ 回滾 v${st.version} → v${st.backup.version}（備份於 ${st.backup.at || '?'}）\n批准後排進 Queue，下一分鐘把備份的程式寫回並更新部署；目前版本會再備份一份。`;
+    out.action = 'upgrade_proposed'; out.approvalId = row.id;
+    out.replyMarkup = telegramApprovalKeyboard_([{ tool: `回滾到 v${st.backup.version}`, approvalId: row.id }]);
+    return out;
+  }
+  let plan;
+  try { plan = (deps.upgradePlan || upgradePlan_)(); } catch (err) { out.text = `檢查升級失敗：${err && err.message || err}`; out.action = 'upgrade_failed'; return out; }
+  out.text = plan.text;
+  if (!plan.ok || plan.upToDate) { out.action = plan.upToDate ? 'upgrade_up_to_date' : 'upgrade_blocked'; return out; }
+  const row = upgradeApprovalRow_({ action: 'upgrade', version: plan.latest.version, commit: plan.latest.commit, from: plan.current, repo: plan.source.repo, ref: plan.source.ref }, who);
+  sink(row);
+  securityAudit_('upgrade:proposed', `${who} 提出升級 v${plan.current} → v${plan.latest.version}（${plan.latest.commit.slice(0, 7)}，${row.id}）`, deps.audit);
+  out.action = 'upgrade_proposed'; out.approvalId = row.id;
+  out.replyMarkup = telegramApprovalKeyboard_([{ tool: `升級到 v${plan.latest.version}`, approvalId: row.id }]);
+  return out;
+}
+
 function telegramTurnPayload_(message, u) {
   return { message, channel: 'telegram', mode: 'interactive', external_id: u.chatId, telegram_chat_id: u.chatId, telegram_chat_type: u.chatType || 'private', telegram_message_id: u.messageId, telegram_user: u.username || u.userId };
 }
@@ -987,6 +1047,9 @@ function telegramWebhook_(e) {
       toolCfg: getToolConfig_(),
       ownerEmail: getOwnerEmail_(),
       emailDelegates: { get: () => getEmailDelegates_(), set: (m) => setEmailDelegates_(m) },
+      upgradePlan: () => upgradePlan_(),
+      upgradeStatus: () => upgradeStatus_(),
+      approvalSink: (row) => appendTableRow_('Approvals', row),
     });
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };

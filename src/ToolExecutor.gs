@@ -974,7 +974,10 @@ function decideApproval_(id, approve, deps) {
     const c = enqueueApprovalContinuation_(row, false, null, deps);
     return { id, state: 'denied', outcome: null, continuation: c ? c.id : '' };
   }
-  const outcome = executeTool_(row.tool, parseJsonArgs_(row.args), { sessionId: row.job_id, mode: 'interactive', approved: true }, execDeps);
+  // 程式升級 / 回滾（Upgrade.gs）：不是工具，批准 = 排一個 upgrade job
+  const outcome = row.tool === UPGRADE_TOOL
+    ? upgradeOnApproved_(row, deps)
+    : executeTool_(row.tool, parseJsonArgs_(row.args), { sessionId: row.job_id, mode: 'interactive', approved: true }, execDeps);
   const resultText = truncateText_((outcome.ok ? 'OK: ' : `[${outcome.status}] `) + outcome.content, 2000).text;
   approvalStore.update(row, { state: 'approved', decided_at: now, result: resultText });
   const c = enqueueApprovalContinuation_(row, true, outcome, deps);
@@ -990,7 +993,7 @@ function decideApproval_(id, approve, deps) {
  * @return {?Object} job
  */
 function enqueueApprovalContinuation_(row, approved, outcome, deps) {
-  if (/^curation/i.test(String(row.reason || '')) || String(row.reason || '').indexOf(SKILL_PROPOSAL_REASON_PREFIX) === 0) return null;
+  if (/^curation/i.test(String(row.reason || '')) || String(row.reason || '').indexOf(SKILL_PROPOSAL_REASON_PREFIX) === 0 || row.tool === UPGRADE_TOOL) return null;
   const sessionId = String(row.job_id || '');
   if (!sessionId) return null;
   let session = null;
