@@ -4386,8 +4386,12 @@ function testUpgradePure_() {
   assertEqual_(upgradeSelectDeployments_(f.deployments.slice(0, 2), {}).b, null, '沒有 B');
   assertThrows_(() => upgradeSelectDeployments_(f.deployments.slice(0, 1), {}), '沒有 A 要 throw');
   const dup = f.deployments.concat([{ deploymentId: 'AKfyA2', deploymentConfig: { versionNumber: 50 }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { entryPointConfig: { access: 'MYSELF' } } }] }]);
-  assertThrows_(() => upgradeSelectDeployments_(dup, {}), '兩個 MYSELF 分不出 A');
+  const picked = upgradeSelectDeployments_(dup, {});
+  assert_(picked.a.id === 'AKfyA' && picked.a.version === 89 && picked.warnings.length === 1 && /取版本最新的 AKfyA/.test(picked.warnings[0]) && /UPGRADE_DEPLOY_A/.test(picked.warnings[0]), '兩個 MYSELF 取版本最新並警告：' + picked.warnings[0]);
+  const tie = f.deployments.concat([{ deploymentId: 'AKfyA2', deploymentConfig: { versionNumber: 89 }, entryPoints: [{ entryPointType: 'WEB_APP', webApp: { entryPointConfig: { access: 'MYSELF' } } }] }]);
+  assertThrows_(() => upgradeSelectDeployments_(tie, {}), '版本相同分不出 A');
   assertEqual_(upgradeSelectDeployments_(dup, { a: 'AKfyA2' }).a.version, 50, 'override 指定 A');
+  assertEqual_(upgradeSelectDeployments_(f.deployments, {}).warnings, [], '沒重複沒警告');
   assertThrows_(() => upgradeSelectDeployments_(dup, { a: 'nope' }), 'override 不存在');
   // API 錯誤訊息、來源驗證
   assert_(/usersettings/.test(scriptApiErrorMessage_(403, JSON.stringify({ error: { message: 'User has not enabled the Apps Script API.' } }))), '403 提示開 API');

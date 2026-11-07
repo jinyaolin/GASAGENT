@@ -274,11 +274,12 @@ function upgradeSyntaxCheck_(files) {
 
 /**
  * 從 deployments.list 的結果挑出部署 A（webapp access MYSELF）與 B（ANYONE_ANONYMOUS）；@HEAD（沒有 versionNumber）略過。
- * 純函式。可用 overrides {a, b} 指定部署 id（Script Properties UPGRADE_DEPLOY_A / B）。
+ * 同一種 access 有多個候選（例如留著舊的 webhook 部署）就取版本最新的那個——deploy.sh 每次都把真正在用的推到最新版——並回 warnings；
+ * 版本相同分不出才 throw。純函式。可用 overrides {a, b} 指定部署 id（Script Properties UPGRADE_DEPLOY_A / B）。
  * @param {!Array<!Object>} deployments
  * @param {{a: (string|undefined), b: (string|undefined)}=} overrides
- * @return {{a: {id: string, version: number, access: string}, b: ?{id: string, version: number, access: string}}}
- * @throws {Error} 找不到 A 或有多個候選
+ * @return {{a: {id: string, version: number, access: string}, b: ?{id: string, version: number, access: string}, warnings: !Array<string>}}
+ * @throws {Error} 找不到 A 或候選版本相同分不出
  */
 function upgradeSelectDeployments_(deployments, overrides) {
   overrides = overrides || {};
@@ -288,21 +289,26 @@ function upgradeSelectDeployments_(deployments, overrides) {
     const access = ep && ep.webApp && ep.webApp.entryPointConfig ? String(ep.webApp.entryPointConfig.access || '') : '';
     return { id: String(d.deploymentId || ''), version: Number(cfg.versionNumber || 0), access, description: String(cfg.description || '') };
   }).filter((d) => d.id && d.version > 0);
+  const warnings = [];
   const pick = (want, override, label) => {
     if (override) {
       const hit = items.find((d) => d.id === override);
       if (!hit) throw new Error(`Script Property 指定的${label} ${override} 不在部署清單裡。`);
       return hit;
     }
-    const c = items.filter((d) => d.access === want);
-    if (c.length > 1) throw new Error(`有 ${c.length} 個 webapp.access=${want} 的部署，分不出${label}；請把要更新的部署 id 寫到 Script Property UPGRADE_DEPLOY_${label === '部署 A' ? 'A' : 'B'}。`);
+    const c = items.filter((d) => d.access === want).sort((x, y) => y.version - x.version);
+    if (c.length > 1) {
+      const prop = `UPGRADE_DEPLOY_${label === '部署 A' ? 'A' : 'B'}`;
+      if (c[0].version === c[1].version) throw new Error(`有 ${c.length} 個 webapp.access=${want} 的部署且版本相同，分不出${label}；請到編輯器「部署 → 管理部署」封存不用的，或把要更新的部署 id 寫到 Script Property ${prop}。`);
+      warnings.push(`有 ${c.length} 個 webapp.access=${want} 的部署，${label}取版本最新的 ${c[0].id.slice(0, 10)}…（@${c[0].version}；另有 ${c.slice(1).map((d) => '@' + d.version).join('、')}）；不對的話請封存多餘的部署或設 Script Property ${prop}。`);
+    }
     return c[0] || null;
   };
   const a = pick(UPGRADE_ACCESS_ADMIN, overrides.a, '部署 A');
   if (!a) throw new Error('找不到部署 A（webapp.access=MYSELF 的版本部署）。');
   const b = pick(UPGRADE_ACCESS_WEBHOOK, overrides.b, '部署 B');
   if (b && b.id === a.id) throw new Error('部署 A 與 B 是同一個部署 id。');
-  return { a, b };
+  return { a, b, warnings };
 }
 
 // ---- Apps Script API --------------------------------------------------------------------------------
@@ -431,6 +437,7 @@ function upgradePlan_(deps) {
   const scriptId = deps.scriptId || ScriptApp.getScriptId();
   try {
     plan.deployments = upgradeSelectDeployments_(api.listDeployments(scriptId), { a: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_A), b: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_B) });
+    plan.deployments.warnings.forEach((w) => plan.warnings.push(w));
     if (!plan.deployments.b) plan.warnings.push('沒有部署 B（Telegram webhook），只會更新部署 A。');
   } catch (err) {
     plan.blockers.push(String(err && err.message || err));
@@ -715,7 +722,7 @@ function upgradeDoctorCheck_(deps) {
     const api = deps.api || scriptApi_(deps);
     const scriptId = deps.scriptId || ScriptApp.getScriptId();
     const d = upgradeSelectDeployments_(api.listDeployments(scriptId), { a: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_A), b: (deps.getProp || getProp_)(PROP.UPGRADE_DEPLOY_B) });
-    return { status: 'ok', detail: `${base}；Telegram /upgrade 可更新部署 A @${d.a.version}${d.b ? ' / B @' + d.b.version : '（沒有部署 B）'}` };
+    return { status: d.warnings.length ? 'warn' : 'ok', detail: `${base}；Telegram /upgrade 可更新部署 A @${d.a.version}${d.b ? ' / B @' + d.b.version : '（沒有部署 B）'}${d.warnings.length ? '。' + d.warnings.join(' ') : ''}` };
   } catch (err) {
     return { status: 'warn', detail: `${base}。/upgrade 目前不能用：${err && err.message || err}` };
   }
