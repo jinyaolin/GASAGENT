@@ -53,6 +53,7 @@ scripts/gemini-login.js  # M7：在本機用 Antigravity（預設）或 Gemini C
 scripts/gemini-probe.js  # 診斷：用存好的憑證以不同 User-Agent 打一次 Code Assist，比對哪個條件被 403
 scripts/deploy.sh        # M6：跑測試 → push → 更新部署 A（只限我）→ 翻 manifest 推部署 B（任何人）→ 翻回；--account 選帳號 / --all 全部；M7-A：scriptId 一致性檢查、結束還原 .clasp.json
 scripts/release.sh       # 發佈給 /upgrade 用：APP_VERSION 改版號 commit → 以該 commit 與 src/ 各檔 sha256 產生 release.json 再 commit（--push 推上去）
+installer/               # 安裝 / 升級授權服務（零依賴 Node，掛在 https://zaistudio.tw/agent）：Google 登入 → 建專案灌 release 建 A / B 部署；既有 agent 的 /upgrade 授權取件；見 installer/README.md
 release.json             # 最新 release 清單（版本、code commit、檔案 sha256、說明）；各帳號的 agent /upgrade 時抓這個檔
 scripts/install.sh       # 一鍵安裝到新 Google 帳號（登入 → 建專案 → push → 授權提示 → 建部署 A / B → 寫 accounts/<name>/）
 scripts/add-webhook.sh   # 幫既有帳號補建部署 B
@@ -63,7 +64,11 @@ accounts/<name>/         # 每個 Google 帳號的 clasp.json（scriptId）與 d
 
 ## 安裝
 
-### 一鍵安裝到一個 Google 帳號（建議）
+### 零安裝：安裝頁
+
+<https://zaistudio.tw/agent>：先到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」，再用要安裝的 Google 帳號登入並允許，服務會建好專案與 A / B 兩個部署，給管理頁網址與升級取件碼；之後打開管理頁授權、Doctor「重新安裝」、填模型 key 與 Telegram token、`/upgrade code <取件碼>`。不需要 Node / clasp。細節見 [installer/README.md](installer/README.md)。
+
+### 一鍵安裝到一個 Google 帳號（維護者用 clasp）
 
 ```bash
 scripts/install.sh --account <代號>
@@ -719,14 +724,13 @@ agent 在複雜任務後自動評估、或自己呼叫 `skill_manage` 提出技�
 
 **安全**：來源 repo / ref 只在 Script Properties `UPGRADE_REPO` / `UPGRADE_REF`（預設 `jinyaolin/GASAGENT` `main`），Telegram 改不了；只有白名單能 `/upgrade`；審批訊息顯示 commit；hash 不符、語法錯、**新版多要 OAuth scope** 一律拒絕（新 scope 得重新授權，自動換上去 trigger 會失敗，這種版本請維護者用 `deploy.sh` 推並在編輯器執行 `installAgent()`）。
 
-**前置（每個帳號一次，2026-11-07 在 default 驗證過）**：Apps Script API 不接受「預設 GCP 專案」腳本的呼叫（403 `has not been used in project …`，預設專案開不了這個 API，也沒有對應的進階服務），所以每個帳號要做：
+**授權（每個帳號一次，`/upgrade login`）**：Apps Script API 不接受「預設 GCP 專案」腳本自己的 token（403 `has not been used in project …`；預設專案開不了這個 API，也沒有對應的進階服務；掛標準 GCP 專案雖然可行但對一般使用者太重，2026-11-07 在 default 試過後放棄）。所以 agent 不用 `ScriptApp.getOAuthToken()`，改走**安裝服務**（[installer/](installer/)，<https://zaistudio.tw/agent>）的 OAuth client——和 clasp 的做法一樣：
 
-1. 維護者 `scripts/deploy.sh --account <代號>` 推上 v0.8.0 以上（manifest 多了 `script.projects` / `script.deployments`；推完 trigger 會停到重新授權為止，所以要帳號主人在線）。
-2. 準備一個**標準 GCP 專案**並啟用 **Apps Script API + Drive / Sheets / Docs / Slides / Gmail / Calendar API**（標準專案不會像預設專案那樣自動開；少開會 Doctor 紅「啟用以下 API 時權限遭拒」）。OAuth 同意畫面：外部、不上傳標誌（上傳就得送驗證）、首頁 / 隱私權 / 服務條款填 repo 與 `PRIVACY.md`、已授權網域 `github.com`，**發布到正式版**（停在「測試中」授權七天就過期，整個 agent 會停）。多個帳號可共用同一個專案（把帳號加成專案 Owner）；Workspace 帳號可改用「內部」。
-3. 編輯器「專案設定 → Google Cloud Platform (GCP) 專案 → 變更專案」填專案**編號**（不可逆）。
-4. 編輯器執行 `installAgent()` 重新授權（會跳「尚未驗證」，進階 → 繼續）。帳號主人的 <https://script.google.com/home/usersettings> 要開著「Google Apps Script API」。
-5. 編輯器「部署 → 管理部署」封存多餘的舊部署（同一種存取權只留一個；多個時會取版本最新的並提醒）。
-6. Telegram `/doctor` 全綠後 `/upgrade`。
+1. Telegram `/upgrade login` → 用 agent 所在的 Google 帳號打開連結，同意「GAS Agent」存取 Apps Script 專案（只要 `script.projects` / `script.deployments`；未驗證警告按「進階 → 繼續」）。帳號主人的 <https://script.google.com/home/usersettings> 要開著「Google Apps Script API」。
+2. 頁面給一組取件碼（24 小時、一次性）→ Telegram `/upgrade code XXXX-XXXX`：agent 向服務領走 refresh token + client id / secret，存進 Script Property `UPGRADE_OAUTH`（服務即刪、不保存），順手列一次部署驗證。之後 agent 自己向 Google refresh；`/upgrade status` 與 Doctor 會顯示授權帳號，`invalid_grant` 時提示重新 login；`/upgrade logout` 清除。
+3. 腳本的 GCP 專案、manifest scope 都不用動（v0.9.0 起 manifest 不含 script.* scope，所以各帳號推這版不需重新授權）。
+
+安裝服務同時提供**全新安裝頁**：使用者用 Google 登入並允許後，服務替他建專案、從 GitHub release 灌程式（驗 sha256）、建 A / B 部署，給管理頁網址與取件碼；使用者只剩打開管理頁授權 agent 本身的權限、填 token / key。細節見 [installer/README.md](installer/README.md)。
 
 Doctor「程式升級（/upgrade）」會檢查 API 與部署並列出 A / B 版號。
 
@@ -828,11 +832,14 @@ node scripts/local-tests.js
 | 寄給自己的指令信沒被處理 | 沒貼標籤、寄件者不是 OWNER_EMAIL、已加星、或超過 7 天；「通道」按「立刻掃一次」看報告；Doctor 看旗標 |
 | 委託寄件者的信沒被處理 | 主旨與內文都沒有 passkey（引用區塊 `>` 裡的不算）、passkey 大小寫不符、Email 指令信未啟用、已加星、或超過 7 天；Telegram `/owner list` 看名單、「通道」按「立刻掃一次」看報告（會列出寄件者） |
 | agent 把自己的回信當成指令迴圈 | 不該發生：回信顯示名稱 `GAS Agent` 會被排除且已加星；若手動把星星拿掉就會重跑 |
-| `/upgrade` 說「還用預設 GCP 專案」（`has not been used in project …`） | 編輯器「專案設定 → 變更專案」改掛有啟用 Apps Script API 的標準 GCP 專案（見「程式升級」前置），再執行 `installAgent()` 重新授權 |
-| `/upgrade` 說 Apps Script API 尚未啟用 / 401 | 帳號主人到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」；401 是 manifest 還沒有 `script.projects` / `script.deployments` 或沒重新授權：編輯器執行 `installAgent()`。Doctor「程式升級」同一項 |
+| `/upgrade` 說「尚未授權升級」/ Doctor「程式升級」黃燈 | 一次性：Telegram `/upgrade login` → 授權 → `/upgrade code <取件碼>`（見「程式升級」） |
+| `/upgrade code` 說取件碼不存在或過期 | 取件碼 24 小時、只能領一次；重新 `/upgrade login`。agent 還在跑沒有 `/upgrade` 的舊版時會回「找不到技能 upgrade」，先用 `deploy.sh` 推一次 |
+| `/upgrade` 說「升級授權已失效（invalid_grant）」 | Google 撤銷了 refresh token（半年沒用、使用者在 <https://myaccount.google.com/permissions> 移除、改密碼）：重新 `/upgrade login` |
+| 授權時 Google 說「使用者未啟用 Apps Script API」 | 帳號主人到 <https://script.google.com/home/usersettings> 開「Google Apps Script API」後重試 |
+| 安裝頁 / 取件回 5xx 或 `configured:false` | 伺服器 `/opt/gas-agent-installer/.env` 缺 `GOOGLE_CLIENT_ID` / `SECRET`，或 `systemctl status gas-agent-installer`；`https://zaistudio.tw/agent/healthz` |
 | `/upgrade` 說「新版需要新的 OAuth scope」 | 刻意擋下：這版要維護者 `scripts/deploy.sh` 推，各帳號在編輯器執行 `installAgent()` 重新授權 |
 | `/upgrade` / Doctor 說「有 N 個 webapp.access=… 的部署」 | 專案裡有多餘的版本部署；會自動取版本最新的那個（deploy.sh 每次都把在用的推到最新版）並提醒，版本相同才拒絕。到編輯器「部署 → 管理部署」封存不用的，或把要更新的部署 id 寫到 Script Property `UPGRADE_DEPLOY_A` / `UPGRADE_DEPLOY_B` |
-| 掛標準 GCP 專案後 Doctor 說「啟用以下 API 時權限遭拒：GCP 專案 … 的 drive」 | 標準專案不會自動開 API：到 Cloud Console「API 和服務 → 程式庫」把 Google Drive / Sheets / Docs / Slides / Gmail / Calendar API 都啟用。**先開 API 再跑 `installAgent()`** |
+| （只有 default 掛了標準 GCP 專案）Doctor 說「啟用以下 API 時權限遭拒：GCP 專案 … 的 drive」 | 標準專案不會自動開 API：到 Cloud Console「API 和服務 → 程式庫」把 Google Drive / Sheets / Docs / Slides / Gmail / Calendar API 都啟用。一般帳號不需要掛標準專案 |
 | `installAgent()` 建了一個新的「GAS Agent DB」，舊資料不見 | v0.8.3 以前的 bug：DB 暫時打不開（例如 API 還沒開）就重建並覆寫 id。舊試算表還在 Drive：編輯器「專案設定 → 指令碼屬性」把 `DB_SPREADSHEET_ID` 改回舊 id（Doctor / AuditLog 之前印過），新建的那份丟垃圾桶。v0.8.4 起 id 有設就絕不重建 |
 | 升級後 Telegram 沒反應 / 管理頁開不了 | 編輯器執行 `upgradeRollbackNow()` 以 Drive 備份還原（部署 A / B 一起切回）；或維護者 `deploy.sh` 重推。升級前後各一列 AuditLog `security:upgrade`，Queue 的 upgrade job 有錯誤訊息 |
 | `/upgrade` 一直說已是最新但 GitHub 明明有新 commit | 只 push 沒跑 `scripts/release.sh`（release.json 沒更新），或 raw CDN 快取（最多 5 分鐘） |
