@@ -236,7 +236,8 @@ function queueTick() {
   const nextEmail = getProp_(PROP.EMAIL_NEXT_SCAN);
   const emailDue = !!nextEmail && new Date(nextEmail).getTime() <= Date.now();
   const nextWatch = getProp_(PROP.WATCH_NEXT_CHECK);
-  const watchDue = !!nextWatch && new Date(nextWatch).getTime() <= Date.now();
+  // 旗標空 = 從沒算過（或舊版清掉的）→ 視為到期，掃一次就會寫回；之後永遠有值
+  const watchDue = !nextWatch || new Date(nextWatch).getTime() <= Date.now();
   if (!dirty && !cronDue && !emailDue && !watchDue) return;
   queueTickCore_({});
 }

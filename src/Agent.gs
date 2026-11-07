@@ -183,6 +183,7 @@ function stopMessage_(stopped, detail, steps) {
     time_budget: '已達單輪時間預算（Config turn_budget_seconds，預設 270 秒）',
     circuit_breaker: '同一工具以相同參數連續失敗 3 次，已熔斷',
     needs_input: '已向 owner 提問，等待回答後自動接續',
+    length: '模型輸出撞到 max_tokens 就停了、沒有文字（多半是 reasoning 吃掉額度）。請到管理頁「模型」調高該 provider 的 max_tokens，或把 extra_body 的 reasoning_effort 調低（例如 "low"）',
   };
   if (stopped === 'needs_input') {
     return `（已向 owner 提問：「${detail}」。收到回答後系統會自動接續這個任務。）`;
@@ -258,7 +259,15 @@ function runTurn_(input, deps) {
     fallbacks = fallbacks.concat(last.fallbacks || []);
 
     const toolCalls = last.toolCalls || [];
-    if (!toolCalls.length) { text = last.text || ''; break; }
+    if (!toolCalls.length) {
+      text = String(last.text || '');
+      if (last.stop === 'length') {
+        // 撞到 max_tokens：有文字就註明被截斷；完全沒文字（reasoning 吃掉額度）就當成系統中止，給 owner 可行動的說明而不是空白
+        if (text.trim()) text += '\n\n（模型輸出已達 max_tokens 被截斷。）';
+        else stopped = 'length';
+      }
+      break;
+    }
 
     messages.push({
       role: 'assistant',

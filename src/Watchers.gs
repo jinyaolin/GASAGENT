@@ -9,7 +9,9 @@
  *   odoo    config {model, domain?, fields?}      白名單 model 裡 id > cursor.last_id 的新記錄
  * 每個事件 enqueue 一個 `watch` job（新 session、channel watch、mode autonomous），事件資料包成資料區塊接在 prompt 後面；
  * 一次檢查最多 WATCH_MAX_EVENTS 個事件，其餘下次再撿。建立 / 啟用時先做一次 baseline，只記 cursor 不觸發，既有資料不會洪水。
- * Script Property WATCH_NEXT_CHECK 存最早的 next_check，queueTick 閒置時不開 spreadsheet。
+ * Script Property WATCH_NEXT_CHECK 存最早的 next_check（上限 now + WATCH_IDLE_RESCAN_MINUTES，沒有啟用的 watcher 也一樣），queueTick 閒置時不開 spreadsheet；
+ * 旗標永遠有值，所以直接在 Watchers tab 改 enabled / every_minutes 最多 WATCH_IDLE_RESCAN_MINUTES 分鐘內會被撿到（不需要重建 trigger）。
+ * WATCH_LAST_SCAN 記上次真的開 sheet 掃描的時間；Doctor / Telegram /status 用 watcherHealth_ 判斷有沒有逾期。
  * 所有來源可注入（deps.sources），測試不碰 Google / Odoo。
  */
 
@@ -25,6 +27,10 @@ const WATCH_SEEN_MAX = 200;
 const WATCH_EVENT_CHARS = 6000;
 /** sheets 一次最多帶幾列新資料。 */
 const WATCH_SHEETS_MAX_ROWS = 50;
+/** 旗標的上限：就算沒有啟用的 watcher（或最早的 next_check 更晚），最多隔這麼久也會開一次 Watchers tab，直接改表才會生效。 */
+const WATCH_IDLE_RESCAN_MINUTES = 10;
+/** 逾期判定：enabled 的 watcher 其 next_check 落後超過 max(2 × every_minutes, 這個值) 分鐘就算沒在跑。 */
+const WATCH_OVERDUE_GRACE_MINUTES = 5;
 
 /**
  * @typedef {{
@@ -328,24 +334,79 @@ function watchEventMessage_(p) {
 // ---- 到期掃描 ------------------------------------------------------------------------------------------
 
 /**
- * 最早的 next_check → Script Property WATCH_NEXT_CHECK（沒有啟用的就清掉）。
+ * 最早的 next_check → Script Property WATCH_NEXT_CHECK，但不晚於 now + WATCH_IDLE_RESCAN_MINUTES；永遠有值。
+ * （舊版沒有啟用的 watcher 就清空旗標，結果直接在 sheet 把 enabled 改回 TRUE 永遠不會被撿到。）
  * @param {!Array<WatcherRow>} watchers
- * @return {string} ISO 或空字串
+ * @param {number=} nowMs
+ * @return {string} ISO
  */
-function refreshWatchNextCheckProp_(watchers) {
-  let min = null;
+function refreshWatchNextCheckProp_(watchers, nowMs) {
+  const now = nowMs || Date.now();
+  let min = now + WATCH_IDLE_RESCAN_MINUTES * 60000;
   (watchers || []).forEach((w) => {
     if (!w.enabled) return;
     const t = w.next_check ? w.next_check.getTime() : 0; // 沒有 next_check 的視為立刻
-    if (min === null || t < min) min = t;
+    if (t < min) min = t;
   });
-  const iso = min === null ? '' : new Date(min).toISOString();
+  const iso = new Date(Math.max(min, 0)).toISOString();
   setProp_(PROP.WATCH_NEXT_CHECK, iso);
   return iso;
 }
 
 /**
- * queueTick 每次先跑：旗標到期才開 sheet；到期的 watcher 各檢查一次、事件入列、推進 next_check。
+ * 監看健康狀態（純函式）：Doctor、/status、管理頁共用。
+ * @param {!Array<WatcherRow>} watchers
+ * @param {{nextCheck: string, lastScan: string}} props 兩個 Script Property 的值（ISO 或空）
+ * @param {number} nowMs
+ * @return {{total: number, enabled: number, overdue: !Array<{id: string, name: string, lateMinutes: number}>, flagStale: boolean, nextCheck: string, lastScan: string, text: string}}
+ *   flagStale：旗標空、或比最早到期的 enabled watcher 還晚（queueTick 不會開 sheet）；overdue：next_check 落後太久的 enabled watcher
+ */
+function watcherHealth_(watchers, props, nowMs) {
+  props = props || {};
+  const list = watchers || [];
+  const enabled = list.filter((w) => w.enabled);
+  const overdue = [];
+  let earliest = null;
+  enabled.forEach((w) => {
+    const due = w.next_check ? w.next_check.getTime() : 0;
+    if (earliest === null || due < earliest) earliest = due;
+    const grace = Math.max(2 * w.every_minutes, WATCH_OVERDUE_GRACE_MINUTES) * 60000;
+    if (nowMs - due > grace) overdue.push({ id: w.id, name: w.name, lateMinutes: Math.round((nowMs - due) / 60000) });
+  });
+  const flagMs = props.nextCheck ? new Date(props.nextCheck).getTime() : NaN;
+  const flagStale = !props.nextCheck || isNaN(flagMs) || flagMs > nowMs + WATCH_IDLE_RESCAN_MINUTES * 60000 || (earliest !== null && flagMs > Math.max(earliest, nowMs));
+  const parts = [`監看 ${enabled.length} / ${list.length} 個啟用`];
+  parts.push(`上次掃描 ${props.lastScan ? fmtDate_(new Date(props.lastScan)) : '（還沒有）'}`);
+  parts.push(`下次 ${props.nextCheck && !isNaN(flagMs) ? fmtDate_(new Date(flagMs)) : '（旗標空）'}`);
+  if (overdue.length) parts.push(`⚠ 逾期：${overdue.map((o) => `${o.name || o.id}（慢 ${o.lateMinutes} 分）`).join('、')}`);
+  if (flagStale) parts.push('⚠ 旗標失效（queueTick 不會開 Watchers tab）');
+  return { total: list.length, enabled: enabled.length, overdue, flagStale, nextCheck: props.nextCheck || '', lastScan: props.lastScan || '', text: parts.join('；') };
+}
+
+/**
+ * 讀目前狀態並順手把旗標對齊（開管理頁 / Doctor / /status 都會呼叫，所以直接改表後看一眼就修好）。
+ * @param {{store: (Object|undefined), now: (Function|undefined)}=} deps
+ * @return {{health: !Object, repaired: boolean}} repaired：旗標原本失效、已重寫
+ */
+function watcherStatus_(deps) {
+  deps = deps || {};
+  const nowMs = deps.now ? deps.now() : Date.now();
+  const store = deps.store || sheetWatcherStore_();
+  const watchers = store.list();
+  const props = { nextCheck: getProp_(PROP.WATCH_NEXT_CHECK), lastScan: getProp_(PROP.WATCH_LAST_SCAN) };
+  let health = watcherHealth_(watchers, props, nowMs);
+  let repaired = false;
+  if (health.flagStale) {
+    props.nextCheck = refreshWatchNextCheckProp_(watchers, nowMs);
+    repaired = true;
+    health = watcherHealth_(watchers, props, nowMs);
+    health.text += '（旗標已重設，下一分鐘就會掃）';
+  }
+  return { health, repaired };
+}
+
+/**
+ * queueTick 每次先跑：旗標到期（或空）才開 sheet；到期的 watcher 各檢查一次、事件入列、推進 next_check。
  * @param {{watcherStore: (Object|undefined), queueStore: (Object|undefined), now: (Function|undefined), sources: (Object|undefined), force: (boolean|undefined), enqueue: (Function|undefined)}} deps
  * @return {?{checked: number, fired: !Array<string>, errors: !Array<string>}} 旗標沒到回 null
  */
@@ -354,11 +415,18 @@ function watcherScanIfDue_(deps) {
   const nowMs = deps.now ? deps.now() : Date.now();
   if (!deps.force) {
     const next = getProp_(PROP.WATCH_NEXT_CHECK);
-    if (!next || new Date(next).getTime() > nowMs) return null;
+    if (next && new Date(next).getTime() > nowMs) return null; // 旗標空視為到期（掃完就會寫回）
   }
   const store = deps.watcherStore || sheetWatcherStore_();
   const report = { checked: 0, fired: [], errors: [] };
-  const watchers = store.list();
+  let watchers;
+  try {
+    watchers = store.list();
+  } catch (err) {
+    // 開不了 Watchers tab（舊安裝還沒補 tab）：旗標推到閒置重掃時間，別每分鐘都撞一次
+    setProp_(PROP.WATCH_NEXT_CHECK, new Date(nowMs + WATCH_IDLE_RESCAN_MINUTES * 60000).toISOString());
+    throw err;
+  }
   watchers.forEach((w) => {
     if (!w.enabled) return;
     if (!deps.force && w.next_check && w.next_check.getTime() > nowMs) return;
@@ -370,7 +438,8 @@ function watcherScanIfDue_(deps) {
       report.errors.push(`${w.id}: ${err && err.message || err}`);
     }
   });
-  try { refreshWatchNextCheckProp_(store.list()); } catch (err) { /* 忽略 */ }
+  setProp_(PROP.WATCH_LAST_SCAN, new Date(nowMs).toISOString());
+  try { refreshWatchNextCheckProp_(store.list(), nowMs); } catch (err) { /* 忽略 */ }
   return report;
 }
 
@@ -447,7 +516,7 @@ function createWatcher_(input, deps) {
   w.cursor = {};
   deps.store.add(w);
   runWatcherCheck_(w, { store: deps.store, now: deps.now, sources: deps.sources, baseline: true });
-  try { refreshWatchNextCheckProp_(deps.store.list()); } catch (err) { /* 忽略 */ }
+  try { refreshWatchNextCheckProp_(deps.store.list(), deps.now ? deps.now() : undefined); } catch (err) { /* 忽略 */ }
   return w;
 }
 
@@ -473,7 +542,7 @@ function updateWatcher_(id, input, deps) {
   } else {
     deps.store.update(next);
   }
-  try { refreshWatchNextCheckProp_(deps.store.list()); } catch (err) { /* 忽略 */ }
+  try { refreshWatchNextCheckProp_(deps.store.list(), deps.now ? deps.now() : undefined); } catch (err) { /* 忽略 */ }
   return next;
 }
 
@@ -487,7 +556,7 @@ function checkWatcherNow_(id, deps) {
   const w = deps.store.get(String(id || ''));
   if (!w) throw new Error(`找不到 watcher ${id}。`);
   const r = runWatcherCheck_(w, { store: deps.store, queueStore: deps.queueStore, now: deps.now, sources: deps.sources });
-  try { refreshWatchNextCheckProp_(deps.store.list()); } catch (err) { /* 忽略 */ }
+  try { refreshWatchNextCheckProp_(deps.store.list(), deps.now ? deps.now() : undefined); } catch (err) { /* 忽略 */ }
   return { watcher: publicWatcher_(w), events: r.events, jobs: r.jobs.map((j) => j.id) };
 }
 

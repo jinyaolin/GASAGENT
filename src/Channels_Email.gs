@@ -4,7 +4,8 @@
  * 掃描由 queueTick 帶動：Script Property EMAIL_NEXT_SCAN 記下次掃描時間（Config email_scan_every_minutes，預設 5 分鐘），
  * 沒到就不開 Gmail（維持閒置零成本）。掃描：search `label:<inbox> from:<owner> newer_than:7d -is:starred`，
  * 每個 thread 裡「owner 寄的、尚未加星、不是 agent 自己回的」訊息各排一個 turn job，排完就加星（★ = 已處理）。
- * agent 的回覆用 thread.reply（寄件者是 owner 本人，顯示名稱 GAS Agent），送出後也加星，避免被當成指令。
+ * agent 的回覆用 thread.reply（寄件者是 owner 本人，顯示名稱 Config email_sender_name，預設 GAS Agent），送出後也加星，避免被當成指令；
+ * 沒有文字結果也沒有待審批 / 續跑要講的輪次不回信。
  * 指令內文會去掉引用（> 開頭、On … wrote:）與簽名檔（-- 之後）。全部 Gmail 依賴可注入，測試不碰 Gmail。
  *
  * 委託寄件者（Telegram /owner <email> <passkey>）：Script Property EMAIL_DELEGATE_KEYS 存 JSON {email: passkey}。
@@ -20,6 +21,7 @@ const EMAIL_SEARCH_NEWER_THAN = '7d';
 /** 一次掃描最多處理幾串。 */
 const EMAIL_SCAN_MAX_THREADS = 20;
 /** agent 回信的顯示名稱；掃描時用它排除自己的回覆。 */
+/** 預設寄件者顯示名稱；實際用 Config email_sender_name（cfg.emailSenderName）。 */
 const EMAIL_AGENT_SENDER_NAME = 'GAS Agent';
 /** 委託寄件者 passkey 長度限制。 */
 const EMAIL_DELEGATE_PASSKEY_MIN = 6;
@@ -217,7 +219,8 @@ function scanEmailInbox_(deps) {
   if (!cfg.emailEnabled || !owner) return report;
   const delegates = deps.delegates === undefined ? getEmailDelegates_() : (deps.delegates || {});
   const senderOf = (m) => normalizeEmail_(/<([^>]+)>/.exec(m.from) ? /<([^>]+)>/.exec(m.from)[1] : m.from);
-  const isAgent = (m) => String(m.from || '').indexOf(EMAIL_AGENT_SENDER_NAME) !== -1;
+  const senderName = (cfg.emailSenderName || EMAIL_AGENT_SENDER_NAME).trim();
+  const isAgent = (m) => String(m.from || '').indexOf(senderName) !== -1;
   // sender：要處理的寄件者；passkey 非空 = 委託者，主旨或內文必須含 passkey 才算指令（去掉後排隊）。
   const processThreads = (threads, sender, passkey) => {
     threads.forEach((t) => {
@@ -278,7 +281,8 @@ function emailScanIfDue_(deps) {
 }
 
 /**
- * Queue job 結束後回覆到同一 thread（寄件者 owner、顯示名稱 GAS Agent），送出後把自己的回覆加星。
+ * Queue job 結束後回覆到同一 thread（寄件者 owner、顯示名稱 Config email_sender_name），送出後把自己的回覆加星。
+ * 沒有文字也沒有待審批 / 續跑 / 技能提案 → 不寄（回 skipped=true）。
  * @param {string} threadId
  * @param {!Object} result summarizeTurnResult_ 摘要
  * @param {{replyEmail: (Function|undefined)}=} deps replyEmail(threadId, text)
@@ -286,14 +290,16 @@ function emailScanIfDue_(deps) {
  */
 function deliverTurnToEmail_(threadId, result, deps) {
   deps = deps || {};
-  const text = channelReplyText_(result, { approvalHint: '請到管理頁「紀錄 → 審批」批准或拒絕。' });
+  const text = channelReplyText_(result, { approvalHint: '請到管理頁「紀錄 → 審批」批准或拒絕。', skipEmpty: true });
+  if (!text) return { ok: true, skipped: true };
   const reply = deps.replyEmail || ((tid, body) => {
+    const cfg = deps.cfg || getChannelConfig_();
     const thread = GmailApp.getThreadById(tid);
     if (!thread) throw new Error(`找不到 thread ${tid}`);
-    thread.reply(body, { name: EMAIL_AGENT_SENDER_NAME });
+    thread.reply(body, { name: cfg.emailSenderName || EMAIL_AGENT_SENDER_NAME });
     const msgs = thread.getMessages();
     if (msgs.length) msgs[msgs.length - 1].star();
   });
   reply(threadId, text);
-  return { ok: true };
+  return { ok: true, skipped: false };
 }

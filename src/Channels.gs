@@ -22,12 +22,14 @@ const CHANNEL_CONFIG_DEFAULTS = Object.freeze({
   email_enabled: false,
   email_inbox_label: 'agent/inbox',
   email_scan_every_minutes: 5,
+  /** Email 回覆 / 投遞的寄件者顯示名稱（寄件地址仍是 owner 本人）；掃描時也用它認出 agent 自己的回覆。 */
+  email_sender_name: 'GAS Agent',
 });
 
 /**
  * @typedef {{
  *   telegramEnabled: boolean, telegramAllowedUserIds: !Array<string>, telegramWebhookUrl: string, telegramOwnerChatId: string, telegramNotifyApprovals: boolean, telegramAck: boolean, telegramOpenGroups: !Array<string>, telegramGuestGroups: !Array<string>, telegramBotUsername: string,
- *   telegramMemberToolsets: !Array<string>, emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number
+ *   telegramMemberToolsets: !Array<string>, emailEnabled: boolean, emailInboxLabel: string, emailScanEveryMinutes: number, emailSenderName: string
  * }} ChannelConfig
  */
 
@@ -53,6 +55,7 @@ function parseChannelConfig_(map) {
     emailEnabled: map.email_enabled === undefined ? d.email_enabled : toBoolean_(map.email_enabled),
     emailInboxLabel: String(map.email_inbox_label || d.email_inbox_label).trim() || d.email_inbox_label,
     emailScanEveryMinutes: clampInt_(map.email_scan_every_minutes, d.email_scan_every_minutes, 1, 1440),
+    emailSenderName: String(map.email_sender_name === undefined ? d.email_sender_name : map.email_sender_name).trim().slice(0, 80) || d.email_sender_name,
   };
 }
 
@@ -84,6 +87,7 @@ function saveChannelConfig_(input, deps) {
   if (values.telegram_member_toolsets !== undefined) values.telegram_member_toolsets = principalToolsets_('group_member', values.telegram_member_toolsets).join(',');
   const parsed = parseChannelConfig_(Object.assign({}, getConfigMap_(), values));
   if (values.email_scan_every_minutes !== undefined) values.email_scan_every_minutes = parsed.emailScanEveryMinutes;
+  if (values.email_sender_name !== undefined) values.email_sender_name = parsed.emailSenderName;
   if (parsed.telegramEnabled && !parsed.telegramAllowedUserIds.length) throw new Error('啟用 Telegram 前請先填至少一個允許的 Telegram user id（純數字）。');
   if (Object.keys(values).length) setConfigValues_(values);
   if (!getTelegramSecret_()) setProp_(PROP.TELEGRAM_WEBHOOK_SECRET, newWebhookSecret_());
@@ -146,8 +150,8 @@ function deliverTurnToChannel_(payload, result, deps) {
     }
     const threadId = String(payload.email_thread_id || payload.external_id || '');
     if (!threadId) throw new Error('payload 缺 email_thread_id。');
-    deliverTurnToEmail_(threadId, result, deps);
-    return { channel, ok: true, summary: `Email 已回覆 thread ${threadId}`, error: '' };
+    const r = deliverTurnToEmail_(threadId, result, deps);
+    return { channel, ok: true, summary: r.skipped ? `Email 未回覆 thread ${threadId}（這輪沒有文字結果也沒有待審批 / 續跑）` : `Email 已回覆 thread ${threadId}`, error: '' };
   } catch (err) {
     const message = String(err && err.message || err);
     return { channel, ok: false, summary: `通道投遞失敗：${message}`, error: message };
@@ -157,11 +161,16 @@ function deliverTurnToChannel_(payload, result, deps) {
 /**
  * 回覆文字：agent 的最終文字 + 待審批 / 續跑說明。純函式。
  * @param {!Object} result
- * @param {{approvalHint: string}} opts approvalHint：通道專屬的審批說明（Telegram 有按鈕、Email 指到管理頁）
+ * @param {{approvalHint: string, skipEmpty: (boolean|undefined)}} opts approvalHint：通道專屬的審批說明（Telegram 有按鈕、Email 指到管理頁）；
+ *   skipEmpty：沒有文字、也沒有待審批 / 續跑 / 技能提案要講時回空字串（Email 用：不寄「（這輪沒有文字結果）」）
  * @return {string}
  */
 function channelReplyText_(result, opts) {
-  const lines = [String(result.text || '（這輪沒有文字結果）').trim()];
+  const text = String(result.text || '').trim();
+  const pendingCount = (result.steps || []).filter((s) => s.status === 'pending_approval').length;
+  const hasExtra = pendingCount > 0 || !!result.continued_by || !!(result.skillProposal && result.skillProposal.proposed);
+  if (!text && !hasExtra && opts && opts.skipEmpty) return '';
+  const lines = [text || '（這輪沒有文字結果）'];
   const pending = (result.steps || []).filter((s) => s.status === 'pending_approval');
   if (pending.length) lines.push('', `⏸ 待你審批：${pending.map((s) => s.tool).join(', ')}。${(opts && opts.approvalHint) || ''}${result.approval_notice && result.approval_notice.ok ? '（也已推到 Telegram，可直接按按鈕）' : ''}`.trim());
   if (result.continued_by) lines.push('', '（任務尚未完成，系統已排續跑，稍後會再回覆。）');

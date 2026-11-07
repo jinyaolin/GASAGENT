@@ -91,7 +91,9 @@ function createReportDoc_(title, body) {
  * @param {string} body
  */
 function sendOwnerEmail_(to, subject, body) {
-  GmailApp.sendEmail(to, subject, body, { name: 'GAS Agent' });
+  let name = 'GAS Agent';
+  try { name = getChannelConfig_().emailSenderName || name; } catch (err) { /* 用預設 */ }
+  GmailApp.sendEmail(to, subject, body, { name });
 }
 
 /**

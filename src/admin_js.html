@@ -1545,7 +1545,8 @@
       $table.append(el('div', { class: 'loading' }, '載入中…'));
       try {
         data = await call('adminListWatchers');
-        $status.textContent = data.nextCheck ? `下次檢查：${data.nextCheck.slice(0, 16).replace('T', ' ')}Z` : '沒有啟用的 watcher';
+        $status.textContent = data.health ? data.health.text : (data.nextCheck ? `下次檢查：${data.nextCheck.slice(0, 16).replace('T', ' ')}Z` : '沒有啟用的 watcher');
+        $status.style.color = data.health && (data.health.overdue.length || data.health.flagStale) ? 'var(--danger, #b00)' : '';
         renderTable();
       } catch (err) {
         $table.innerHTML = '';
@@ -1851,6 +1852,7 @@
     const $emEnabled = el('input', { type: 'checkbox' }); $emEnabled.checked = cfg.emailEnabled;
     const $label = el('input', { type: 'text' }); $label.value = cfg.emailInboxLabel;
     const $every = el('input', { type: 'number', min: 1, max: 1440 }); $every.value = cfg.emailScanEveryMinutes;
+    const $senderName = el('input', { type: 'text', maxlength: 80, placeholder: 'GAS Agent' }); $senderName.value = cfg.emailSenderName || '';
     const $emMsg = el('div');
     const $dgEmail = el('input', { type: 'email', placeholder: 'someone@example.com' });
     const $dgKey = el('input', { type: 'text', placeholder: '（留空自動產生）' });
@@ -1894,6 +1896,7 @@
         field('啟用', el('label', { class: 'checkbox' }, [$emEnabled, ' 掃描指令信'])),
         field('Gmail 標籤', $label, `寄件者必須是 ${data.email.owner}（寄給自己），且貼上這個標籤；可在 Gmail 設篩選器（例如 from:me to:me 主旨含 [agent]）自動貼標`),
         field('每幾分鐘掃一次', $every, '由每分鐘 trigger 帶動；沒到時間不開 Gmail'),
+        field('回覆的寄件者名稱', $senderName, '回信與投遞仍由你的信箱寄出，只改顯示名稱（預設 GAS Agent）；掃描時靠這個名稱認出 agent 自己的回覆，請勿與你的名字相同'),
       ]),
       el('div', { class: 'meta' }, `處理過的指令信會加星（★）；agent 的回覆用 thread 回信（寄件者顯示 GAS Agent）並加星。${data.email.nextScan ? '下次掃描 ' + data.email.nextScan.slice(0, 16).replace('T', ' ') + 'Z' : '尚未排程掃描'}`),
       el('h4', {}, '委託寄件者'),
@@ -1923,7 +1926,7 @@
         await call('adminSaveChannelSettings', {
           telegram_enabled: $tgEnabled.checked, telegram_notify_approvals: $notify.checked, telegram_ack: $ack.checked, telegramBotToken: $token.value, telegram_allowed_user_ids: $allow.value, telegram_webhook_url: $execUrl.value.trim(),
           telegram_member_toolsets: memberToolsetsValue(),
-          email_enabled: $emEnabled.checked, email_inbox_label: $label.value.trim(), email_scan_every_minutes: $every.value,
+          email_enabled: $emEnabled.checked, email_inbox_label: $label.value.trim(), email_scan_every_minutes: $every.value, email_sender_name: $senderName.value.trim(),
         });
         $token.value = '';
         rerender();

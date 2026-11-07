@@ -1162,6 +1162,12 @@ function testWatcherFlow_() {
   let t = Date.parse('2026-11-04T02:00:00Z');
   const now = () => t;
   setProp_(PROP.WATCH_NEXT_CHECK, '');
+  // 旗標空 = 到期：開 sheet 掃（沒有 watcher 也會把旗標寫成 now + 閒置重掃間隔）；開不了 tab 也會把旗標推 10 分鐘再丟錯
+  assertEqual_([watcherScanIfDue_({ watcherStore: ws.store, queueStore: q.store, now, sources: f.sources }).checked, getProp_(PROP.WATCH_NEXT_CHECK)], [0, new Date(t + WATCH_IDLE_RESCAN_MINUTES * 60000).toISOString()], '旗標空視為到期並寫回');
+  setProp_(PROP.WATCH_NEXT_CHECK, '');
+  assertThrows_(() => watcherScanIfDue_({ watcherStore: { list: () => { throw new Error('缺 tab'); } }, now }), '缺 tab');
+  assertEqual_(getProp_(PROP.WATCH_NEXT_CHECK), new Date(t + WATCH_IDLE_RESCAN_MINUTES * 60000).toISOString(), '開不了 tab 旗標仍推到 10 分後');
+  setProp_(PROP.WATCH_NEXT_CHECK, '');
   // create → baseline、next_check、旗標
   const w = createWatcher_({ name: '發票進來', type: 'gmail', config: { query: 'label:發票' }, prompt: '建帳單草稿', deliver_to: 'none', every_minutes: 5 }, { store: ws.store, providerIds: [], sources: f.sources, now });
   const saved = ws.store.get(w.id);
@@ -1199,9 +1205,31 @@ function testWatcherFlow_() {
   // update 只改 prompt → cursor 不動
   const upd2 = updateWatcher_(w.id, { prompt: '新指令' }, { store: ws.store, providerIds: [], sources: f.sources, now: () => t + 5000 });
   assertEqual_([upd2.prompt, upd2.cursor.since_ms], ['新指令', t], '只改 prompt 不重做 baseline');
-  // 停用 → 旗標清掉；重新啟用 → baseline
+  assertEqual_(getProp_(PROP.WATCH_LAST_SCAN), new Date(t - 2000).toISOString(), 'scanIfDue 記 WATCH_LAST_SCAN');
+  // 停用 → 旗標不清空，改成 now + 10 分（直接改表把 enabled 改回 TRUE 也會在 10 分內被撿到）；重新啟用 → baseline
   updateWatcher_(w.id, { enabled: false }, { store: ws.store, sources: f.sources, now });
-  assertEqual_(getProp_(PROP.WATCH_NEXT_CHECK), '', '全部停用旗標清空');
+  assertEqual_(getProp_(PROP.WATCH_NEXT_CHECK), new Date(t + WATCH_IDLE_RESCAN_MINUTES * 60000).toISOString(), '全部停用旗標 = now + 閒置重掃間隔');
+  // 模擬直接在 sheet 改 enabled=TRUE（不經 updateWatcher_）：旗標到期後掃描會撿到並檢查（next_check 是舊的 → 到期）
+  ws.watchers[0].enabled = true;
+  assertEqual_(watcherScanIfDue_({ watcherStore: ws.store, queueStore: q.store, now: () => t + 60000, sources: f.sources }), null, '閒置重掃間隔沒到不開 sheet');
+  const directScan = watcherScanIfDue_({ watcherStore: ws.store, queueStore: q.store, now: () => t + WATCH_IDLE_RESCAN_MINUTES * 60000, sources: f.sources });
+  assertEqual_([directScan.checked, ws.store.get(w.id).last_check.getTime()], [1, t + WATCH_IDLE_RESCAN_MINUTES * 60000], '直接改表啟用的 watcher 在閒置重掃時被檢查');
+  // watcherHealth_：逾期與旗標失效判定；watcherStatus_ 會把失效旗標修好
+  const hOk = watcherHealth_(ws.store.list(), { nextCheck: getProp_(PROP.WATCH_NEXT_CHECK), lastScan: getProp_(PROP.WATCH_LAST_SCAN) }, t + WATCH_IDLE_RESCAN_MINUTES * 60000 + 1000);
+  assertEqual_([hOk.enabled, hOk.overdue, hOk.flagStale], [1, [], false], '健康：' + hOk.text);
+  const lateMs = t + WATCH_IDLE_RESCAN_MINUTES * 60000 + 5 * 60000 + 20 * 60000; // next_check（+5 分）落後 20 分 > max(2×5, 5)
+  const hLate = watcherHealth_(ws.store.list(), { nextCheck: '', lastScan: '' }, lateMs);
+  assertEqual_([hLate.overdue.length, hLate.overdue[0].lateMinutes, hLate.flagStale], [1, 20, true], '逾期 + 旗標空：' + hLate.text);
+  assert_(/⚠ 逾期：發票進來（慢 20 分）/.test(hLate.text) && /旗標失效/.test(hLate.text), '健康文字');
+  setProp_(PROP.WATCH_NEXT_CHECK, '');
+  const st = watcherStatus_({ store: ws.store, now: () => lateMs });
+  assertEqual_([st.repaired, st.health.flagStale, getProp_(PROP.WATCH_NEXT_CHECK)], [true, false, new Date(t + WATCH_IDLE_RESCAN_MINUTES * 60000 + 300000).toISOString()], 'watcherStatus_ 修好旗標（= 最早 next_check）');
+  assert_(/旗標已重設/.test(st.health.text), '修好有說明');
+  assertEqual_(watcherStatus_({ store: ws.store, now: () => lateMs }).repaired, false, '第二次不用修');
+  const hFuture = watcherHealth_(ws.store.list(), { nextCheck: new Date(lateMs + 3600000).toISOString(), lastScan: '' }, lateMs);
+  assert_(hFuture.flagStale, '旗標比最早 next_check 晚 → 失效');
+  ws.watchers[0].enabled = false;
+  updateWatcher_(w.id, { enabled: false }, { store: ws.store, sources: f.sources, now });
   const re = updateWatcher_(w.id, { enabled: true }, { store: ws.store, sources: f.sources, now: () => t + 9000 });
   assertEqual_(re.cursor.since_ms, t + 9000, '重新啟用重做 baseline');
   // check_now 與 watcher_manage
@@ -1440,6 +1468,12 @@ function testRunTurnHappyPath_() {
   assert_(/fake 的 write：fake_write/.test(prompt), '列出未開放的工具');
   assert_(/本次額外指示\n請簡短/.test(prompt), '額外指示在最後');
   assertThrows_(() => runTurn_({ message: '   ' }, deps), '空訊息');
+  // 撞 max_tokens：沒文字 → stopped length + 可行動說明；有文字 → 註明截斷
+  const rLen = runTurn_({ message: 'go' }, fakeTurnDeps_(fakeChat_([{ text: '', stop: 'length' }]).chat));
+  assertEqual_(rLen.stopped, 'length', 'length 無文字 → stopped');
+  assert_(/max_tokens/.test(rLen.text) && /reasoning_effort/.test(rLen.text), 'length 說明：' + rLen.text);
+  const rLen2 = runTurn_({ message: 'go' }, fakeTurnDeps_(fakeChat_([{ text: '寫到一半', stop: 'length' }]).chat));
+  assertEqual_([rLen2.stopped, /^寫到一半\n\n（模型輸出已達 max_tokens 被截斷。）$/.test(rLen2.text)], ['', true], 'length 有文字 → 註明截斷');
 }
 
 function testRunTurnCircuitBreaker_() {
@@ -2884,10 +2918,14 @@ function testTelegramParse_() {
   assertEqual_(notifySkillProposalTelegram_({ approvalId: 'apr_9', args: {} }, { cfg: parseChannelConfig_({}) }).skipped, 'disabled', 'Telegram 未啟用略過');
   assertEqual_(skillProposalSummary_({ action: 'patch', name: 'x', patch_find: 'a', patch_replace: 'b' }), ['修補技能「x」', '找到：a', '取代成：b'], 'patch 摘要');
   assert_(/#1 💡 skill_manage/.test(telegramPendingList_([{ id: 'apr_s', tool: 'skill_manage', args: '{"action":"create","name":"k","description":"d","content":"c"}', reason: '技能提案', created_at: '' }], []).text), '/approve 清單對技能提案用摘要');
-  assertEqual_(channelReplyText_({ text: '', steps: [] }, {}), '（這輪沒有文字結果）', '空結果');
+  assertEqual_(channelReplyText_({ text: '', steps: [] }, {}), '（這輪沒有文字結果）', '空結果（Telegram 仍回占位文字）');
+  assertEqual_(channelReplyText_({ text: '  ', steps: [] }, { skipEmpty: true }), '', 'skipEmpty：沒文字沒事講 → 空字串');
+  assert_(/^（這輪沒有文字結果）\n\n⏸ 待你審批：gmail_send/.test(channelReplyText_({ text: '', steps: [{ tool: 'gmail_send', status: 'pending_approval' }] }, { skipEmpty: true, approvalHint: '' })), 'skipEmpty 但有待審批仍要講');
+  assert_(/排續跑/.test(channelReplyText_({ text: '', steps: [], continued_by: 'job_9' }, { skipEmpty: true })), 'skipEmpty 但有續跑仍要講');
   // 通道設定
-  const c = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, abc, 222', email_scan_every_minutes: '0', email_inbox_label: '' });
-  assertEqual_([c.telegramEnabled, c.telegramAllowedUserIds, c.emailEnabled, c.emailScanEveryMinutes, c.emailInboxLabel], [true, ['111', '222'], false, 1, 'agent/inbox'], '設定解析（非數字 id 丟掉、夾限、預設標籤）');
+  const c = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, abc, 222', email_scan_every_minutes: '0', email_inbox_label: '', email_sender_name: '  ' });
+  assertEqual_([c.telegramEnabled, c.telegramAllowedUserIds, c.emailEnabled, c.emailScanEveryMinutes, c.emailInboxLabel, c.emailSenderName], [true, ['111', '222'], false, 1, 'agent/inbox', 'GAS Agent'], '設定解析（非數字 id 丟掉、夾限、預設標籤 / 寄件者名稱）');
+  assertEqual_(parseChannelConfig_({ email_sender_name: ' ELOM 助理 ' }).emailSenderName, 'ELOM 助理', '自訂寄件者名稱');
 }
 
 function testTelegramHandle_() {
@@ -3026,6 +3064,19 @@ function testEmailChannel_() {
   deliverTurnToEmail_('th1', { text: '週報好了', steps: [{ tool: 'gmail_send', status: 'pending_approval', approvalId: 'apr_1' }] }, { replyEmail: (tid, body) => replies.push([tid, body]) });
   assertEqual_(replies[0][0], 'th1', '回到同一 thread');
   assert_(/^週報好了/.test(replies[0][1]) && /管理頁「紀錄 → 審批」/.test(replies[0][1]), 'email 回覆含審批說明');
+  // 沒有文字也沒事要講 → 不寄
+  assertEqual_([deliverTurnToEmail_('th1', { text: '', steps: [] }, { replyEmail: (tid, body) => replies.push([tid, body]) }).skipped, replies.length], [true, 1], '空結果不寄 email');
+  assertEqual_(deliverTurnToEmail_('th1', { text: '', steps: [], continued_by: 'job_2' }, { replyEmail: (tid, body) => replies.push([tid, body]) }).skipped, false, '有續跑說明就寄');
+  const dSkip = deliverTurnToChannel_({ channel: 'email', external_id: 'th9' }, { text: '', steps: [] }, { replyEmail: () => { throw new Error('不該寄'); } });
+  assert_(dSkip.ok && /未回覆/.test(dSkip.summary), '通道投遞：空結果 summary 說明未回覆：' + dSkip.summary);
+  // 自訂寄件者名稱：掃描時用它認出 agent 自己的回覆
+  const cfgNamed = parseChannelConfig_({ email_enabled: 'TRUE', email_sender_name: 'ELOM 助理' });
+  const gNamed = fakeGmail_([{ id: 'thN', subject: 's', messages: [
+    { id: 'n1', from: 'ELOM 助理 <owner@x.com>', date: new Date(2026, 10, 2, 9), starred: false, body: 'agent 回覆（忘了加星）' },
+    { id: 'n2', from: 'GAS Agent <owner@x.com>', date: new Date(2026, 10, 2, 9, 1), starred: false, body: '舊名稱不再算 agent' },
+  ] }]);
+  const rNamed = scanEmailInbox_({ cfg: cfgNamed, ownerEmail: 'owner@x.com', gmail: gNamed.gmail, sessionStore: ss.store, enqueue, delegates: {} });
+  assertEqual_([rNamed.enqueued.length, gNamed.starred], [1, ['n2']], '只有顯示名稱 = email_sender_name 的訊息被當成 agent 回覆略過');
 }
 
 function testChannelDelivery_() {

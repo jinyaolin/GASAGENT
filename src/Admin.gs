@@ -760,8 +760,9 @@ function adminListWatchers() {
   assertOwner();
   const store = sheetWatcherStore_();
   const watchers = store.list();
-  try { refreshWatchNextCheckProp_(watchers); } catch (err) { /* 忽略 */ }
-  return { watchers: watchers.map(publicWatcher_), types: WATCHER_TYPES.slice(), nextCheck: getProp_(PROP.WATCH_NEXT_CHECK), odooModels: getToolConfig_().odooAllowedModels };
+  let health = null;
+  try { health = watcherStatus_({ store: { list: () => watchers } }).health; } catch (err) { /* 忽略 */ }
+  return { watchers: watchers.map(publicWatcher_), types: WATCHER_TYPES.slice(), nextCheck: getProp_(PROP.WATCH_NEXT_CHECK), lastScan: getProp_(PROP.WATCH_LAST_SCAN), health, odooModels: getToolConfig_().odooAllowedModels };
 }
 
 /**

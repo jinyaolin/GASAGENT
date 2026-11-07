@@ -554,7 +554,7 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 | 群組 | **先關 bot 的隱私模式**：Telegram 預設的隱私模式下，群組裡 `@bot …` 的一般訊息**根本不會送到 bot**（只有 /指令、回覆 bot 的訊息會到），所以 @bot 沒反應。到 **@BotFather → `/setprivacy` → 選 bot → Disable**，然後把 bot 退出群組再加回來（或把 bot 設成群組管理員，管理員永遠收得到全部訊息）。`/group` 指令與 Doctor（`tg_privacy`）會用 `getMe` 的 `can_read_all_group_messages` 檢查並提醒。<br>把 bot 加進群組後，只在 **@bot、回覆 bot 的訊息、或 /指令** 時反應（私聊不變）。回覆會掛在觸發的那則訊息下。白名單成員在群組裡用 `/group` 切模式（`/group` 看狀態）：<br>• `/group on` **群聊模式**（Config `telegram_open_groups`）：全群共用一個 session，任何成員 @bot 都能請 agent 幫忙；但**非白名單成員觸發的那一輪**是 principal `group_member`（M7-A，見「安全」）：只能用 Config `telegram_member_toolsets`（預設 `web` / `skill` / `session`）的讀取工具，owner 的 Gmail / Drive / Docs / Sheets / Slides / Calendar **一律不可讀**（連工具清單都看不到；被擋時回覆末尾附一句中性說明），`memory` / `cronjob` 永遠不開放；R 以外的工具（寫入 / 刪除 / 寄信 / 分享）一律送 owner 審批（審批按鈕任何人看得到，按下仍要過白名單）、不注入 owner 的記憶快照、不 curation 不自動提案；成員的 /指令忽略，附件照常存 Drive。owner 可在管理頁「通道」逐 toolset 放寬（Doctor 會提醒放寬了 Workspace）<br>• `/group guest` **訪客模式**（Config `telegram_guest_groups`）：非白名單成員獨立 session（`external_id = <chat id>:guest`）、RBAC 全關沒有任何工具、不注入記憶與技能；訪客的 /指令與附件不處理<br>• `/group off` 只有白名單成員叫得到<br>bot 的 username 由 `getMe` 取得存 Config `telegram_bot_username` |
 | 附件 | 傳照片 / PDF / 文件 / 語音（Bot API 下載上限 20 MB）→ webhook 用 `getFile` 下載存到 Drive `GAS Agent/attachments/telegram/`，訊息 = caption（沒有就預設「請看這個附件…」）+ 附件註記（名稱、類型、`file_id`、網址），agent 用 `drive_read_text`（PDF **與圖片**走 Drive OCR）、`drive_move` / `drive_rename` 歸檔、`gmail_send` / `gmail_create_draft` 的 `attachment_file_ids` 轉寄。全部附件存檔失敗才回錯誤不排隊。目前是 OCR 文字理解，不是視覺模型看圖（多模態輸入留 M7） |
 | 審批通知 | Config `telegram_notify_approvals`（預設開）：**聊天台 / Email / 排程**的任務停在審批時，也推一則帶「批准 / 拒絕」按鈕的訊息到 owner 的 Telegram（來源、工具、參數摘要、session）；從 Telegram 批准後 agent 的續跑回覆仍回到原通道（Email 回信、排程投遞）。Telegram 自己來的任務回覆本身就有按鈕，不重複推 |
-| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）—— 三者只有白名單成員能用、異動記 AuditLog；`/stats [天數]`（使用分析，見下）、`/help`；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
+| 指令 | `/new`（關閉目前 session 開新的，可直接接訊息）、`/status`、`/model [provider id \| auto]`（這個 session 的模型）、`/skills`、`/white [list \| add <email…> \| delete <email…>]`（寄信白名單）、`/web [list \| add <域名…> \| delete <域名…>]`（`web_fetch` 域名白名單）、`/owner [list \| <email> [passkey] \| delete <email>]`（Email 委託寄件者，見下）—— 三者只有白名單成員能用、異動記 AuditLog；`/stats [天數]`（使用分析，見下）、`/help`；`/status` 除了 session 也列 Email 指令信是否啟用與事件監看健康狀態（上次掃描 / 下次 / 逾期），旗標失效會順手修好；其他 `/xxx`（例 `/weekly-report`）原樣交給 agent，走 M5 的技能注入 |
 | 設定 | 管理頁「通道」：bot token（只進 Script Property `TELEGRAM_BOT_TOKEN`，顯示末 4 碼；「更換 token」先 getMe 驗證才寫入）、白名單 user id、部署 B 網址、secret（儲存時自動產生；「重新產生 secret」會自動重登 webhook）、群聊模式成員可用的 toolset、「設定 webhook」「查 webhook 狀態」「移除 webhook」「送測試訊息」。Config：`telegram_enabled` / `telegram_allowed_user_ids` / `telegram_webhook_url` / `telegram_owner_chat_id`（第一次收到白名單訊息時自動記下，`deliver_to=telegram` 用） |
 
 ### Email 指令信
@@ -563,10 +563,10 @@ toolset 叫 **`skill`**（不是 skills）：registry 要求工具名以 `<tools
 |---|---|
 | 觸發 | 寄件者 = `OWNER_EMAIL`（自己寄給自己）且 thread 貼有 Gmail 標籤 `agent/inbox`（Config `email_inbox_label`；可在 Gmail 設篩選器自動貼標，例如 `from:me to:me subject:[agent]`） |
 | 委託寄件者 | Telegram `/owner <email> [passkey]`（或管理頁「通道 → 委託寄件者」）登記別人的信箱：這個 email 寄來、**主旨或內文含 passkey** 的信，去掉 passkey 後等同 owner 的指令排進 Queue（payload `email_delegate`），回覆回同一 thread（對方收到）。passkey 只存 Script Property `EMAIL_DELEGATE_KEYS`（JSON `{email: passkey}`），列表與 AuditLog 都不顯示；不給 passkey 會自動產生 12 碼、只顯示一次。沒帶 passkey 的信一律不理、不加星（From 可偽造，passkey 才是驗證）。不要求標籤（對方貼不到你的標籤）；`/owner delete <email>` 移除 |
-| 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`（每位委託寄件者另搜 `from:<email> newer_than:7d -is:starred`），每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
+| 掃描 | Script Property `EMAIL_NEXT_SCAN` 記下次掃描時間（Config `email_scan_every_minutes`，預設 5）；`queueTick` 閒置時連同 `QUEUE_DIRTY` / `CRON_NEXT_RUN` 一起看，沒到就不開 Gmail。到期 `GmailApp.search('label:agent/inbox from:<owner> newer_than:7d -is:starred')`（每位委託寄件者另搜 `from:<email> newer_than:7d -is:starred`），每個 thread 裡 owner 寄的、未加星、不是 agent 回覆（顯示名稱 = Config `email_sender_name`，預設 `GAS Agent`）的訊息各排一個 `turn` job，**排完立刻加星（★ = 已處理）** |
 | 內文 | 去掉 `>` 引用、`On … wrote:` 之後、`-- ` 簽名檔，截 8000 字；內文全是引用就用主旨 |
-| 回覆 | `thread.reply(text, {name:'GAS Agent'})` 進同一 thread，寄件者是 owner 本人；送出後把自己的回覆加星避免被當成指令。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕）；Telegram 通道開著時會同時推帶按鈕的 Telegram 通知，回信會標「也已推到 Telegram」 |
-| 設定 | 管理頁「通道」：啟用、標籤、掃描間隔、「建立標籤」「立刻掃一次」 |
+| 回覆 | `thread.reply(text, {name: <email_sender_name>})` 進同一 thread，寄件者是 owner 本人、顯示名稱為 Config `email_sender_name`（預設 `GAS Agent`；掃描時也靠這個名稱認出 agent 自己的回覆，別設成跟自己一樣）；送出後把自己的回覆加星避免被當成指令。**這輪沒有文字結果、也沒有待審批 / 續跑 / 技能提案要講時不回信**（Queue job 的 `delivery.summary` 會寫「未回覆」）。待審批的動作在回信裡說明到管理頁批准（Email 沒有按鈕）；Telegram 通道開著時會同時推帶按鈕的 Telegram 通知，回信會標「也已推到 Telegram」 |
+| 設定 | 管理頁「通道」：啟用、標籤、掃描間隔、回覆的寄件者名稱、「建立標籤」「立刻掃一次」。**`email_enabled` 必須開著**：委託寄件者（`/owner`）的信也是這個掃描在處理，關掉就全部不理（`/owner` 與 `/status` 會提醒） |
 
 Doctor 加：Telegram 啟用時 token / 白名單 / webhook 是否登記且指向設定的部署 B（含 Telegram 回報的待處理數與最後錯誤）；Email 啟用時標籤存在、掃描旗標已設。
 
@@ -651,7 +651,7 @@ M7-A 補的檢查：`use_account` 拒絕 `clasp.json` 與 `deploy.json` scriptId
 
 ### 事件觸發（watchers）
 
-`Watchers` tab（[Watchers.gs](src/Watchers.gs)）每個 watcher 一列：來源 `type` + `config`、任務 `prompt`、`deliver_to`、`every_minutes`、`cursor`（上次看到哪裡）。每分鐘 trigger 只看 Script Property `WATCH_NEXT_CHECK`，到期才開 sheet 檢查到期的 watcher；有新事件就各 enqueue 一個 `watch` job（新 session、channel `watch`、無人模式），事件資料以 `<<tool_result name=watcher_event … untrusted>>` 區塊接在 prompt 後面，結果依 `deliver_to` 投遞。
+`Watchers` tab（[Watchers.gs](src/Watchers.gs)）每個 watcher 一列：來源 `type` + `config`、任務 `prompt`、`deliver_to`、`every_minutes`、`cursor`（上次看到哪裡）。**沒有每個 watcher 一支的 trigger**：唯一的每分鐘 trigger（`queueTick`）只看 Script Property `WATCH_NEXT_CHECK`（最早的 `next_check`，但最晚不超過 10 分鐘後，就算沒有啟用的 watcher 也一樣，所以直接在 sheet 改 `enabled` / `every_minutes` 最多 10 分鐘內生效），到期才開 sheet 檢查到期的 watcher；`WATCH_LAST_SCAN` 記上次真的掃描的時間。**怎麼確認它在跑**：Telegram `/status`、Doctor「Watchers 監看在跑」、管理頁「排程 / 事件」頂端狀態列都會顯示「監看 N / M 個啟用；上次掃描 …；下次 …」，有 enabled 的 watcher `next_check` 落後超過 max(2 × every_minutes, 5) 分鐘會標 ⚠ 逾期、旗標失效會標 ⚠ 並**當場重設**（下一分鐘補掃）。有新事件就各 enqueue 一個 `watch` job（新 session、channel `watch`、無人模式），事件資料以 `<<tool_result name=watcher_event … untrusted>>` 區塊接在 prompt 後面，結果依 `deliver_to` 投遞。
 
 | type | config | 事件 | cursor |
 |---|---|---|---|
@@ -762,6 +762,9 @@ node scripts/local-tests.js
 | 「排程 / 事件」分頁報 `DB 缺少 tab「Watchers」` | 新版本加了 tab：Doctor 分頁按「重新安裝」（或編輯器執行 `installAgent()`） |
 | Telegram 回覆了提問但 agent 沒續跑 | 要「回覆」bot 的那則 ❓ 訊息（Telegram 的 Reply），或用 `/answer <q_id> <回答>`；一般訊息會當成新任務。管理頁「紀錄 → 審批」也能回答 |
 | watcher 建好後既有的信 / 檔沒觸發 | 刻意的：建立時只記 cursor（baseline），只對之後的新事件反應；要測就寄一封新的 |
+| watcher `enabled=TRUE` 但 `last_check` / `cursor` 不動、Queue 沒有 `watch` job（Cron 照常） | 舊版（2026-11-07 前）全部 watcher 停用時會清空 `WATCH_NEXT_CHECK`，之後**直接在 sheet** 把 `enabled` 改回 TRUE 不會重算旗標，`queueTick` 就不再開 Watchers tab。新版旗標永遠有值（最多 10 分鐘重掃一次），而且旗標空會被 `queueTick` 當成到期、下一分鐘就自動補掃寫回；要立刻確認就用 Telegram `/status`、Doctor 或開「排程 / 事件」分頁，三者都會顯示健康狀態並重設旗標。直接改表啟用不會重做 baseline，cursor 之後累積的事件會被撿起來（一次最多 5 件，每 `every_minutes` 再撿） |
+| Email 回信「（這輪沒有文字結果）」或 Telegram 回「系統中止：模型輸出撞到 max_tokens」 | 模型 reasoning 把 `max_tokens` 吃完、沒吐文字（GLM `reasoning_effort` 設 high / max 時常見；Usage tab 那幾輪 `completion_tokens` ≈ provider `max_tokens`）。到「模型」調高 `max_tokens`（例 10000+）或把 `extra_body` 的 `reasoning_effort` 改 `"low"` / `"medium"`。新版沒文字就不回信，撞上限會給說明而不是空白 |
+| /owner 委託者帶 passkey 的信沒被處理 | 先看 Config `email_enabled`：Email 指令信掃描關著就連委託者的信都不掃（`/status` 會顯示）；再確認 passkey 在主旨或內文、對方 From 就是登記的 email、信未加星 |
 | `sheets_copy_sheet` 失敗 | 來源試算表若設「禁止下載、列印、複製」會被擋；複製後出現 `#REF!` 是公式引用了來源的其他工作表 |
 | 聊天台說某工具「目前未開放」/ 步驟顯示「RBAC 拒絕」 | 該 toolset 的對應開關關著（預設 external 全關）。到「工具」分頁開啟並儲存；Doctor 若說「缺 rbac」就按「重新安裝」 |
 | `web_fetch` 回「白名單是空的」 | 到「工具」分頁填 `web_fetch 域名白名單`（一行一個） |

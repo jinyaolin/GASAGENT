@@ -36,8 +36,10 @@ const PROP = Object.freeze({
   TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
   /** M6：Email 指令信下次掃描時間（ISO）；空 = 停用。queueTick 閒置時連同另兩個旗標一起看。 */
   EMAIL_NEXT_SCAN: 'EMAIL_NEXT_SCAN',
-  /** M7-B：最早到期的 watcher 檢查時間（ISO）；空 = 沒有啟用的 watcher。 */
+  /** M7-B：最早到期的 watcher 檢查時間（ISO），上限 now + WATCH_IDLE_RESCAN_MINUTES；永遠有值（直接改表也會被撿到）。 */
   WATCH_NEXT_CHECK: 'WATCH_NEXT_CHECK',
+  /** M7-B：上次真的開 Watchers tab 掃描的時間（ISO）；Doctor / /status 用來判斷監看有沒有在跑。 */
+  WATCH_LAST_SCAN: 'WATCH_LAST_SCAN',
   /** 委託寄件者（Telegram /owner）：JSON {email: passkey}。只在 Script Properties，管理頁與 Telegram 只列 email。 */
   EMAIL_DELEGATE_KEYS: 'EMAIL_DELEGATE_KEYS',
   /** 各 provider 的 API key 以 `PROVIDER_KEY_<id>` 存放（見 Providers.gs），不在此列舉。 */

@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -707,9 +707,18 @@ function handleTelegramUpdate_(rawUpdate, deps) {
     send(report.text); report.action = 'new'; return report;
   }
   if (cmd.command === 'status') {
-    report.text = current
+    const lines = [current
       ? `session ${current.id}：${current.turns} 輪，約 ${current.token_est} tokens，模型 ${current.model_override || '自動（main 備援鏈）'}，上次活動 ${fmtDate_(current.last_active)}。`
-      : '目前沒有 session，送出第一則訊息就會建立。';
+      : '目前沒有 session，送出第一則訊息就會建立。'];
+    // 系統狀態：Email 指令信 / 監看有沒有在跑（旗標失效會當場修好）
+    lines.push(`Email 指令信：${deps.cfg.emailEnabled ? `啟用（每 ${deps.cfg.emailScanEveryMinutes} 分鐘掃一次，含 /owner 委託者）` : '未啟用（/owner 委託者的信也不會處理；管理頁「通道」勾啟用）'}`);
+    try {
+      const ws = (deps.watcherStatus || watcherStatus_)();
+      lines.push(`事件監看：${ws.health.text}`);
+    } catch (err) {
+      lines.push(`事件監看：讀不到（${err && err.message || err}）`);
+    }
+    report.text = lines.join('\n');
     send(report.text); report.action = 'status'; return report;
   }
   if (cmd.command === 'model') {

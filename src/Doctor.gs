@@ -204,6 +204,15 @@ function runDoctor() {
     } catch (err) {
       push('queue', 'Queue / 排程健檢', 'fail', String(err && err.message || err));
     }
+    // M7-B：watchers 有沒有在跑（旗標失效會當場重設；逾期 = enabled 但 next_check 落後太久）
+    try {
+      const ws = watcherStatus_();
+      const h = ws.health;
+      push('watchers', 'Watchers 監看在跑（WATCH_NEXT_CHECK 旗標有效、沒有逾期的 watcher）', h.overdue.length ? 'warn' : 'ok',
+        h.text + (ws.repaired ? '' : '') + (h.overdue.length ? '。逾期多半是旗標失效或 trigger 停過；旗標已對齊，下一分鐘 queueTick 會補掃，幾分鐘後再按一次 Doctor 應轉綠。' : ''));
+    } catch (err) {
+      push('watchers', 'Watchers 監看在跑', 'warn', String(err && err.message || err));
+    }
   }
 
   // 11. 技能（M5）：Config skills_folder_id 有效、資料夾可讀、每個 SKILL.md 可解析
