@@ -18,7 +18,8 @@
  * 只有白名單（owner）能 `/upgrade`；審批訊息顯示 commit；檔案 hash 必須和 release.json 一致；新版多要 OAuth scope 時拒絕自動升級
  * （trigger 會因未授權而失敗），要維護者用 deploy.sh 推並在編輯器重新授權。
  *
- * 前置（每個帳號一次）：manifest 要有 script.projects / script.deployments 兩個 scope（已列在 appsscript.json）；
+ * 前置（每個帳號一次）：manifest 要有 script.projects / script.deployments 兩個 scope，以及進階服務 Script（讓 Apps Script 替預設 GCP 專案
+ * 開啟 script.googleapis.com；沒有會 403「has not been used in project …」）——兩者都已在 appsscript.json；
  * 帳號主人到 https://script.google.com/home/usersettings 打開「Google Apps Script API」。Doctor「程式升級」會檢查。
  */
 
@@ -355,7 +356,10 @@ function scriptApi_(deps) {
 function scriptApiErrorMessage_(code, text) {
   let msg = '';
   try { const o = JSON.parse(text); msg = String(o.error && o.error.message || ''); } catch (err) { msg = String(text || '').slice(0, 300); }
-  if (code === 403 && /Apps Script API has not been used|has not enabled the Apps Script API|not enabled|PERMISSION_DENIED/i.test(msg + text)) {
+  if (code === 403 && /has not been used in project|is disabled/i.test(msg)) {
+    return `這個 Apps Script 專案背後的 GCP 專案沒開 Apps Script API：manifest 要有進階服務 Script（appsscript.json dependencies.enabledAdvancedServices，v0.8.1 起已內建；舊版請用 deploy.sh 重推或在編輯器「服務 +」加 Apps Script API）。原始訊息：${msg.slice(0, 160)}`;
+  }
+  if (code === 403 && /has not enabled the Apps Script API|not enabled|PERMISSION_DENIED/i.test(msg + text)) {
     return `Apps Script API 尚未啟用或沒權限：請帳號主人到 ${SCRIPT_API_ENABLE_URL} 打開「Google Apps Script API」（Workspace 帳號可能要管理員允許），然後重新授權一次（編輯器執行 installAgent()）。原始訊息：${msg.slice(0, 200)}`;
   }
   if (code === 401) return `Apps Script API 拒絕 token（401）：manifest 可能還沒有 script.projects / script.deployments scope，請在編輯器執行 installAgent() 重新授權。${msg.slice(0, 200)}`;
