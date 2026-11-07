@@ -311,6 +311,28 @@ function runDoctor() {
 }
 
 /**
+ * Doctor 結果 → 純文字（Telegram /doctor 用）。純函式。失敗、提醒各列細節，通過的只列數量（showOk 時列名稱）。
+ * @param {{ok: boolean, version: string, checks: !Array<DoctorCheck>}} result
+ * @param {{showOk: (boolean|undefined), detailChars: (number|undefined)}=} opts
+ * @return {string}
+ */
+function doctorSummaryText_(result, opts) {
+  opts = opts || {};
+  const checks = result.checks || [];
+  const fails = checks.filter((c) => c.status === 'fail');
+  const warns = checks.filter((c) => c.status === 'warn');
+  const oks = checks.filter((c) => c.status === 'ok');
+  const limit = opts.detailChars || 300;
+  const cut = (text) => { const t = truncateText_(text, limit); return t.truncated ? t.text + '…' : t.text; };
+  const item = (icon, c) => `${icon} ${c.label}${c.detail ? '\n    ' + cut(String(c.detail).replace(/\s*\n\s*/g, ' ')) : ''}`;
+  const lines = [`Doctor ${result.ok ? (warns.length ? '🟡' : '✅') : '❌'} ${fails.length} 失敗、${warns.length} 提醒、${oks.length} 通過（v${result.version || '?'}）`];
+  if (fails.length) lines.push('', ...fails.map((c) => item('❌', c)));
+  if (warns.length) lines.push('', ...warns.map((c) => item('⚠', c)));
+  if (oks.length) lines.push('', opts.showOk ? `✅ 通過：${oks.map((c) => c.label).join('；')}` : `✅ ${oks.length} 項通過（/doctor all 看全部）`);
+  return lines.join('\n');
+}
+
+/**
  * 以目前 OAuth token 查 tokeninfo，取得實際授權的 scopes。
  * @return {{granted: !Array<string>, error: string}}
  */

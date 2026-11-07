@@ -44,7 +44,7 @@ const TELEGRAM_ATTACHMENT_FOLDER_PATH = Object.freeze(['GAS Agent', 'attachments
 /** 只有附件、沒有 caption 時給 agent 的訊息。 */
 const TELEGRAM_ATTACHMENT_DEFAULT_MESSAGE = '請看這個附件，說明內容重點；若明顯是收據、合約、名片之類的文件，順便建議怎麼歸檔。';
 /** Telegram 專用的保留指令（其餘 /xxx 交給 runSessionTurn_，例如 /<技能名>）。 */
-const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'email', 'answer', 'approve', 'deny', 'pending', 'stats']);
+const TELEGRAM_COMMANDS = Object.freeze(['start', 'help', 'new', 'status', 'model', 'skills', 'group', 'white', 'web', 'owner', 'email', 'doctor', 'answer', 'approve', 'deny', 'pending', 'stats']);
 /** /approve 清單一次最多列幾筆（每筆兩個按鈕；Telegram inline keyboard 不宜太長）。 */
 const TELEGRAM_PENDING_MAX = 10;
 /** 訪客在群組只 @bot 沒說話時的訊息。 */
@@ -603,7 +603,7 @@ function handleTelegramUpdate_(rawUpdate, deps) {
 
   if (cmd.command === 'start' || cmd.command === 'help') {
     const lines = ['GAS Agent 已連線。直接輸入任務即可，例如「找出本週收到關於 X 的信並整理成 Doc」。', '',
-      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
+      '/new — 開新對話（session）', '/status — 目前 session、Email 指令信與事件監看是否在跑', '/model [provider id] — 查看 / 指定這個 session 用的模型', '/skills — 列出可用技能；/<技能名> 訊息 直接套用技能', '/white [list | add <email> | delete <email>] — 寄信白名單：收件人全在名單內的信免審批直接寄（*@domain.com 代表整個網域）', '/web [list | add <域名> | delete <域名>] — web_fetch 可抓的域名白名單（*.example.com 含子網域）', '/owner [list | <email> [passkey] | delete <email>] — 委託寄件者：這個 email 寄來、主旨或內文含 passkey 的信等同你的指令排進 Queue（passkey 不給就自動產生）', '/email [on | off | name <名稱> | every <分鐘>] — Email 指令信：看狀態、啟用 / 停用掃描（委託者的信也靠它）、回覆的寄件者名稱、掃描間隔', '/doctor [all | reinstall] — 健檢（預設只列失敗與提醒；all 全列）；reinstall = 管理頁「重新安裝」：補 tab / trigger / 設定預設值再健檢', '/approve — 列出所有待審批的動作（附批准 / 拒絕按鈕）與待回答的提問；/approve <id>、/deny <id> 直接決定', '/answer [q_id] <回答> — 回答 agent 在排程 / 事件任務中提出的問題（直接「回覆」那則問題訊息也可以）', '/stats [天數] — 使用分析：步數 / 時間預算是否撞到上限、模型與工具失敗率、調整建議（預設近 7 天）', '/help — 這份說明',
       '', '也可以直接傳照片 / PDF / 文件（≤ 20 MB），會先存進 Drive「GAS Agent/attachments/telegram」，caption 當指令（例：「這是收據，歸到 2026 報帳」「摘要這份合約並寄給我」）。',
       '', '群組：把 bot 加進群組後，只在 @bot、回覆 bot 或 /指令時反應。/group on 群聊模式（成員只能用公開工具如網頁 / 技能，看不到 owner 的 Gmail / Drive / 行事曆；寫入送 owner 審批）、/group guest 訪客模式（成員無工具）、/group off 關閉。',
       '', '待審批的動作會附「批准 / 拒絕」按鈮；其餘設定在管理頁。'];
@@ -676,6 +676,34 @@ function handleTelegramUpdate_(rawUpdate, deps) {
   if (cmd.command === 'email') {
     report.text = telegramEmailCommand_(cmd.rest, u, deps);
     send(report.text); report.action = 'email'; return report;
+  }
+  if (cmd.command === 'doctor') {
+    const sub = String(cmd.rest || '').trim().toLowerCase();
+    const parts = [];
+    report.action = 'doctor';
+    if (sub === 'reinstall') {
+      // 與管理頁「重新安裝」同一支 installAgent()：補 tab / 欄位、trigger、Config 預設值、旗標；幂等
+      report.action = 'doctor_reinstall';
+      try {
+        const r = deps.reinstall ? deps.reinstall() : installAgent();
+        const sch = r.schema || {};
+        parts.push(`🔧 已重新安裝（v${r.version || '?'}）：tab ${(sch.createdTabs || []).length ? '新增 ' + sch.createdTabs.join(', ') : '齊全'}；trigger ${r.trigger && r.trigger.created ? '已補' : '正常'}${r.trigger && r.trigger.removedDuplicates ? `（清掉 ${r.trigger.removedDuplicates} 支重複）` : ''}；Config 補 ${(r.toolConfig && r.toolConfig.addedKeys || []).length} 個預設值。接著跑一次 Doctor：`, '');
+        securityAudit_('reinstall', `Telegram user ${u.userId}${u.username ? ' @' + u.username : ''} 透過 /doctor reinstall 重新安裝`, deps.audit);
+      } catch (err) {
+        parts.push(`🔧 重新安裝失敗：${err && err.message || err}`, '');
+      }
+    } else if (sub && sub !== 'all') {
+      report.text = '用法：/doctor — 健檢（只列失敗與提醒）\n/doctor all — 連通過的也列\n/doctor reinstall — 補 tab / trigger / 設定預設值後再健檢（與管理頁「重新安裝」相同；不會重建 DB、不會動既有資料）';
+      send(report.text); return report;
+    }
+    try {
+      const result = deps.doctor ? deps.doctor() : runDoctor();
+      parts.push(doctorSummaryText_(result, { showOk: sub === 'all' }));
+    } catch (err) {
+      parts.push(`健檢失敗：${err && err.message || err}`);
+    }
+    report.text = parts.join('\n');
+    send(report.text); return report;
   }
   if (TELEGRAM_LIST_COMMANDS[cmd.command]) {
     report.text = telegramListCommand_(cmd.command, cmd.rest, u, deps);
@@ -963,7 +991,7 @@ function telegramWebhook_(e) {
   } catch (err) {
     report = { action: 'error', reason: String(err && err.stack || err && err.message || err) };
   }
-  if (report && ['enqueued', 'help', 'status', 'answered', 'pending_list', 'stats'].indexOf(report.action) === -1) {
+  if (report && ['enqueued', 'help', 'status', 'answered', 'pending_list', 'stats', 'doctor'].indexOf(report.action) === -1) {
     try {
       appendTableRow_('AuditLog', { ts: new Date(), session_id: report.sessionId || '', tool: 'telegram:webhook', args_preview: report.action, result_preview: truncateText_(report.reason || report.text || '', AUDIT_PREVIEW_CHARS).text, ok: report.action !== 'error' && report.action !== 'rejected', ms: 0 });
     } catch (err) { /* 忽略 */ }

@@ -3692,6 +3692,28 @@ function testEmailDelegates_() {
   f.deps.saveChannel = () => { throw new Error('boom'); };
   assert_(/存檔失敗：boom/.test(t('/email on').text), '存檔失敗回錯誤');
   delete f.deps.saveChannel;
+  // Telegram /doctor：摘要文字；all 列通過；reinstall 走注入的 installAgent 再健檢；AuditLog security:reinstall
+  const docResult = { ok: false, version: '9.9', checks: [
+    { id: 'a', label: 'A 通過', status: 'ok', detail: 'x' }, { id: 'b', label: 'B 失敗', status: 'fail', detail: '第一行\n  第二行很長'.padEnd(400, '.') }, { id: 'c', label: 'C 提醒', status: 'warn', detail: '' }] };
+  const dtxt = doctorSummaryText_(docResult, { detailChars: 50 });
+  assert_(/^Doctor ❌ 1 失敗、1 提醒、1 通過（v9.9）/.test(dtxt) && /❌ B 失敗\n    第一行 第二行很長\.+…/.test(dtxt) && /⚠ C 提醒\n/.test(dtxt) && /✅ 1 項通過（\/doctor all 看全部）/.test(dtxt), 'doctor 摘要：' + dtxt);
+  assert_(/✅ 通過：A 通過/.test(doctorSummaryText_(docResult, { showOk: true })), 'showOk 列名稱');
+  assert_(/^Doctor ✅ 0 失敗、0 提醒、1 通過/.test(doctorSummaryText_({ ok: true, version: '1', checks: [docResult.checks[0]] })), '全綠');
+  assert_(/^Doctor 🟡 0 失敗、1 提醒/.test(doctorSummaryText_({ ok: true, version: '1', checks: [docResult.checks[2]] })), '只有提醒 → 🟡');
+  let doctorCalls = 0; let reinstalled = 0;
+  f.deps.doctor = () => { doctorCalls++; return docResult; };
+  f.deps.reinstall = () => { reinstalled++; return { version: '9.9', schema: { createdTabs: ['Watchers'] }, trigger: { created: false, removedDuplicates: 1 }, toolConfig: { addedKeys: ['email_sender_name'] } }; };
+  e = t('/doctor');
+  assert_(e.action === 'doctor' && doctorCalls === 1 && /^Doctor ❌/.test(e.text), '/doctor：' + e.text.slice(0, 40));
+  e = t('/doctor all');
+  assert_(/✅ 通過：A 通過/.test(e.text), '/doctor all');
+  e = t('/doctor reinstall');
+  assert_(e.action === 'doctor_reinstall' && reinstalled === 1 && doctorCalls === 3 && /已重新安裝（v9.9）：tab 新增 Watchers；trigger 正常（清掉 1 支重複）；Config 補 1 個預設值/.test(e.text) && /\nDoctor ❌/.test(e.text), '/doctor reinstall：' + e.text.slice(0, 120));
+  assertEqual_(f.audits[f.audits.length - 1].tool, 'security:reinstall', 'reinstall 記 AuditLog');
+  assert_(/用法：\/doctor/.test(t('/doctor foo').text) && doctorCalls === 3, '壞子指令只回用法');
+  f.deps.reinstall = () => { throw new Error('沒權限'); };
+  assert_(/重新安裝失敗：沒權限/.test(t('/doctor reinstall').text) && doctorCalls === 4, 'reinstall 失敗仍跑健檢');
+  delete f.deps.doctor; delete f.deps.reinstall;
   f.deps.cfg = parseChannelConfig_({ telegram_enabled: 'TRUE', telegram_allowed_user_ids: '111, 222', telegram_owner_chat_id: '111', email_enabled: 'TRUE' });
   let r = t('/owner');
   assert_(r.action === 'owner' && /目前沒有委託寄件者/.test(r.text) && /\/owner <email> \[passkey\]/.test(r.text), '/owner = list：' + r.text);
