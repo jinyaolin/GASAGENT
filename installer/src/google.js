@@ -51,7 +51,7 @@ async function postForm(url, form, fetchFn) {
 async function exchangeCode(o, fetchFn) {
   const r = await postForm(TOKEN_URL, { code: o.code, client_id: o.clientId, client_secret: o.clientSecret, redirect_uri: o.redirectUri, grant_type: 'authorization_code' }, fetchFn || fetch);
   if (r.status !== 200 || !r.json || !r.json.access_token) throw new Error(`Google 換 token 失敗（HTTP ${r.status}）：${r.json && (r.json.error_description || r.json.error) || r.text.slice(0, 200)}`);
-  if (!r.json.refresh_token) throw new Error('Google 沒有給 refresh token：請到 https://myaccount.google.com/permissions 移除「GAS Agent Installer」後重新授權。');
+  if (!r.json.refresh_token) throw new Error('Google 沒有給 refresh token：請到 https://myaccount.google.com/permissions 移除「GAS Agent」後重新授權。');
   const scopes = String(r.json.scope || '').split(/\s+/);
   const missing = SCOPES.slice(0, 2).filter((s) => scopes.indexOf(s) === -1);
   if (missing.length) throw new Error(`授權時沒有勾選必要權限：${missing.join('、')}。請重新授權並全部允許。`);

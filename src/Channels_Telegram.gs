@@ -972,7 +972,7 @@ function telegramUpgradeCommand_(rest, u, deps) {
   if (sub === 'status') { out.text = upgradeStatusText_(status()); return out; }
   if (sub === 'login') {
     const url = deps.upgradeLoginUrl ? deps.upgradeLoginUrl() : upgradeLoginUrl_();
-    out.text = `🔐 升級授權（一次性）：\n1. 用這個 Google 帳號打開 ${url}\n2. 同意「GAS Agent Installer」存取你的 Apps Script 專案（只要 script.projects / script.deployments 兩項；未驗證警告按「進階 → 繼續」）\n3. 頁面會給一組取件碼，回來輸入 /upgrade code <取件碼>（24 小時內有效）\n事先確認 https://script.google.com/home/usersettings 的「Google Apps Script API」是開的。`;
+    out.text = `🔐 升級授權（一次性）：\n1. 用這個 Google 帳號打開 ${url}\n2. 同意「GAS Agent」存取你的 Apps Script 專案（只要 script.projects / script.deployments 兩項；未驗證警告按「進階 → 繼續」）\n3. 頁面會給一組取件碼，回來輸入 /upgrade code <取件碼>（24 小時內有效）\n事先確認 https://script.google.com/home/usersettings 的「Google Apps Script API」是開的。`;
     out.action = 'upgrade_login'; return out;
   }
   if (/^code\b/.test(sub)) {

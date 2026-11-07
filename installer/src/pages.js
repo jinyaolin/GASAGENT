@@ -37,7 +37,7 @@ function landing(o) {
 <div class="card">
 <ol>
 <li>先到 <a href="${esc(USERSETTINGS_URL)}" target="_blank" rel="noopener">Apps Script 使用者設定</a> 把「Google Apps Script API」打開（Google 只讓本人開）。</li>
-<li>按下面的按鈕，用要安裝的 Google 帳號登入並允許「存取你的 Apps Script 專案」。會看到「Google 尚未驗證這個應用程式」，按「進階 → 前往 GAS Agent Installer」繼續。</li>
+<li>按下面的按鈕，用要安裝的 Google 帳號登入並允許「存取你的 Apps Script 專案」。會看到「Google 尚未驗證這個應用程式」，按「進階 → 前往 GAS Agent」繼續。</li>
 <li>安裝完成會給你管理頁網址與一組取件碼，照頁面上的步驟完成授權與設定。</li>
 </ol>
 <a class="btn" href="${esc(o.baseUrl)}/install/start">用 Google 登入並安裝</a>
